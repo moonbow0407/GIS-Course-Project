@@ -31,7 +31,6 @@ class RightPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._tabs = QTabWidget()
-        self._tabs.setObjectName("rightPanelTabs")
         self._attribute_table = QTableWidget()
         self._empty_label = QLabel("当前未选择要素")
         self._create_ui()
@@ -84,7 +83,7 @@ class RightPanel(QWidget):
         layout.addWidget(title)
         layout.addWidget(self._empty_label)
         layout.addWidget(self._attribute_table)
-        self._tabs.addTab(tab, "属性")
+        self._tabs.addTab(tab, "属性信息")
 
     def _create_analysis_tab(self) -> None:
         tab = QWidget()
@@ -125,7 +124,7 @@ class RightPanel(QWidget):
         layout.addWidget(group)
         layout.addLayout(button_layout)
         layout.addStretch()
-        self._tabs.addTab(tab, "分析")
+        self._tabs.addTab(tab, "分析参数")
 
     def _connect_signals(self) -> None:
         self._run_button.clicked.connect(self._on_run_buffer_clicked)
