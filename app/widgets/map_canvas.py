@@ -20,6 +20,7 @@ class MapCanvas(QGraphicsView):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("mapCanvas")
         self._scene = QGraphicsScene(self)
         self._tool = "pan"
         self._zoom_level = 0
