@@ -5,6 +5,7 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
     QPushButton,
     QTreeWidget,
@@ -33,11 +34,20 @@ class LayerPanel(QWidget):
 
     def layer_names(self) -> list[str]:
         """返回当前图层顺序。"""
-        return [self._tree.topLevelItem(i).text(0) for i in range(self._tree.topLevelItemCount())]
+        return [
+            item.text(0)
+            for row in range(self._tree.topLevelItemCount())
+            if (item := self._tree.topLevelItem(row)) is not None
+        ]
 
     def _create_ui(self) -> None:
-        title = QLabel("图层管理")
+        title = QLabel("内容")
         title.setObjectName("panelTitle")
+
+        self._search_input = QLineEdit()
+        self._search_input.setObjectName("layerSearchInput")
+        self._search_input.setPlaceholderText("搜索图层")
+        self._search_input.setClearButtonEnabled(True)
 
         self._tree.setHeaderHidden(True)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -61,6 +71,7 @@ class LayerPanel(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
         layout.addWidget(title)
+        layout.addWidget(self._search_input)
         layout.addWidget(self._tree, 1)
         layout.addLayout(button_layout)
 
@@ -68,8 +79,18 @@ class LayerPanel(QWidget):
         self._tree.currentItemChanged.connect(self._on_current_item_changed)
         self._tree.itemChanged.connect(self._on_item_changed)
         self._tree.customContextMenuRequested.connect(self._on_context_menu_requested)
+        self._search_input.textChanged.connect(self._filter_layers)
         self._move_up_button.clicked.connect(self._move_selected_up)
         self._move_down_button.clicked.connect(self._move_selected_down)
+
+    def _filter_layers(self, text: str) -> None:
+        """按名称筛选图层，不改变当前图层顺序。"""
+        keyword = text.casefold().strip()
+        for row in range(self._tree.topLevelItemCount()):
+            item = self._tree.topLevelItem(row)
+            if item is None:
+                continue
+            item.setHidden(bool(keyword) and keyword not in item.text(0).casefold())
 
     def _populate_mock_layers(self) -> None:
         self._updating = True
@@ -88,7 +109,9 @@ class LayerPanel(QWidget):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEditable)
             self._tree.addTopLevelItem(item)
         self._updating = False
-        self._tree.setCurrentItem(self._tree.topLevelItem(1))
+        default_item = self._tree.topLevelItem(1)
+        if default_item is not None:
+            self._tree.setCurrentItem(default_item)
 
     def _legend_icon(self, color: QColor, layer_type: str) -> QIcon:
         pixmap = QPixmap(26, 18)
@@ -194,6 +217,8 @@ class LayerPanel(QWidget):
         if current_row < 0 or current_row == target_row:
             return
         taken = self._tree.takeTopLevelItem(current_row)
+        if taken is None:
+            return
         self._tree.insertTopLevelItem(target_row, taken)
         self._tree.setCurrentItem(taken)
         self.layer_order_changed.emit(self.layer_names())

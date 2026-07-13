@@ -6,6 +6,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QActionGroup, QIcon
 from PySide6.QtWidgets import (
     QFrame,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -13,8 +14,11 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QStyle,
+    QTabWidget,
     QToolBar,
     QToolButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 from app.widgets.layer_panel import LayerPanel
@@ -36,8 +40,7 @@ class MainWindow(QMainWindow):
         self.right_panel = RightPanel()
 
         self._create_actions()
-        self._create_menu_bar()
-        self._create_tool_bar()
+        self._create_workbench_header()
         self._create_central_widget()
         self._create_status_bar()
         self._connect_signals()
@@ -95,7 +98,7 @@ class MainWindow(QMainWindow):
         self,
         key: str,
         text: str,
-        slot: Callable[[], None],
+        slot: Callable[[], object],
         icon: QIcon | None = None,
     ) -> QAction:
         action = QAction(icon or QIcon(), text, self)
@@ -119,67 +122,94 @@ class MainWindow(QMainWindow):
         self._actions[key] = action
         return action
 
-    def _create_menu_bar(self) -> None:
-        menu_bar = self.menuBar()
+    def _create_workbench_header(self) -> None:
+        """创建类似 ArcGIS Pro 的快速访问栏与 Ribbon 功能区。"""
+        self.menuBar().hide()
 
-        file_menu = menu_bar.addMenu("文件")
-        file_menu.addAction(self._actions["open_vector"])
-        file_menu.addAction(self._actions["open_raster"])
-        file_menu.addSeparator()
-        file_menu.addAction(self._actions["save_layer"])
-        file_menu.addAction(self._actions["export_layer"])
-        file_menu.addSeparator()
-        file_menu.addAction(self._actions["exit"])
+        self.quick_access_toolbar = QToolBar("快速访问", self)
+        self.quick_access_toolbar.setObjectName("quickAccessToolBar")
+        self.quick_access_toolbar.setMovable(False)
+        self.quick_access_toolbar.setIconSize(QSize(20, 20))
+        self.quick_access_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.quick_access_toolbar)
+        for key in ["open_vector", "save_layer", "undo", "redo"]:
+            self.quick_access_toolbar.addAction(self._actions[key])
 
-        edit_menu = menu_bar.addMenu("编辑")
-        for key in ["undo", "redo", "add_feature", "delete_feature", "edit_feature", "save_edit"]:
-            edit_menu.addAction(self._actions[key])
+        title = QLabel("GIS桌面通用平台")
+        title.setObjectName("applicationTitle")
+        self.quick_access_toolbar.addWidget(title)
 
-        query_menu = menu_bar.addMenu("查询")
-        for key in ["point_query", "box_query", "attribute_query", "clear_selection"]:
-            query_menu.addAction(self._actions[key])
+        self.ribbon_tabs = QTabWidget()
+        self.ribbon_tabs.setObjectName("ribbonTabs")
+        self.ribbon_tabs.setDocumentMode(True)
+        self.ribbon_tabs.setUsesScrollButtons(False)
+        self._add_ribbon_page("文件", [("文件", ["open_vector", "open_raster", "save_layer", "export_layer"])])
+        self._add_ribbon_page(
+            "编辑",
+            [("编辑", ["undo", "redo", "add_tool", "edit_tool", "delete_feature", "save_edit"])],
+        )
+        self._add_ribbon_page(
+            "地图",
+            [
+                ("导航", ["pan", "zoom_in_tool", "zoom_out_tool", "full_extent"]),
+                ("查询", ["point_select", "box_select", "clear_selection"]),
+                ("编辑", ["add_tool", "edit_tool", "delete_feature"]),
+                ("分析", ["buffer_analysis", "overlay_analysis"]),
+            ],
+        )
+        self._add_ribbon_page("查询", [("选择", ["point_query", "box_query", "attribute_query", "clear_selection"])])
+        self._add_ribbon_page("分析", [("空间分析", ["buffer_analysis", "overlay_analysis", "simplify_line", "smooth_line"])])
+        self._add_ribbon_page("数据库", [("数据源", ["connect_db", "load_db_layer", "import_layer_db", "disconnect_db"])])
+        self._add_ribbon_page("帮助", [("帮助", ["help", "about"])])
 
-        analysis_menu = menu_bar.addMenu("分析")
-        for key in ["buffer_analysis", "overlay_analysis", "simplify_line", "smooth_line"]:
-            analysis_menu.addAction(self._actions[key])
+        ribbon_toolbar = QToolBar("功能区", self)
+        ribbon_toolbar.setObjectName("ribbonToolBar")
+        ribbon_toolbar.setMovable(False)
+        ribbon_toolbar.addWidget(self.ribbon_tabs)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, ribbon_toolbar)
+        self.ribbon_tabs.setCurrentIndex(2)
 
-        database_menu = menu_bar.addMenu("数据库")
-        for key in ["connect_db", "load_db_layer", "import_layer_db", "disconnect_db"]:
-            database_menu.addAction(self._actions[key])
+    def _add_ribbon_page(self, name: str, groups: list[tuple[str, list[str]]]) -> None:
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(0)
+        for title, action_keys in groups:
+            layout.addWidget(self._create_ribbon_group(title, action_keys))
+        layout.addStretch()
+        self.ribbon_tabs.addTab(page, name)
 
-        help_menu = menu_bar.addMenu("帮助")
-        help_menu.addAction(self._actions["help"])
-        help_menu.addAction(self._actions["about"])
-
-    def _create_tool_bar(self) -> None:
-        toolbar = QToolBar("主工具栏", self)
-        toolbar.setObjectName("mainToolBar")
-        toolbar.setMovable(False)
-        toolbar.setIconSize(QSize(24, 24))
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
-
-        for key in ["open_vector", "save_layer", "export_layer"]:
-            toolbar.addAction(self._actions[key])
-        toolbar.addSeparator()
-        for key in ["pan", "zoom_in_tool", "zoom_out_tool", "full_extent", "point_select", "box_select"]:
-            toolbar.addAction(self._actions[key])
-        toolbar.addSeparator()
-        for key in ["add_tool", "delete_feature", "edit_tool"]:
-            toolbar.addAction(self._actions[key])
-        toolbar.addSeparator()
-        toolbar.addAction(self._actions["buffer_analysis"])
-        toolbar.addAction(self._actions["connect_db"])
-
-        for action in toolbar.actions():
-            widget = toolbar.widgetForAction(action)
-            if isinstance(widget, QToolButton):
-                widget.setMinimumWidth(76)
+    def _create_ribbon_group(self, title: str, action_keys: list[str]) -> QWidget:
+        group = QWidget()
+        group.setObjectName("ribbonGroup")
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(10, 0, 10, 0)
+        group_layout.setSpacing(2)
+        actions_layout = QHBoxLayout()
+        actions_layout.setSpacing(2)
+        for key in action_keys:
+            button = QToolButton(group)
+            button.setDefaultAction(self._actions[key])
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            button.setIconSize(QSize(24, 24))
+            button.setMinimumWidth(56)
+            actions_layout.addWidget(button)
+        group_layout.addLayout(actions_layout)
+        label = QLabel(title)
+        label.setObjectName("ribbonGroupTitle")
+        label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        group_layout.addWidget(label)
+        return group
 
     def _create_central_widget(self) -> None:
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.layer_panel)
-        splitter.addWidget(self.map_canvas)
+        self.map_tabs = QTabWidget()
+        self.map_tabs.setObjectName("mapTabs")
+        self.map_tabs.setDocumentMode(True)
+        self.map_tabs.setTabsClosable(True)
+        self.map_tabs.addTab(self.map_canvas, "地图")
+        splitter.addWidget(self.map_tabs)
         splitter.addWidget(self.right_panel)
         splitter.setSizes([240, 900, 320])
         splitter.setStretchFactor(0, 0)

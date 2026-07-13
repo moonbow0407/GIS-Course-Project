@@ -1,5 +1,7 @@
 """中间地图画布组件。"""
 
+from collections.abc import Sequence
+
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
@@ -31,6 +33,7 @@ class MapCanvas(QGraphicsView):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("mapCanvas")
         self._scene = QGraphicsScene(self)
         self._tool = "pan"
         self._zoom_level = 0
@@ -256,7 +259,9 @@ class MapCanvas(QGraphicsView):
         label.setPos(943, 10)
         label.setZValue(31)
 
-    def _path_item(self, coords: list[tuple[float, float]], pen: QPen, z_value: float) -> QGraphicsPathItem:
+    def _path_item(
+        self, coords: Sequence[tuple[float, float]], pen: QPen, z_value: float
+    ) -> QGraphicsPathItem:
         path = QPainterPath(QPointF(*coords[0]))
         for x, y in coords[1:]:
             path.lineTo(x, y)
