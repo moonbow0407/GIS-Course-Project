@@ -1,0 +1,54 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+*.spec
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local runtime files
+*.log
+*.tmp
+*.sqlite
+*.db
+
+# GIS generated data and heavy local datasets
+data/
+sample_data/
+outputs/
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.qix
+*.geojson
+*.gpkg
+*.tif
+*.tiff
+*.img
+*.dem

@@ -1,0 +1,46 @@
+[project]
+name = "gis-desktop-platform"
+version = "0.1.0"
+description = "基于 PySide6 的 GIS 桌面通用平台课程设计项目。"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "PySide6>=6.7",
+    "GeoAlchemy2>=0.14",
+    "Fiona>=1.9",
+    "GeoPandas>=0.14",
+    "NumPy>=1.26",
+    "Pandas>=2.2",
+    "PyInstaller>=6.0",
+    "PyProj>=3.6",
+    "Rasterio>=1.3",
+    "SQLAlchemy>=2.0",
+    "SciPy>=1.11",
+    "Shapely>=2.0",
+    "psycopg[binary]>=3.1",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.2",
+    "ruff>=0.5",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
