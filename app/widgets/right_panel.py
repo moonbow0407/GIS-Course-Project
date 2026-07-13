@@ -2,13 +2,12 @@
 
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QFrame,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -31,11 +30,10 @@ class RightPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("inspectorPanel")
         self._tabs = QTabWidget()
         self._tabs.setObjectName("rightPanelTabs")
         self._attribute_table = QTableWidget()
-        self._empty_state = self._create_empty_state()
+        self._empty_label = QLabel("当前未选择要素")
         self._create_ui()
         self._connect_signals()
         self.clear_attributes()
@@ -48,9 +46,7 @@ class RightPanel(QWidget):
             self._input_layer_combo.setCurrentText(current)
 
     def set_attributes(self, attributes: dict[str, Any]) -> None:
-        self._empty_state.hide()
-        self._attribute_summary.setText(f"已选择 1 个要素 · {len(attributes)} 个字段")
-        self._attribute_summary.show()
+        self._empty_label.hide()
         self._attribute_table.show()
         self._attribute_table.setRowCount(len(attributes))
         for row, (field, value) in enumerate(attributes.items()):
@@ -63,35 +59,20 @@ class RightPanel(QWidget):
     def clear_attributes(self) -> None:
         self._attribute_table.setRowCount(0)
         self._attribute_table.hide()
-        self._attribute_summary.hide()
-        self._empty_state.show()
+        self._empty_label.show()
 
     def _create_ui(self) -> None:
         self._create_attribute_tab()
         self._create_analysis_tab()
 
-        header = QFrame()
-        header.setObjectName("inspectorHeader")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(14, 0, 14, 0)
-        header_layout.addWidget(QLabel("检视器"))
-        header_layout.addStretch()
-        context = QLabel("当前图层 · 道路")
-        context.setObjectName("inspectorContext")
-        header_layout.addWidget(context)
-
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(header)
-        layout.addWidget(self._tabs, 1)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(self._tabs)
 
     def _create_attribute_tab(self) -> None:
         tab = QWidget()
         title = QLabel("要素属性")
         title.setObjectName("sectionTitle")
-        self._attribute_summary = QLabel()
-        self._attribute_summary.setObjectName("attributeSummary")
 
         self._attribute_table.setColumnCount(2)
         self._attribute_table.setHorizontalHeaderLabels(["字段", "值"])
@@ -100,35 +81,10 @@ class RightPanel(QWidget):
         self._attribute_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
 
         layout = QVBoxLayout(tab)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
         layout.addWidget(title)
-        layout.addWidget(self._attribute_summary)
-        layout.addWidget(self._empty_state)
-        layout.addWidget(self._attribute_table, 1)
-        layout.addStretch()
+        layout.addWidget(self._empty_label)
+        layout.addWidget(self._attribute_table)
         self._tabs.addTab(tab, "属性")
-
-    def _create_empty_state(self) -> QFrame:
-        state = QFrame()
-        state.setObjectName("attributeEmptyState")
-        icon = QLabel("◎")
-        icon.setObjectName("emptyStateIcon")
-        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title = QLabel("尚未选择要素")
-        title.setObjectName("emptyStateTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        description = QLabel("在地图上使用点选或框选工具\n即可在此查看属性信息")
-        description.setObjectName("emptyStateDescription")
-        description.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        layout = QVBoxLayout(state)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(5)
-        layout.addWidget(icon)
-        layout.addWidget(title)
-        layout.addWidget(description)
-        return state
 
     def _create_analysis_tab(self) -> None:
         tab = QWidget()
@@ -166,7 +122,6 @@ class RightPanel(QWidget):
         button_layout.addWidget(self._reset_button)
 
         layout = QVBoxLayout(tab)
-        layout.setContentsMargins(14, 14, 14, 14)
         layout.addWidget(group)
         layout.addLayout(button_layout)
         layout.addStretch()
