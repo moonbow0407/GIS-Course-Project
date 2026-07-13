@@ -57,30 +57,30 @@ class MainWindow(QMainWindow):
         self._add_action("export_layer", "导出图层", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_ArrowForward))
         self._add_action("exit", "退出", self.close)
 
-        self._add_action("undo", "撤销", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_ArrowBack))
-        self._add_action("redo", "重做", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_ArrowForward))
+        self._add_action("undo", "撤销", self._show_developing_message)
+        self._add_action("redo", "重做", self._show_developing_message)
         self._add_action("add_feature", "新增要素", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_FileDialogNewFolder))
         self._add_action("delete_feature", "删除要素", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_DialogCancelButton))
         self._add_action("edit_feature", "修改要素", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
-        self._add_action("save_edit", "保存编辑", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_DialogApplyButton))
+        self._add_action("save_edit", "保存编辑", self._show_developing_message)
 
-        self._add_action("point_query", "点选查询", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_ArrowRight))
-        self._add_action("box_query", "框选查询", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_TitleBarMaxButton))
-        self._add_action("attribute_query", "属性查询", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_FileDialogContentsView))
-        self._add_action("clear_selection", "清除选择", self._on_clear_selection, icon=self._standard_icon(QStyle.StandardPixmap.SP_DialogResetButton))
+        self._add_action("point_query", "点选查询", self._show_developing_message)
+        self._add_action("box_query", "框选查询", self._show_developing_message)
+        self._add_action("attribute_query", "属性查询", self._show_developing_message)
+        self._add_action("clear_selection", "清除选择", self._on_clear_selection)
 
         self._add_action("buffer_analysis", "缓冲区分析", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_BrowserReload))
-        self._add_action("overlay_analysis", "叠加分析", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_BrowserReload))
-        self._add_action("simplify_line", "线要素简化", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_MediaSkipBackward))
-        self._add_action("smooth_line", "线要素平滑", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_MediaPlay))
+        self._add_action("overlay_analysis", "叠加分析", self._show_developing_message)
+        self._add_action("simplify_line", "线要素简化", self._show_developing_message)
+        self._add_action("smooth_line", "线要素平滑", self._show_developing_message)
 
         self._add_action("connect_db", "连接数据库", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_DriveHDIcon))
-        self._add_action("load_db_layer", "加载图层", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_DriveHDIcon))
-        self._add_action("import_layer_db", "导入数据库", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_ArrowDown))
-        self._add_action("disconnect_db", "断开连接", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_DialogCloseButton))
+        self._add_action("load_db_layer", "从数据库加载图层", self._show_developing_message)
+        self._add_action("import_layer_db", "导入当前图层到数据库", self._show_developing_message)
+        self._add_action("disconnect_db", "断开连接", self._show_developing_message)
 
-        self._add_action("help", "使用说明", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_DialogHelpButton))
-        self._add_action("about", "关于系统", self._on_about, icon=self._standard_icon(QStyle.StandardPixmap.SP_MessageBoxInformation))
+        self._add_action("help", "使用说明", self._show_developing_message)
+        self._add_action("about", "关于系统", self._on_about)
 
         self._add_tool_action("pan", "平移", "pan", QStyle.StandardPixmap.SP_ArrowUp)
         self._add_tool_action("zoom_in_tool", "放大", "zoom_in", QStyle.StandardPixmap.SP_ComputerIcon, checkable=False)
@@ -122,6 +122,8 @@ class MainWindow(QMainWindow):
     def _create_central_widget(self) -> None:
         self.menuBar().hide()
         self.workbench_header = WorkbenchHeader(self._actions)
+        self.quick_access_toolbar = self.workbench_header.quick_access_bar
+        self.ribbon_tabs = self.workbench_header.nav_tabs
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setObjectName("workspaceSplitter")
