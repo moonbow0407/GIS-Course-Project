@@ -44,3 +44,5 @@ ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 
+[tool.pytest.ini_options]
+pythonpath = ["."]
