@@ -3,7 +3,7 @@
 from collections.abc import Callable
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QActionGroup, QIcon
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QLabel,
@@ -54,7 +54,7 @@ class MainWindow(QMainWindow):
         self._add_action("open_vector", "打开矢量数据", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_DirOpenIcon))
         self._add_action("open_raster", "打开栅格数据", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_DirOpenIcon))
         self._add_action("save_layer", "保存当前图层", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_DialogSaveButton))
-        self._add_action("export_layer", "导出图层", self._show_developing_message, icon=self._standard_icon(QStyle.StandardPixmap.SP_ArrowForward))
+        self._add_action("export_layer", "导出图层", self._show_developing_message, icon=self._glyph_icon("↗", "#2f7de1"))
         self._add_action("exit", "退出", self.close)
 
         self._add_action("undo", "撤销", self._show_developing_message)
@@ -82,12 +82,12 @@ class MainWindow(QMainWindow):
         self._add_action("help", "使用说明", self._show_developing_message)
         self._add_action("about", "关于系统", self._on_about)
 
-        self._add_tool_action("pan", "平移", "pan", QStyle.StandardPixmap.SP_ArrowUp)
+        self._add_tool_action("pan", "平移", "pan", QStyle.StandardPixmap.SP_ArrowUp, icon=self._glyph_icon("✥", "#168f89"))
         self._add_tool_action("zoom_in_tool", "放大", "zoom_in", QStyle.StandardPixmap.SP_ComputerIcon, checkable=False)
         self._add_tool_action("zoom_out_tool", "缩小", "zoom_out", QStyle.StandardPixmap.SP_ComputerIcon, checkable=False)
         self._add_tool_action("full_extent", "全图显示", "full_extent", QStyle.StandardPixmap.SP_DialogResetButton, checkable=False)
-        self._add_tool_action("point_select", "点选", "point_select", QStyle.StandardPixmap.SP_ArrowRight)
-        self._add_tool_action("box_select", "框选", "box_select", QStyle.StandardPixmap.SP_TitleBarMaxButton)
+        self._add_tool_action("point_select", "点选", "point_select", QStyle.StandardPixmap.SP_ArrowRight, icon=self._glyph_icon("●", "#745bc7"))
+        self._add_tool_action("box_select", "框选", "box_select", QStyle.StandardPixmap.SP_TitleBarMaxButton, icon=self._glyph_icon("□", "#745bc7"))
         self._add_tool_action("add_tool", "新增", "add", QStyle.StandardPixmap.SP_FileDialogNewFolder)
         self._add_tool_action("edit_tool", "修改", "edit", QStyle.StandardPixmap.SP_FileDialogDetailedView)
 
@@ -110,8 +110,9 @@ class MainWindow(QMainWindow):
         tool_name: str,
         icon_id: QStyle.StandardPixmap,
         checkable: bool = True,
+        icon: QIcon | None = None,
     ) -> QAction:
-        action = QAction(self._standard_icon(icon_id), text, self)
+        action = QAction(icon or self._standard_icon(icon_id), text, self)
         action.setCheckable(checkable)
         action.setData(tool_name)
         if checkable:
@@ -230,6 +231,21 @@ class MainWindow(QMainWindow):
     def _standard_icon(self, icon_id: QStyle.StandardPixmap) -> QIcon:
         icon = self.style().standardIcon(icon_id)
         return icon if not icon.isNull() else QIcon()
+
+    def _glyph_icon(self, glyph: str, color: str) -> QIcon:
+        """生成不受系统深浅主题影响的高对比度工具图标。"""
+        pixmap = QPixmap(30, 30)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawRoundedRect(1, 1, 28, 28, 6, 6)
+        painter.setPen(Qt.GlobalColor.white)
+        painter.setFont(QFont("Segoe UI Symbol", 11, QFont.Weight.Bold))
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, glyph)
+        painter.end()
+        return QIcon(pixmap)
 
     def _separator(self) -> QFrame:
         line = QFrame()

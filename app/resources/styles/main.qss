@@ -4,11 +4,14 @@ QMainWindow {
 
 QMenuBar {
     background: #ffffff;
+    color: #263646;
     border-bottom: 1px solid #d8dde6;
     padding: 3px 8px;
 }
 
 QMenuBar::item {
+    color: #263646;
+    background: transparent;
     padding: 6px 12px;
     border-radius: 4px;
 }
@@ -20,11 +23,13 @@ QMenuBar::item:selected {
 
 QMenu {
     background: #ffffff;
+    color: #263646;
     border: 1px solid #d8dde6;
     padding: 6px;
 }
 
 QMenu::item {
+    color: #263646;
     padding: 7px 30px 7px 20px;
     border-radius: 4px;
 }
@@ -43,8 +48,8 @@ QToolBar {
 }
 
 QToolButton {
-    background: transparent;
-    border: 1px solid transparent;
+    background: #f8fafc;
+    border: 1px solid #d9e0e8;
     border-radius: 6px;
     padding: 6px 8px;
     color: #1f2937;
@@ -88,12 +93,14 @@ QLabel#sectionTitle {
 
 QTreeWidget {
     background: #ffffff;
+    color: #263646;
     border: 1px solid #d8dde6;
     border-radius: 6px;
     outline: 0;
 }
 
 QTreeWidget::item {
+    color: #263646;
     min-height: 42px;
     padding: 4px 8px;
 }
@@ -111,6 +118,7 @@ QTabWidget::pane {
 
 QTabBar::tab {
     background: #f4f6f8;
+    color: #526171;
     border: 1px solid #d8dde6;
     border-bottom: 0;
     padding: 9px 22px;
@@ -196,10 +204,12 @@ QGroupBox::title {
 
 QStatusBar {
     background: #ffffff;
+    color: #435160;
     border-top: 1px solid #d8dde6;
 }
 
 QStatusBar QLabel {
+    color: #435160;
     padding: 0 10px;
 }
 
