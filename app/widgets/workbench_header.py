@@ -1,15 +1,15 @@
-"""GIS 工作台顶部导航与 Ribbon。"""
+"""GIS 工作台单层命令面板。"""
 
 from collections.abc import Mapping
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
-    QStackedWidget,
-    QTabBar,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -17,137 +17,144 @@ from PySide6.QtWidgets import (
 
 
 class WorkbenchHeader(QWidget):
-    """固定结构的应用栏、导航页签和 Ribbon。"""
+    """直接展示全部系统功能的分组命令面板。"""
+
+    _LABELS = {
+        "open_vector": "矢量",
+        "open_raster": "栅格",
+        "save_layer": "保存",
+        "export_layer": "导出",
+        "zoom_in_tool": "放大",
+        "zoom_out_tool": "缩小",
+        "full_extent": "全图",
+        "point_select": "点选",
+        "box_select": "框选",
+        "attribute_query": "属性",
+        "clear_selection": "清除",
+        "add_tool": "新增",
+        "edit_tool": "修改",
+        "delete_feature": "删除",
+        "save_edit": "保存编辑",
+        "buffer_analysis": "缓冲区",
+        "overlay_analysis": "叠加",
+        "simplify_line": "线简化",
+        "smooth_line": "线平滑",
+        "connect_db": "连接",
+        "load_db_layer": "加载",
+        "import_layer_db": "导入",
+        "disconnect_db": "断开",
+        "help": "说明",
+        "about": "关于",
+    }
+
+    _GLYPHS = {
+        "open_vector": "V",
+        "open_raster": "R",
+        "save_layer": "S",
+        "export_layer": "↗",
+        "pan": "✥",
+        "zoom_in_tool": "+",
+        "zoom_out_tool": "−",
+        "full_extent": "⌂",
+        "point_select": "●",
+        "box_select": "□",
+        "attribute_query": "表",
+        "clear_selection": "×",
+        "undo": "↶",
+        "redo": "↷",
+        "add_tool": "+",
+        "edit_tool": "✎",
+        "delete_feature": "−",
+        "save_edit": "✓",
+        "buffer_analysis": "◎",
+        "overlay_analysis": "∩",
+        "simplify_line": "≋",
+        "smooth_line": "∿",
+        "connect_db": "DB",
+        "load_db_layer": "↓",
+        "import_layer_db": "⇩",
+        "disconnect_db": "×",
+        "help": "?",
+        "about": "i",
+    }
+
+    _COLORS = {
+        "file": "#2f7de1",
+        "navigation": "#168f89",
+        "query": "#745bc7",
+        "edit": "#d97922",
+        "analysis": "#3d9142",
+        "database": "#5268b8",
+        "help": "#687482",
+    }
 
     def __init__(self, actions: Mapping[str, QAction], parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("workbenchHeader")
+        self.setObjectName("commandSurface")
         self._actions = actions
 
-        self.quick_access_bar = self._create_quick_access_bar()
-        self.nav_tabs = QTabBar()
-        self.nav_tabs.setObjectName("workbenchNavTabs")
-        self.nav_tabs.setDrawBase(False)
-        self.nav_tabs.setExpanding(False)
-        self.nav_tabs.setUsesScrollButtons(False)
-
-        self.ribbon_stack = QStackedWidget()
-        self.ribbon_stack.setObjectName("ribbonStack")
-        self._create_ribbon_pages()
-        self.nav_tabs.currentChanged.connect(self.ribbon_stack.setCurrentIndex)
-        self.nav_tabs.setCurrentIndex(2)
-
-        nav_bar = QWidget()
-        nav_bar.setObjectName("workbenchNavBar")
-        nav_layout = QHBoxLayout(nav_bar)
-        nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.addStretch()
-        nav_layout.addWidget(self.nav_tabs)
-        nav_layout.addStretch()
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self.quick_access_bar)
-        layout.addWidget(nav_bar)
-        layout.addWidget(self.ribbon_stack)
-
-    def _create_quick_access_bar(self) -> QWidget:
-        bar = QWidget()
-        bar.setObjectName("quickAccessToolBar")
-
-        left = QWidget()
-        left.setObjectName("quickAccessLeft")
-        left.setFixedWidth(300)
-        left_layout = QHBoxLayout(left)
-        left_layout.setContentsMargins(12, 0, 0, 0)
-        left_layout.setSpacing(2)
-        for key in ["open_vector", "save_layer", "undo", "redo"]:
-            button = QToolButton()
-            button.setDefaultAction(self._actions[key])
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-            button.setIconSize(QSize(18, 18))
-            left_layout.addWidget(button)
-        left_layout.addStretch()
-
-        title = QLabel("GIS桌面通用平台")
-        title.setObjectName("applicationTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        right = QWidget()
-        right.setObjectName("quickAccessRight")
-        right.setFixedWidth(300)
-        right_layout = QHBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 12, 0)
-        right_layout.addStretch()
-        status_dot = QLabel("●")
-        status_dot.setObjectName("headerStatusDot")
-        status_text = QLabel("本地工作空间")
-        status_text.setObjectName("headerStatusText")
-        right_layout.addWidget(status_dot)
-        right_layout.addWidget(status_text)
-
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(left)
-        layout.addWidget(title, 1)
-        layout.addWidget(right)
-        return bar
-
-    def _create_ribbon_pages(self) -> None:
-        pages = [
-            ("文件", [("项目", ["open_vector", "open_raster", "save_layer", "export_layer"])]),
-            ("编辑", [("编辑", ["undo", "redo", "add_tool", "edit_tool", "delete_feature", "save_edit"])]),
-            (
-                "地图",
-                [
-                    ("导航", ["pan", "zoom_in_tool", "zoom_out_tool", "full_extent"]),
-                    ("选择", ["point_select", "box_select", "clear_selection"]),
-                    ("编辑", ["add_tool", "edit_tool", "delete_feature"]),
-                    ("分析", ["buffer_analysis", "overlay_analysis"]),
-                ],
-            ),
-            ("查询", [("查询方式", ["point_query", "box_query", "attribute_query", "clear_selection"])]),
-            ("分析", [("空间分析", ["buffer_analysis", "overlay_analysis", "simplify_line", "smooth_line"])]),
-            ("数据库", [("数据源", ["connect_db", "load_db_layer", "import_layer_db", "disconnect_db"])]),
-            ("帮助", [("支持", ["help", "about"])]),
+        groups = [
+            ("项目", "file", ["open_vector", "open_raster", "save_layer", "export_layer"]),
+            ("导航", "navigation", ["pan", "zoom_in_tool", "zoom_out_tool", "full_extent"]),
+            ("查询", "query", ["point_select", "box_select", "attribute_query", "clear_selection"]),
+            ("编辑", "edit", ["undo", "redo", "add_tool", "edit_tool", "delete_feature", "save_edit"]),
+            ("分析", "analysis", ["buffer_analysis", "overlay_analysis", "simplify_line", "smooth_line"]),
+            ("数据库", "database", ["connect_db", "load_db_layer", "import_layer_db", "disconnect_db"]),
+            ("帮助", "help", ["help", "about"]),
         ]
-        for page_name, groups in pages:
-            self.nav_tabs.addTab(page_name)
-            self.ribbon_stack.addWidget(self._create_ribbon_page(groups))
 
-    def _create_ribbon_page(self, groups: list[tuple[str, list[str]]]) -> QWidget:
-        page = QWidget()
-        page.setObjectName("ribbonPage")
-        layout = QHBoxLayout(page)
-        layout.setContentsMargins(18, 6, 18, 5)
-        layout.setSpacing(0)
-        for title, action_keys in groups:
-            layout.addWidget(self._create_ribbon_group(title, action_keys))
-        layout.addStretch()
-        return page
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(7)
+        for title, category, action_keys in groups:
+            stretch = 3 if len(action_keys) > 4 else 2
+            layout.addWidget(self._create_group(title, category, action_keys), stretch)
 
-    def _create_ribbon_group(self, title: str, action_keys: list[str]) -> QFrame:
+    def _create_group(self, title: str, category: str, action_keys: list[str]) -> QFrame:
         group = QFrame()
-        group.setObjectName("ribbonGroup")
-        group_layout = QVBoxLayout(group)
-        group_layout.setContentsMargins(10, 0, 10, 0)
-        group_layout.setSpacing(1)
-
-        action_layout = QHBoxLayout()
-        action_layout.setSpacing(3)
-        for key in action_keys:
-            button = QToolButton()
-            button.setDefaultAction(self._actions[key])
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-            button.setIconSize(QSize(24, 24))
-            button.setFixedSize(80, 62)
-            action_layout.addWidget(button)
+        group.setObjectName("commandGroup")
+        group.setProperty("category", category)
 
         title_label = QLabel(title)
-        title_label.setObjectName("ribbonGroupTitle")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        group_layout.addLayout(action_layout)
-        group_layout.addWidget(title_label)
+        title_label.setObjectName("commandGroupTitle")
+        title_label.setProperty("category", category)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(4)
+        columns = 3 if len(action_keys) > 4 else 2
+        for index, key in enumerate(action_keys):
+            button = QToolButton()
+            button.setDefaultAction(self._actions[key])
+            button.setText(self._LABELS.get(key, self._actions[key].text()))
+            button.setIcon(self._create_command_icon(self._GLYPHS.get(key, "•"), category))
+            button.setProperty("category", category)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            button.setIconSize(QSize(22, 22))
+            button.setMinimumSize(82, 48)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            grid.addWidget(button, index // columns, index % columns)
+
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(8, 6, 8, 8)
+        layout.setSpacing(5)
+        layout.addWidget(title_label)
+        layout.addLayout(grid)
+        layout.addStretch()
         return group
+
+    def _create_command_icon(self, glyph: str, category: str) -> QIcon:
+        pixmap = QPixmap(30, 30)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(self._COLORS[category]))
+        painter.drawRoundedRect(1, 1, 28, 28, 6, 6)
+        painter.setPen(Qt.GlobalColor.white)
+        font = QFont("Segoe UI Symbol", 10, QFont.Weight.Bold)
+        painter.setFont(font)
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, glyph)
+        painter.end()
+        return QIcon(pixmap)

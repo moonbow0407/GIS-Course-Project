@@ -9,102 +9,86 @@ QWidget {
     font-size: 13px;
 }
 
-QWidget#workbenchHeader {
-    background: #ffffff;
-    border-bottom: 1px solid #cfd6df;
-}
-
-QWidget#quickAccessToolBar {
-    min-height: 38px;
-    max-height: 38px;
-    background: #fbfcfd;
-    border-bottom: 1px solid #e4e8ed;
-}
-
-QLabel#applicationTitle {
-    color: #172b3d;
-    font-size: 17px;
-    font-weight: 700;
-}
-
-QLabel#headerStatusDot {
-    color: #3ca956;
-    font-size: 10px;
-}
-
-QLabel#headerStatusText,
 QLabel#inspectorContext,
 QLabel#attributeSummary {
     color: #748191;
     font-size: 12px;
 }
 
-QWidget#workbenchNavBar {
-    min-height: 39px;
-    max-height: 39px;
+QWidget#commandSurface {
+    min-height: 156px;
+    max-height: 156px;
+    background: #eef2f6;
+    border-bottom: 1px solid #cbd4df;
+}
+
+QFrame#commandGroup {
     background: #ffffff;
+    border: 1px solid #d5dce5;
+    border-radius: 5px;
 }
 
-QTabBar#workbenchNavTabs {
-    background: #ffffff;
-}
-
-QTabBar#workbenchNavTabs::tab {
-    min-width: 62px;
-    padding: 10px 15px 8px;
-    color: #384858;
-    background: #ffffff;
-    border: 0;
-    border-bottom: 3px solid transparent;
-}
-
-QTabBar#workbenchNavTabs::tab:hover {
-    color: #176fc7;
-    background: #f3f8fe;
-}
-
-QTabBar#workbenchNavTabs::tab:selected {
-    color: #176fc7;
+QLabel#commandGroupTitle {
+    color: #445467;
+    font-size: 13px;
     font-weight: 700;
-    border-bottom-color: #2f7de1;
-}
-
-QStackedWidget#ribbonStack,
-QWidget#ribbonPage {
-    min-height: 90px;
-    max-height: 90px;
-    background: #ffffff;
-}
-
-QFrame#ribbonGroup {
-    background: #ffffff;
-    border: 0;
-    border-right: 1px solid #e0e5eb;
-}
-
-QLabel#ribbonGroupTitle {
-    color: #788493;
-    font-size: 11px;
+    padding: 0 2px 2px;
 }
 
 QToolButton {
-    color: #293a4a;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    padding: 3px 5px;
+    color: #26394b;
+    background: #f7f9fc;
+    border: 1px solid #d8dfe8;
+    border-radius: 4px;
+    padding: 5px 7px;
+    font-weight: 600;
 }
 
 QToolButton:hover {
-    color: #155fa8;
-    background: #edf5fe;
-    border-color: #c2d9f3;
+    color: #134f88;
+    background: #e7f1fc;
+    border-color: #75a7da;
 }
 
 QToolButton:checked {
-    color: #155fa8;
-    background: #dcecff;
-    border-color: #82b2ea;
+    color: #0e568f;
+    background: #d5eaff;
+    border: 2px solid #2f7de1;
+}
+
+QToolButton[category="file"] {
+    background: #edf5ff;
+    border-color: #b9d6f5;
+}
+
+QToolButton[category="navigation"] {
+    background: #eaf8f7;
+    border-color: #acdcd7;
+}
+
+QToolButton[category="query"] {
+    background: #f1efff;
+    border-color: #cac1ef;
+}
+
+QToolButton[category="edit"] {
+    background: #fff4e8;
+    border-color: #efcfaa;
+}
+
+QToolButton[category="analysis"] {
+    background: #edf8ed;
+    border-color: #b9dbb8;
+}
+
+QToolButton[category="database"] {
+    background: #eef1fb;
+    border-color: #bdc8ec;
+}
+
+QToolButton[category="help"] {
+    background: #f4f5f7;
+    border-color: #cfd4db;
 }
 
 QSplitter#workspaceSplitter::handle {
