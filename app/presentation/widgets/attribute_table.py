@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QDialog, QTableWidget, QTableWidgetItem, QVBoxLayo
 
 from app.application.results import LayerSnapshot
 from app.domain.feature import Feature
+from app.domain.vector_layer import VectorLayer
 
 
 class AttributeTableDialog(QDialog):
@@ -14,6 +15,7 @@ class AttributeTableDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"属性表 - {layer_snapshot.name}")
         self.resize(720, 480)
+        # 属性表控件：矢量时展示要素字段，栅格时展示基础元数据。
         self._table: QTableWidget = QTableWidget()
         self._populate(layer_snapshot)
         layout: QVBoxLayout = QVBoxLayout(self)
@@ -21,6 +23,17 @@ class AttributeTableDialog(QDialog):
 
     def _populate(self, layer_snapshot: LayerSnapshot) -> None:
         """根据要素属性字段生成表头并填充表格行。"""
+        if not isinstance(layer_snapshot.layer, VectorLayer):
+            self._table.setColumnCount(2)
+            self._table.setHorizontalHeaderLabels(["属性", "值"])
+            self._table.setRowCount(2)
+            self._table.setItem(0, 0, QTableWidgetItem("波段数"))
+            self._table.setItem(0, 1, QTableWidgetItem(str(layer_snapshot.layer.band_count)))
+            self._table.setItem(1, 0, QTableWidgetItem("像素尺寸"))
+            image_shape: tuple[int, ...] = layer_snapshot.layer.image_data.shape
+            self._table.setItem(1, 1, QTableWidgetItem(f"{image_shape[1]} × {image_shape[0]}"))
+            self._table.resizeColumnsToContents()
+            return
         fields: list[str] = []
         for feature in layer_snapshot.layer.features:
             for field_name in feature.attributes:

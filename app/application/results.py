@@ -1,11 +1,14 @@
 """应用层命令返回的不可变结果对象。"""
 
 from dataclasses import dataclass
+from typing import TypeAlias
 
 from pyproj import CRS
 
 from app.domain.feature import Feature, FeatureId
 from app.domain.layer_style import GeometryFamily
+from app.domain.raster_layer import RasterLayer
+from app.domain.spatial_layer import SpatialLayer
 from app.domain.vector_layer import Bounds, VectorLayer
 
 
@@ -14,7 +17,7 @@ class LayerSnapshot:
     """表示某一时刻供界面读取的单个图层状态。"""
 
     # 领域图层：保存只读要素、坐标系、范围和样式。
-    layer: VectorLayer
+    layer: SpatialLayer
 
     # 显示状态：表示图层当前是否参与地图绘制和空间查询。
     visible: bool
@@ -35,12 +38,17 @@ class LayerSnapshot:
     @property
     def feature_count(self) -> int:
         """返回图层包含的要素数量。"""
-        return len(self.layer.features)
+        return len(self.layer.features) if isinstance(self.layer, VectorLayer) else 0
 
     @property
-    def geometry_family(self) -> GeometryFamily:
-        """返回图层几何类别。"""
-        return self.layer.geometry_family
+    def geometry_family(self) -> GeometryFamily | None:
+        """返回矢量图层几何类别；栅格图层返回空值。"""
+        return self.layer.geometry_family if isinstance(self.layer, VectorLayer) else None
+
+    @property
+    def is_raster(self) -> bool:
+        """返回当前快照是否属于栅格图层。"""
+        return isinstance(self.layer, RasterLayer)
 
     @property
     def bounds(self) -> Bounds:
@@ -98,8 +106,8 @@ class SelectionResult:
 
 
 @dataclass(frozen=True, slots=True)
-class OpenVectorResult:
-    """表示打开矢量图层命令的结构化结果。"""
+class OpenDataResult:
+    """表示打开矢量或栅格图层命令的结构化结果。"""
 
     # 新增图层编号：用于界面定位刚刚加载的图层。
     layer_id: str
@@ -109,3 +117,7 @@ class OpenVectorResult:
 
     # 用户警告：为空表示加载过程不需要额外提醒。
     warning: str | None = None
+
+
+# 旧矢量结果名称：仅供既有调用代码兼容，新代码应使用 OpenDataResult。
+OpenVectorResult: TypeAlias = OpenDataResult

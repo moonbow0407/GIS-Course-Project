@@ -40,6 +40,9 @@ Thumbs.db
 data/
 sample_data/
 outputs/
+screenshots/
+interface_preview.png
+verification_*.png
 *.shp
 *.shx
 *.dbf

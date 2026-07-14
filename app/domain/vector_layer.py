@@ -17,19 +17,25 @@ Bounds: TypeAlias = tuple[float, float, float, float]
 def _geometry_families(geometry: BaseGeometry) -> set[GeometryFamily]:
     """递归提取单个 Shapely 几何对象包含的显示类别。"""
     geometry_type: str = geometry.geom_type
+
     if geometry_type in {"Point", "MultiPoint"}:
         return {GeometryFamily.POINT}
+
     if geometry_type in {"LineString", "LinearRing", "MultiLineString"}:
         return {GeometryFamily.LINE}
+
     if geometry_type in {"Polygon", "MultiPolygon"}:
         return {GeometryFamily.POLYGON}
+
     if geometry_type == "GeometryCollection":
         families: set[GeometryFamily] = set()
         member: BaseGeometry
+
         for member in geometry.geoms:
             if not member.is_empty:
                 families.update(_geometry_families(member))
         return families
+
     return set()
 
 
@@ -73,11 +79,14 @@ class VectorLayer:
             raise ValueError("矢量图层不包含可用几何。")
 
         families: set[GeometryFamily] = set()
+
         minimum_x_values: list[float] = []
         minimum_y_values: list[float] = []
         maximum_x_values: list[float] = []
         maximum_y_values: list[float] = []
+
         feature: Feature
+
         for feature in usable_features:
             families.update(_geometry_families(feature.geometry))
             feature_bounds: tuple[float, float, float, float] = feature.geometry.bounds

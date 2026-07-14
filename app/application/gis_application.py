@@ -5,9 +5,10 @@ from pathlib import Path
 from shapely.geometry import Point, Polygon
 
 from app.application.errors import LayerNotFound
-from app.application.ports import VectorReader
+from app.application.ports import DataReader
 from app.application.results import (
     LayerSnapshot,
+    OpenDataResult,
     OpenVectorResult,
     SelectedFeature,
     SelectionResult,
@@ -15,32 +16,49 @@ from app.application.results import (
 )
 from app.domain.feature import Feature, FeatureId
 from app.domain.map_document import MapDocument
+from app.domain.raster_layer import RasterLayer
+from app.domain.spatial_layer import SpatialLayer
 from app.domain.vector_layer import VectorLayer
 
 
 class GisApplication:
     """通过较小公开接口统一编排图层管理和空间查询流程。"""
 
-    # 矢量读取端口：由启动组装模块注入真实或测试适配器。
-    vector_reader: VectorReader
+    # 空间数据读取端口：由启动组装模块注入真实或测试适配器。
+    data_reader: DataReader
 
     def __init__(
         self,
-        vector_reader: VectorReader,
+        data_reader: DataReader,
         document: MapDocument | None = None,
     ) -> None:
-        """使用矢量读取端口和可选地图文档初始化应用入口。"""
-        self.vector_reader = vector_reader
+        """使用空间数据读取端口和可选地图文档初始化应用入口。"""
+        self.data_reader = data_reader
 
         # 地图文档：作为图层、显隐、活动状态和选择集的唯一事实来源。
         self._document: MapDocument = document or MapDocument()
 
     def open_vector(self, path: Path) -> OpenVectorResult:
-        """读取矢量文件，并在成功后原子地加入地图文档。"""
-        layer: VectorLayer = self.vector_reader.read(path, self._document.display_crs)
+        """兼容旧调用方式读取矢量文件，并返回打开数据结果。"""
+        return self.open_data(path)
+
+    def open_data(self, path: Path) -> OpenDataResult:
+        """读取空间文件并原子加入地图文档。
+
+        参数:
+            path: 待读取的矢量或栅格文件路径。
+
+        返回:
+            包含新增图层编号、工作区快照和可选警告的结果。
+
+        异常:
+            ApplicationError: 文件不存在、格式不支持或数据无法读取时抛出。
+            ValueError: 图层坐标系与地图文档无法安全叠加时抛出。
+        """
+        layer: SpatialLayer = self.data_reader.read(path, self._document.display_crs)
         self._document.add_layer(layer)
         warning: str | None = "数据未声明坐标参考系统。" if layer.crs is None else None
-        return OpenVectorResult(
+        return OpenDataResult(
             layer_id=layer.layer_id,
             snapshot=self.snapshot(),
             warning=warning,
@@ -112,8 +130,11 @@ class GisApplication:
         """选择全部可见图层中与给定矩形相交的有效要素。"""
         self._document.clear_selection()
         selected_features: list[SelectedFeature] = []
-        layer: VectorLayer
-        for layer in self._document.layers:
+        spatial_layer: SpatialLayer
+        for spatial_layer in self._document.layers:
+            if isinstance(spatial_layer, RasterLayer):
+                continue
+            layer: VectorLayer = spatial_layer
             if not self._document.is_visible(layer.layer_id):
                 continue
             feature_ids: list[FeatureId] = []
@@ -156,9 +177,13 @@ class GisApplication:
         """返回活动图层优先、其余图层自顶向下的点选顺序。"""
         active_layer_id: str | None = self._document.active_layer_id
         active_layers: tuple[VectorLayer, ...] = tuple(
-            layer for layer in self._document.layers if layer.layer_id == active_layer_id
+            layer
+            for layer in self._document.layers
+            if isinstance(layer, VectorLayer) and layer.layer_id == active_layer_id
         )
         remaining_layers: tuple[VectorLayer, ...] = tuple(
-            layer for layer in reversed(self._document.layers) if layer.layer_id != active_layer_id
+            layer
+            for layer in reversed(self._document.layers)
+            if isinstance(layer, VectorLayer) and layer.layer_id != active_layer_id
         )
         return active_layers + remaining_layers

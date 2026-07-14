@@ -5,6 +5,7 @@ description = "基于 PySide6 的 GIS 桌面通用平台课程设计项目。"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
+    "affine>=2.4",
     "PySide6>=6.7",
     "GeoAlchemy2>=0.14",
     "Fiona>=1.9",

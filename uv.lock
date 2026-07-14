@@ -195,6 +195,7 @@ name = "gis-desktop-platform"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "affine" },
     { name = "fiona" },
     { name = "geoalchemy2" },
     { name = "geopandas" },
@@ -226,6 +227,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "affine", specifier = ">=2.4" },
     { name = "fiona", specifier = ">=1.9" },
     { name = "geoalchemy2", specifier = ">=0.14" },
     { name = "geopandas", specifier = ">=0.14" },

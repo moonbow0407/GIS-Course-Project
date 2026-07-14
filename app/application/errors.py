@@ -31,3 +31,15 @@ class IncompatibleCoordinateReferenceSystem(ApplicationError):
 
 class LayerNotFound(ApplicationError):
     """表示业务操作引用了不存在的图层。"""
+
+
+class RasterFileNotFound(ApplicationError):
+    """表示用户选择的栅格文件不存在。"""
+
+
+class UnsupportedRasterFormat(ApplicationError):
+    """表示文件扩展名不属于当前支持的栅格格式。"""
+
+
+class RasterReadFailed(ApplicationError):
+    """表示底层栅格数据源无法正常读取。"""

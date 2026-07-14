@@ -1,0 +1,225 @@
+QMainWindow#mainWindow {
+    background: #f5f7fa;
+}
+
+QWidget {
+    font-family: "Microsoft YaHei UI", "Segoe UI";
+    font-size: 13px;
+    color: #263548;
+}
+
+QWidget#ribbonBar {
+    background: #ffffff;
+    border-bottom: 1px solid #d9e1ea;
+}
+
+QLabel#applicationBrand {
+    color: #17263b;
+    font-size: 16px;
+    font-weight: 600;
+    padding: 1px 0 4px 0;
+}
+
+QLabel#ribbonHelp {
+    color: #64748b;
+    padding-right: 4px;
+}
+
+QTabBar#ribbonTabs {
+    background: #ffffff;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+QTabBar#ribbonTabs::tab {
+    min-width: 74px;
+    min-height: 34px;
+    padding: 0 8px;
+    margin-left: 3px;
+    color: #334155;
+    background: transparent;
+    border: none;
+    border-bottom: 3px solid transparent;
+    font-size: 14px;
+}
+
+QTabBar#ribbonTabs::tab:hover {
+    color: #0f6cbd;
+    background: #f2f7fc;
+}
+
+QTabBar#ribbonTabs::tab:selected {
+    color: #0f6cbd;
+    background: #f7fbff;
+    border-bottom: 3px solid #0f6cbd;
+    font-weight: 600;
+}
+
+QWidget#ribbonPage {
+    background: #ffffff;
+}
+
+QToolButton#ribbonButton {
+    min-height: 62px;
+    padding: 3px 6px 2px 6px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
+    color: #25364b;
+}
+
+QToolButton#ribbonButton:hover {
+    border-color: #cbdced;
+    background: #edf5fc;
+    color: #0f6cbd;
+}
+
+QToolButton#ribbonButton:pressed {
+    background: #dcecf9;
+}
+
+QLabel#ribbonGroupCaption {
+    color: #7b8797;
+    font-size: 11px;
+    padding: 0 5px 1px 5px;
+}
+
+QFrame#ribbonSeparator {
+    color: #dce3eb;
+    margin: 3px 7px 5px 7px;
+}
+
+QSplitter#workspaceSplitter::handle {
+    background: #d9e1ea;
+    width: 1px;
+}
+
+LayerPanel {
+    background: #ffffff;
+    border-right: 1px solid #d9e1ea;
+}
+
+QLabel#panelTitle {
+    color: #1e2f45;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+QLabel#panelHint {
+    color: #94a3b8;
+    font-size: 11px;
+}
+
+QLineEdit#layerSearch {
+    min-height: 32px;
+    padding: 0 10px;
+    border: 1px solid #cfd9e5;
+    border-radius: 5px;
+    background: #f8fafc;
+    selection-background-color: #0f6cbd;
+}
+
+QLineEdit#layerSearch:focus {
+    border-color: #0f6cbd;
+    background: #ffffff;
+}
+
+QTreeWidget#layerTree {
+    border: none;
+    background: #ffffff;
+    outline: none;
+    alternate-background-color: #f8fafc;
+}
+
+QTreeWidget#layerTree::item {
+    min-height: 31px;
+    padding-left: 3px;
+    border-radius: 4px;
+}
+
+QTreeWidget#layerTree::item:hover {
+    background: #edf5fc;
+}
+
+QTreeWidget#layerTree::item:selected {
+    background: #dcecf9;
+    color: #0f5f9f;
+}
+
+LayerPanel QToolButton {
+    min-width: 30px;
+    min-height: 28px;
+    border: 1px solid #d6dee8;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #526277;
+    font-size: 16px;
+}
+
+LayerPanel QToolButton:hover {
+    color: #0f6cbd;
+    border-color: #9dc3e3;
+    background: #edf5fc;
+}
+
+QGraphicsView {
+    border: none;
+    background: #f3f6fa;
+}
+
+QFrame#emptyMapOverlay {
+    background: rgba(255, 255, 255, 225);
+    border: 1px solid #dce4ed;
+    border-radius: 12px;
+}
+
+QLabel#emptyMapSymbol {
+    color: #5d9fd3;
+    font-family: "Segoe UI Symbol";
+    font-size: 42px;
+}
+
+QLabel#emptyMapTitle {
+    color: #2b3c51;
+    font-size: 17px;
+    font-weight: 600;
+}
+
+QLabel#emptyMapDescription {
+    color: #7a899b;
+    font-size: 12px;
+}
+
+QStatusBar#mainStatusBar {
+    min-height: 30px;
+    background: #ffffff;
+    border-top: 1px solid #d9e1ea;
+    color: #526277;
+}
+
+QStatusBar#mainStatusBar QLabel {
+    padding: 0 10px;
+    color: #526277;
+    font-size: 12px;
+}
+
+QLabel#statusSeparator {
+    color: #d5dde7;
+    padding: 0;
+}
+
+QMessageBox QPushButton,
+QDialog QPushButton {
+    min-width: 76px;
+    min-height: 28px;
+    padding: 0 12px;
+    border: 1px solid #bfcbd8;
+    border-radius: 4px;
+    background: #ffffff;
+}
+
+QMessageBox QPushButton:hover,
+QDialog QPushButton:hover {
+    color: #ffffff;
+    border-color: #0f6cbd;
+    background: #0f6cbd;
+}

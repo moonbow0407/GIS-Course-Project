@@ -3,7 +3,8 @@
 from pyproj import CRS
 
 from app.domain.feature import FeatureId
-from app.domain.vector_layer import VectorLayer
+from app.domain.raster_layer import RasterLayer
+from app.domain.spatial_layer import SpatialLayer
 
 
 class MapDocument:
@@ -11,7 +12,7 @@ class MapDocument:
 
     def __init__(self) -> None:
         # 图层列表：按照从底层到顶层的顺序保存地图中的图层。
-        self._layers: list[VectorLayer] = []
+        self._layers: list[SpatialLayer] = []
 
         # 图层显隐状态：按图层编号保存当前是否参与显示和查询。
         self._visibility: dict[str, bool] = {}
@@ -26,7 +27,7 @@ class MapDocument:
         self._display_crs: CRS | None = None
 
     @property
-    def layers(self) -> tuple[VectorLayer, ...]:
+    def layers(self) -> tuple[SpatialLayer, ...]:
         """返回按显示顺序排列的只读图层元组。"""
         return tuple(self._layers)
 
@@ -40,7 +41,7 @@ class MapDocument:
         """返回地图文档当前采用的显示坐标参考系统。"""
         return self._display_crs
 
-    def add_layer(self, layer: VectorLayer) -> None:
+    def add_layer(self, layer: SpatialLayer) -> None:
         """校验坐标系后将图层添加到地图文档顶层。"""
         if any(existing.layer_id == layer.layer_id for existing in self._layers):
             raise ValueError(f"图层编号已存在：{layer.layer_id}")
@@ -54,10 +55,10 @@ class MapDocument:
         if len(self._layers) == 1:
             self._display_crs = layer.crs
 
-    def remove_layer(self, layer_id: str) -> VectorLayer:
+    def remove_layer(self, layer_id: str) -> SpatialLayer:
         """移除指定图层，并修复活动图层和选择状态。"""
         current_index: int = self._layer_index(layer_id)
-        removed_layer: VectorLayer = self._layers.pop(current_index)
+        removed_layer: SpatialLayer = self._layers.pop(current_index)
         self._visibility.pop(layer_id, None)
         self._selection.pop(layer_id, None)
 
@@ -74,7 +75,7 @@ class MapDocument:
         if not 0 <= target_index < len(self._layers):
             raise IndexError(f"图层目标位置超出范围：{target_index}")
         current_index: int = self._layer_index(layer_id)
-        layer: VectorLayer = self._layers.pop(current_index)
+        layer: SpatialLayer = self._layers.pop(current_index)
         self._layers.insert(target_index, layer)
 
     def set_active_layer(self, layer_id: str) -> None:
@@ -96,7 +97,12 @@ class MapDocument:
 
     def set_selection(self, layer_id: str, feature_ids: tuple[FeatureId, ...]) -> None:
         """替换指定图层的要素选择集合。"""
-        layer: VectorLayer = self._require_layer(layer_id)
+        layer: SpatialLayer = self._require_layer(layer_id)
+        if isinstance(layer, RasterLayer) and feature_ids:
+            raise ValueError("栅格图层不包含可选择的矢量要素。")
+        if isinstance(layer, RasterLayer):
+            self._selection[layer_id] = ()
+            return
         valid_feature_ids: set[FeatureId] = {feature.fid for feature in layer.features}
         if any(feature_id not in valid_feature_ids for feature_id in feature_ids):
             raise ValueError("选择集合包含不属于该图层的要素编号。")
@@ -112,7 +118,7 @@ class MapDocument:
         for layer_id in self._selection:
             self._selection[layer_id] = ()
 
-    def _validate_coordinate_reference_system(self, layer: VectorLayer) -> None:
+    def _validate_coordinate_reference_system(self, layer: SpatialLayer) -> None:
         """保证新增图层不会与现有地图文档坐标系静默冲突。"""
         if not self._layers:
             return
@@ -126,15 +132,15 @@ class MapDocument:
     def _layer_index(self, layer_id: str) -> int:
         """返回指定图层的位置，不存在时抛出明确异常。"""
         index: int
-        layer: VectorLayer
+        layer: SpatialLayer
         for index, layer in enumerate(self._layers):
             if layer.layer_id == layer_id:
                 return index
         raise KeyError(f"图层不存在：{layer_id}")
 
-    def _require_layer(self, layer_id: str) -> VectorLayer:
+    def _require_layer(self, layer_id: str) -> SpatialLayer:
         """返回指定图层，不存在时抛出明确异常。"""
-        layer: VectorLayer
+        layer: SpatialLayer
         for layer in self._layers:
             if layer.layer_id == layer_id:
                 return layer

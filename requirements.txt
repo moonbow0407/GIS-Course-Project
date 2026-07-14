@@ -1,4 +1,5 @@
 PySide6>=6.7
+affine>=2.4
 GeoAlchemy2>=0.14
 Fiona>=1.9
 GeoPandas>=0.14

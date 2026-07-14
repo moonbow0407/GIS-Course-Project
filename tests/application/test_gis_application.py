@@ -58,7 +58,7 @@ def make_layer(layer_id: str, point_x: float = 0.0, point_y: float = 0.0) -> Vec
 def test_open_vector_returns_workspace_snapshot() -> None:
     """打开矢量文件后应返回包含真实图层状态的不可变快照。"""
     reader: InMemoryVectorReader = InMemoryVectorReader(make_layer("roads"))
-    application: GisApplication = GisApplication(vector_reader=reader)
+    application: GisApplication = GisApplication(data_reader=reader)
 
     result: OpenVectorResult = application.open_vector(Path("roads.geojson"))
 
@@ -73,7 +73,7 @@ def test_reader_failure_keeps_document_unchanged() -> None:
     """文件读取失败时不能向地图文档写入部分状态。"""
     error: VectorReadFailed = VectorReadFailed("文件损坏")
     reader: InMemoryVectorReader = InMemoryVectorReader(make_layer("roads"), error=error)
-    application: GisApplication = GisApplication(vector_reader=reader)
+    application: GisApplication = GisApplication(data_reader=reader)
 
     with pytest.raises(VectorReadFailed, match="文件损坏"):
         application.open_vector(Path("broken.geojson"))
@@ -84,9 +84,9 @@ def test_reader_failure_keeps_document_unchanged() -> None:
 def test_layer_commands_return_synchronized_snapshot() -> None:
     """图层显隐、激活、排序和删除命令应返回同步快照。"""
     first_reader: InMemoryVectorReader = InMemoryVectorReader(make_layer("roads"))
-    application: GisApplication = GisApplication(vector_reader=first_reader)
+    application: GisApplication = GisApplication(data_reader=first_reader)
     application.open_vector(Path("roads.geojson"))
-    application.vector_reader = InMemoryVectorReader(make_layer("rivers"))
+    application.data_reader = InMemoryVectorReader(make_layer("rivers"))
     application.open_vector(Path("rivers.geojson"))
 
     application.set_active_layer("roads")
@@ -103,7 +103,7 @@ def test_layer_commands_return_synchronized_snapshot() -> None:
 def test_point_selection_returns_nearest_feature_within_tolerance() -> None:
     """点选应返回容差内最近的要素并更新选择数量。"""
     reader: InMemoryVectorReader = InMemoryVectorReader(make_layer("points"))
-    application: GisApplication = GisApplication(vector_reader=reader)
+    application: GisApplication = GisApplication(data_reader=reader)
     application.open_vector(Path("points.geojson"))
 
     selection: SelectionResult = application.select_point(Point(0.2, 0.1), tolerance=1.0)
@@ -116,9 +116,9 @@ def test_point_selection_returns_nearest_feature_within_tolerance() -> None:
 def test_rectangle_selection_returns_all_visible_intersections() -> None:
     """框选应返回全部可见图层中与矩形相交的要素。"""
     first_reader: InMemoryVectorReader = InMemoryVectorReader(make_layer("first"))
-    application: GisApplication = GisApplication(vector_reader=first_reader)
+    application: GisApplication = GisApplication(data_reader=first_reader)
     application.open_vector(Path("first.geojson"))
-    application.vector_reader = InMemoryVectorReader(make_layer("second", 0.5, 0.5))
+    application.data_reader = InMemoryVectorReader(make_layer("second", 0.5, 0.5))
     application.open_vector(Path("second.geojson"))
 
     selection: SelectionResult = application.select_rectangle(box(-1, -1, 1, 1))
@@ -130,7 +130,7 @@ def test_rectangle_selection_returns_all_visible_intersections() -> None:
 def test_clear_selection_returns_empty_result() -> None:
     """清除选择后应返回空选择结果和零计数快照。"""
     reader: InMemoryVectorReader = InMemoryVectorReader(make_layer("points"))
-    application: GisApplication = GisApplication(vector_reader=reader)
+    application: GisApplication = GisApplication(data_reader=reader)
     application.open_vector(Path("points.geojson"))
     application.select_point(Point(0, 0), tolerance=1.0)
 
