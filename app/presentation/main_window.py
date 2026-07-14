@@ -84,7 +84,6 @@ class MainWindow(QMainWindow):
         except ApplicationError as error:
             QMessageBox.warning(self, "打开数据失败", str(error))
             return
-        self._map_canvas.set_snapshot(result.snapshot)
         self._refresh_workspace()
         if result.warning:
             self.statusBar().showMessage(result.warning, 5000)

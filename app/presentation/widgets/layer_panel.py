@@ -67,10 +67,18 @@ class LayerPanel(QWidget):
         layout.addLayout(buttons)
 
     def _on_current_item_changed(self, current: QTreeWidgetItem | None) -> None:
-        """将当前树节点转换为活动图层请求。"""
-        if current is not None:
-            layer_id: str = str(current.data(0, Qt.ItemDataRole.UserRole))
-            self.layer_activated.emit(layer_id)
+        """将用户选择的当前树节点转换为活动图层请求。
+
+        参数:
+            current: 当前图层树节点；为空表示树中没有当前节点。
+
+        说明:
+            程序同步工作区快照期间忽略节点变化，防止刷新再次触发刷新。
+        """
+        if self._updating or current is None:
+            return
+        layer_id: str = str(current.data(0, Qt.ItemDataRole.UserRole))
+        self.layer_activated.emit(layer_id)
 
     def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
         """将复选框变化转换为图层显隐请求。"""
