@@ -4,9 +4,9 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from pyproj import CRS
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsPathItem, QGraphicsScene
-from pyproj import CRS
 from shapely.geometry import LineString, Point, Polygon
 
 from app.application.results import LayerSnapshot

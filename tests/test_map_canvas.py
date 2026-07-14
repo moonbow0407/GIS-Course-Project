@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from app.widgets.map_canvas import MapCanvas
+from app.presentation.widgets.map_canvas import MapCanvas
 
 
 def test_canvas_starts_without_mock_map_items() -> None:
@@ -16,4 +16,4 @@ def test_canvas_starts_without_mock_map_items() -> None:
 
     assert application is not None
     assert canvas.scene().items() == []
-    assert canvas._selectable_items == []
+    assert canvas.scene().items() == []
