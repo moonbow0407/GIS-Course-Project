@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from app.main_window import MainWindow
+from app.presentation.main_window import MainWindow
 
 
 def load_style(app: QApplication) -> None:
