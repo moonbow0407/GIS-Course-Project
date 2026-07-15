@@ -179,6 +179,7 @@ class LayerPanel(QWidget):
         target_row: int = row + offset
         if 0 <= target_row < self._tree.topLevelItemCount():
             layer_id: str = str(item.data(0, Qt.ItemDataRole.UserRole))
+            # 面板从顶到底显示，文档却从底到顶保存，需要反向换算索引。
             target_index: int = self._tree.topLevelItemCount() - 1 - target_row
             self.layer_move_requested.emit(layer_id, target_index)
 

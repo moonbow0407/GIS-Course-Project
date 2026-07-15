@@ -29,4 +29,5 @@ class Feature:
         """复制属性映射，避免外部字典修改已经创建的要素。"""
         normalized_attributes: dict[str, AttributeValue] = dict(self.attributes)
         readonly_attributes: Mapping[str, AttributeValue] = MappingProxyType(normalized_attributes)
+        # frozen 数据类禁止普通赋值，初始化校验阶段需使用底层赋值接口。
         object.__setattr__(self, "attributes", readonly_attributes)

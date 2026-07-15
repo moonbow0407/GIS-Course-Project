@@ -54,6 +54,7 @@ class QtVectorRenderer:
             item: QGraphicsPathItem = QGraphicsPathItem(path)
             selected: bool = feature.fid in snapshot.selected_feature_ids
             self._apply_style(item, snapshot.layer.style, selected)
+            # 自定义数据把 Qt 图元关联回领域图层和要素。
             item.setData(0, snapshot.layer_id)
             item.setData(1, feature.fid)
             item.setZValue(z_value)
@@ -72,12 +73,14 @@ class QtVectorRenderer:
         """递归把受支持的 Shapely 几何追加到同一个绘制路径。"""
         if isinstance(geometry, Point):
             radius: float = max(point_size, 1e-9) / 2.0
+            # Qt 场景纵轴向下，地图纵轴向上，因此显示时反转 Y 坐标。
             path.addEllipse(QPointF(geometry.x, -geometry.y), radius, radius)
             return
         if isinstance(geometry, LineString):
             self._append_line(path, geometry)
             return
         if isinstance(geometry, Polygon):
+            # 奇偶填充规则让多边形内环显示为空洞。
             path.setFillRule(Qt.FillRule.OddEvenFill)
             self._append_line(path, geometry.exterior, close=True)
             interior_ring: LinearRing

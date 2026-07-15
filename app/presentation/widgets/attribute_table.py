@@ -23,6 +23,7 @@ class AttributeTableDialog(QDialog):
 
     def _populate(self, layer_snapshot: LayerSnapshot) -> None:
         """根据要素属性字段生成表头并填充表格行。"""
+        # 栅格没有逐要素属性表，改为展示基础影像元数据。
         if not isinstance(layer_snapshot.layer, VectorLayer):
             self._table.setColumnCount(2)
             self._table.setHorizontalHeaderLabels(["属性", "值"])
@@ -34,6 +35,7 @@ class AttributeTableDialog(QDialog):
             self._table.setItem(1, 1, QTableWidgetItem(f"{image_shape[1]} × {image_shape[0]}"))
             self._table.resizeColumnsToContents()
             return
+        # 不同要素的字段可能不一致，按首次出现顺序合并全部字段。
         fields: list[str] = []
         for feature in layer_snapshot.layer.features:
             for field_name in feature.attributes:

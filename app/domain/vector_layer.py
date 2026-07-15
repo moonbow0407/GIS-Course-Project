@@ -28,6 +28,7 @@ def _geometry_families(geometry: BaseGeometry) -> set[GeometryFamily]:
         return {GeometryFamily.POLYGON}
 
     if geometry_type == "GeometryCollection":
+        # 集合本身没有单一类别，需要递归合并每个非空成员的类别。
         families: set[GeometryFamily] = set()
         member: BaseGeometry
 
@@ -107,6 +108,7 @@ class VectorLayer:
             max(maximum_x_values),
             max(maximum_y_values),
         )
+        # frozen 数据类的派生字段只能在初始化阶段通过底层接口写入。
         object.__setattr__(self, "geometry_family", geometry_family)
         object.__setattr__(self, "bounds", bounds)
         object.__setattr__(self, "style", LayerStyle.for_geometry_family(geometry_family))

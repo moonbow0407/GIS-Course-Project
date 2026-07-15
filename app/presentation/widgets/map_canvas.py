@@ -68,6 +68,7 @@ class MapCanvas(QGraphicsView):
         maximum_x: float = max(layer.bounds[2] for layer in layer_snapshot)
         maximum_y: float = max(layer.bounds[3] for layer in layer_snapshot)
         margin: float = max(maximum_x - minimum_x, maximum_y - minimum_y, 1.0) * 0.05
+        # Qt 纵轴向下，场景范围中的地图 Y 坐标需要取反。
         self._scene.setSceneRect(
             minimum_x - margin,
             -(maximum_y + margin),
@@ -76,10 +77,12 @@ class MapCanvas(QGraphicsView):
         )
         viewport_width: int = max(self.viewport().width(), 1)
         viewport_height: int = max(self.viewport().height(), 1)
+        # 将屏幕像素尺寸换算为地图单位，使点符号保持稳定的视觉大小。
         map_units_per_pixel: float = max(
             self._scene.sceneRect().width() / viewport_width,
             self._scene.sceneRect().height() / viewport_height,
         )
+        # 快照按底到顶排列，枚举值可直接作为 Qt 图元的叠放顺序。
         for z_value, current_layer in enumerate(layer_snapshot):
             if isinstance(current_layer.layer, RasterLayer):
                 self._raster_renderer.render_layer(self._scene, current_layer, float(z_value))
@@ -139,6 +142,7 @@ class MapCanvas(QGraphicsView):
             发出地图坐标文本，再交由父类继续处理平移交互。
         """
         scene_position: QPointF = self.mapToScene(event.position().toPoint())
+        # 渲染时反转过 Y 轴，状态栏输出地图坐标时需要恢复方向。
         self.coordinate_changed.emit(
             f"坐标  {scene_position.x():.6f}, {-scene_position.y():.6f}"
         )

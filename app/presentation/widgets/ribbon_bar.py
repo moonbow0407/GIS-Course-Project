@@ -172,6 +172,7 @@ class RibbonBar(QWidget):
         button.setAutoRaise(True)
         button.setMinimumWidth(68)
         button.setToolTip(spec.title)
+        # 默认参数在创建按钮时固定编号，避免循环结束后所有按钮指向同一操作。
         button.clicked.connect(lambda checked=False, action_id=spec.action_id: self.action_triggered.emit(action_id))
         return button
 

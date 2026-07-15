@@ -11,6 +11,7 @@ class MapDocument:
     """统一管理地图中的图层顺序、活动状态、显隐状态和选择集。"""
 
     def __init__(self) -> None:
+        """创建不含图层、坐标系和选择状态的空地图文档。"""
         # 图层列表：按照从底层到顶层的顺序保存地图中的图层。
         self._layers: list[SpatialLayer] = []
 
@@ -106,6 +107,7 @@ class MapDocument:
         valid_feature_ids: set[FeatureId] = {feature.fid for feature in layer.features}
         if any(feature_id not in valid_feature_ids for feature_id in feature_ids):
             raise ValueError("选择集合包含不属于该图层的要素编号。")
+        # 字典键既能去重又保留用户选择要素的原始顺序。
         self._selection[layer_id] = tuple(dict.fromkeys(feature_ids))
 
     def selected_feature_ids(self, layer_id: str) -> tuple[FeatureId, ...]:

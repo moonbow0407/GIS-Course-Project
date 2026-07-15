@@ -16,6 +16,8 @@ def load_style(app: QApplication) -> None:
 
 
 def main() -> int:
+    """创建主窗口并进入 Qt 事件循环。"""
+    # QApplication 统一接收系统事件，整个进程只能创建一个实例。
     app = QApplication(sys.argv)
     app.setApplicationName("GIS桌面通用平台")
     load_style(app)
@@ -23,6 +25,7 @@ def main() -> int:
     window = MainWindow()
     window.show()
 
+    # exec() 会持续处理鼠标、键盘和窗口事件，直到应用退出。
     return app.exec()
 
 

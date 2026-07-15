@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         """连接功能区、图层面板和地图画布的界面请求。"""
+        # Qt 信号把控件操作转发给主窗口，控件本身不直接调用业务层。
         self._ribbon.action_triggered.connect(self._handle_action)
         self._layer_panel.layer_activated.connect(self._activate_layer)
         self._layer_panel.layer_visibility_changed.connect(self._change_visibility)
@@ -107,6 +108,7 @@ class MainWindow(QMainWindow):
             当前仅接入文件打开、地图导航、选择清除和已有属性表；其余入口
             明确保留为界面接口，不伪造业务结果或测试数据。
         """
+        # 使用操作编号映射处理函数，避免大量重复的条件分支。
         implemented_actions: dict[str, Callable[[], None]] = {
             "open_data": self._open_data,
             "zoom_in": self._map_canvas.zoom_in,
@@ -127,6 +129,7 @@ class MainWindow(QMainWindow):
 
     def _open_data(self) -> None:
         """选择真实空间数据文件并交给应用层识别和读取。"""
+        # Qt 同时返回文件路径和所选过滤器，这里只需要第一个值。
         path_string: str = QFileDialog.getOpenFileName(
             self,
             "打开空间数据",

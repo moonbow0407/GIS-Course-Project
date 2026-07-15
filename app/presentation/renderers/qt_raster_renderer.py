@@ -33,9 +33,11 @@ class QtRasterRenderer:
         if not isinstance(snapshot.layer, RasterLayer):
             raise TypeError("栅格渲染器只能绘制栅格图层。")
         layer: RasterLayer = snapshot.layer
+        # RGBA 数组的三个维度依次为高度、宽度和颜色通道。
         height: int = int(layer.image_data.shape[0])
         width: int = int(layer.image_data.shape[1])
         bytes_per_line: int = int(layer.image_data.strides[0])
+        # copy() 使 QImage 独立保存像素，避免继续依赖 NumPy 数组的内存。
         image: QImage = QImage(
             layer.image_data.data,
             width,
@@ -45,6 +47,7 @@ class QtRasterRenderer:
         ).copy()
         item: QGraphicsPixmapItem = QGraphicsPixmapItem(QPixmap.fromImage(image))
         transform = layer.transform
+        # Qt 的 Y 轴向下，地图坐标的 Y 轴通常向上，因此对 Y 方向取反。
         item.setTransform(
             QTransform(
                 transform.a,
@@ -58,6 +61,7 @@ class QtRasterRenderer:
         item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         item.setZValue(z_value)
         item.setVisible(snapshot.visible)
+        # 保存图层编号，方便后续由 Qt 图元反查领域图层。
         item.setData(0, snapshot.layer_id)
         scene.addItem(item)
         return item

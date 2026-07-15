@@ -2,6 +2,7 @@
 
 import os
 
+# 必须在导入 Qt 前启用无界面平台，测试才能在没有显示器的环境运行。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication

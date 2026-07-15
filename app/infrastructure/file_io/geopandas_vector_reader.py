@@ -55,6 +55,7 @@ class GeoPandasVectorReader:
                 )
             if source_crs != target_crs:
                 try:
+                    # to_crs 会转换全部几何坐标，原始属性保持不变。
                     dataframe = dataframe.to_crs(target_crs)
                 except Exception as error:
                     raise IncompatibleCoordinateReferenceSystem(
@@ -98,6 +99,7 @@ class GeoPandasVectorReader:
     def _normalize_feature_id(value: Any) -> FeatureId:
         """将 GeoPandas 索引规范化为领域模型支持的要素编号。"""
         if isinstance(value, np.generic):
+            # NumPy 标量先转成 Python 标量，避免领域层依赖 NumPy 类型。
             normalized_value: object = value.item()
         else:
             normalized_value = value

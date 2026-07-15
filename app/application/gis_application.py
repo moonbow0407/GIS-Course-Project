@@ -101,6 +101,7 @@ class GisApplication:
         if tolerance < 0:
             raise ValueError("点选容差不能小于零。")
         self._document.clear_selection()
+        # 点选先查活动图层，再按视觉上的顶层到下层查找。
         ordered_layers: tuple[VectorLayer, ...] = self._point_query_order()
         layer: VectorLayer
         for layer in ordered_layers:
@@ -132,6 +133,7 @@ class GisApplication:
         selected_features: list[SelectedFeature] = []
         spatial_layer: SpatialLayer
         for spatial_layer in self._document.layers:
+            # 栅格没有独立矢量要素，不参与几何相交查询。
             if isinstance(spatial_layer, RasterLayer):
                 continue
             layer: VectorLayer = spatial_layer

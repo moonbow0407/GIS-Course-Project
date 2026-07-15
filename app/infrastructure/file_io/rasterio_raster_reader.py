@@ -88,6 +88,7 @@ class RasterioRasterReader:
             完成显示波段合成的栅格领域图层。
         """
         indexes: tuple[int, ...] = self._display_band_indexes(dataset.count)
+        # Rasterio 返回“波段×高度×宽度”，后续再合成为 RGBA 通道。
         values: NDArray[np.float64] = dataset.read(indexes).astype(np.float64)
         masks: NDArray[np.uint8] = dataset.read_masks(indexes)
         rgba: NDArray[np.uint8] = self._to_rgba(values, masks)
@@ -136,6 +137,7 @@ class RasterioRasterReader:
             if samples.size == 0:
                 stretched_bands.append(np.zeros(band.shape, dtype=np.uint8))
                 continue
+            # 舍弃两端少量极值，避免异常亮点或暗点压缩整体显示对比度。
             lower: float = float(np.percentile(samples, 2.0))
             upper: float = float(np.percentile(samples, 98.0))
             if upper <= lower:
@@ -146,4 +148,5 @@ class RasterioRasterReader:
             stretched_bands = stretched_bands * 3
         rgb: NDArray[np.uint8] = np.stack(stretched_bands[:3], axis=2)
         alpha: NDArray[np.uint8] = np.where(valid, 255, 0).astype(np.uint8)
+        # 连续内存便于 Qt 按行读取 RGBA 像素。
         return np.ascontiguousarray(np.dstack((rgb, alpha)))
