@@ -55,3 +55,6 @@ verification_*.png
 *.tiff
 *.img
 *.dem
+
+# 本地测试数据
+/测试数据/
