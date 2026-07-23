@@ -166,6 +166,106 @@ QGraphicsView {
     background: #f3f6fa;
 }
 
+QMenu {
+    min-width: 150px;
+    padding: 4px;
+    border: 1px solid #cbd6e2;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #263548;
+}
+
+QMenu::item {
+    min-height: 28px;
+    padding: 4px 18px;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #263548;
+}
+
+QMenu::item:selected {
+    background: #dcecf9;
+    color: #0f5f9f;
+}
+
+QMenu::separator {
+    height: 1px;
+    margin: 4px 8px;
+    background: #d9e1ea;
+}
+
+QDialog,
+QMessageBox {
+    background: #ffffff;
+    color: #263548;
+}
+
+QDialog QLabel,
+QMessageBox QLabel {
+    background: transparent;
+    color: #263548;
+}
+
+QTableWidget {
+    border: 1px solid #d9e1ea;
+    background: #ffffff;
+    alternate-background-color: #f8fafc;
+    color: #263548;
+    gridline-color: #d9e1ea;
+    selection-background-color: #dcecf9;
+    selection-color: #0f5f9f;
+}
+
+QTableWidget::item {
+    background: #ffffff;
+    color: #263548;
+    padding: 4px 6px;
+}
+
+QTableWidget::item:alternate {
+    background: #f8fafc;
+}
+
+QTableWidget QScrollBar:vertical {
+    width: 12px;
+    margin: 2px 2px 2px 0;
+    border: 1px solid #d9e1ea;
+    border-radius: 5px;
+    background: #eef4fa;
+}
+
+QTableWidget QScrollBar::handle:vertical {
+    min-height: 28px;
+    border-radius: 5px;
+    background: #9eb5ca;
+}
+
+QTableWidget QScrollBar::handle:vertical:hover {
+    background: #6f9bc0;
+}
+
+QTableWidget QScrollBar::add-page:vertical,
+QTableWidget QScrollBar::sub-page:vertical {
+    background: #eef4fa;
+}
+
+QTableWidget QScrollBar::add-line:vertical,
+QTableWidget QScrollBar::sub-line:vertical {
+    height: 14px;
+    border: none;
+    background: #dce8f2;
+}
+
+QHeaderView::section {
+    padding: 5px 8px;
+    border: none;
+    border-right: 1px solid #d9e1ea;
+    border-bottom: 1px solid #d9e1ea;
+    background: #eef4fa;
+    color: #263548;
+    font-weight: 600;
+}
+
 QFrame#emptyMapOverlay {
     background: rgba(255, 255, 255, 225);
     border: 1px solid #dce4ed;
@@ -215,6 +315,7 @@ QDialog QPushButton {
     border: 1px solid #bfcbd8;
     border-radius: 4px;
     background: #ffffff;
+    color: #263548;
 }
 
 QMessageBox QPushButton:hover,

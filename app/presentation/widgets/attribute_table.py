@@ -1,6 +1,14 @@
 """图层属性表对话框。"""
 
-from PySide6.QtWidgets import QDialog, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QDialog,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.application.results import LayerSnapshot
 from app.domain.feature import Feature
@@ -17,6 +25,9 @@ class AttributeTableDialog(QDialog):
         self.resize(720, 480)
         # 属性表控件：矢量时展示要素字段，栅格时展示基础元数据。
         self._table: QTableWidget = QTableWidget()
+        # 始终保留右侧滚动条，方便用户识别并拖动浏览属性记录。
+        self._table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self._table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._populate(layer_snapshot)
         layout: QVBoxLayout = QVBoxLayout(self)
         layout.addWidget(self._table)

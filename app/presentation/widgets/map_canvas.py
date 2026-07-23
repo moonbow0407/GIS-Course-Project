@@ -1,6 +1,6 @@
 """基于领域图层快照的地图画布。"""
 
-from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QMouseEvent, QPainter, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView, QLabel, QVBoxLayout
 
@@ -38,6 +38,8 @@ class MapCanvas(QGraphicsView):
         self._empty_overlay: QFrame = self._create_empty_overlay()
         # 缩放百分比：以最近一次全图显示为 100% 的界面导航指标。
         self._zoom_percent: float = 100.0
+        # 真实地图范围与可导航场景范围分开保存，避免小图层没有平移余量。
+        self._map_scene_rect: QRectF | None = None
         self._scene.setSceneRect(0, 0, 1000, 700)
         self.setScene(self._scene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -58,6 +60,7 @@ class MapCanvas(QGraphicsView):
         self._scene.clear()
         self._empty_overlay.setVisible(not snapshot.layers)
         if not snapshot.layers:
+            self._map_scene_rect = None
             self._scene.setSceneRect(0, 0, 1000, 700)
             self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
             self._reset_view_scale()
@@ -69,12 +72,14 @@ class MapCanvas(QGraphicsView):
         maximum_y: float = max(layer.bounds[3] for layer in layer_snapshot)
         margin: float = max(maximum_x - minimum_x, maximum_y - minimum_y, 1.0) * 0.05
         # Qt 纵轴向下，场景范围中的地图 Y 坐标需要取反。
-        self._scene.setSceneRect(
+        map_scene_rect: QRectF = QRectF(
             minimum_x - margin,
             -(maximum_y + margin),
             maximum_x - minimum_x + 2 * margin,
             maximum_y - minimum_y + 2 * margin,
         )
+        self._map_scene_rect = map_scene_rect
+        self._scene.setSceneRect(map_scene_rect)
         viewport_width: int = max(self.viewport().width(), 1)
         viewport_height: int = max(self.viewport().height(), 1)
         # 将屏幕像素尺寸换算为地图单位，使点符号保持稳定的视觉大小。
@@ -93,7 +98,9 @@ class MapCanvas(QGraphicsView):
                     float(z_value),
                     map_units_per_pixel,
                 )
-        self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        # 全图只按真实数据范围适配；随后扩展场景范围，给手形拖动留下余量。
+        self.fitInView(map_scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
+        self._ensure_pan_area()
         self._reset_view_scale()
 
     def set_pan_tool(self) -> None:
@@ -102,7 +109,13 @@ class MapCanvas(QGraphicsView):
 
     def zoom_to_full_extent(self) -> None:
         """将当前地图范围完整缩放到视图内。"""
-        self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        fit_rect: QRectF = (
+            self._map_scene_rect
+            if self._map_scene_rect is not None
+            else self._scene.sceneRect()
+        )
+        self.fitInView(fit_rect, Qt.AspectRatioMode.KeepAspectRatio)
+        self._ensure_pan_area()
         self._reset_view_scale()
 
     def zoom_in(self) -> None:
@@ -130,6 +143,7 @@ class MapCanvas(QGraphicsView):
             self.zoom_in()
         else:
             self.zoom_out()
+        self._ensure_pan_area()
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
@@ -163,6 +177,7 @@ class MapCanvas(QGraphicsView):
         left: int = max((self.viewport().width() - overlay_width) // 2, 0)
         top: int = max((self.viewport().height() - overlay_height) // 2, 0)
         self._empty_overlay.setGeometry(left, top, overlay_width, overlay_height)
+        self._ensure_pan_area()
 
     def _create_empty_overlay(self) -> QFrame:
         """创建不含测试图形的空地图操作引导面板。"""
@@ -193,3 +208,33 @@ class MapCanvas(QGraphicsView):
     def _emit_view_scale(self) -> None:
         """发出格式化后的当前视图比例文本。"""
         self.view_scale_changed.emit(f"视图比例  {self._zoom_percent:.0f}%")
+
+    def _ensure_pan_area(self) -> None:
+        """确保当前视口周围存在可供手形拖动的场景范围。"""
+        if (
+            self._map_scene_rect is None
+            or self.viewport().width() <= 0
+            or self.viewport().height() <= 0
+        ):
+            return
+        viewport_rect: QRectF = self._visible_scene_rect()
+        # 扩展一整个当前视口，保证图层较小时仍能向任意方向拖动。
+        required_rect: QRectF = self._map_scene_rect.united(
+            viewport_rect.adjusted(
+                -viewport_rect.width(),
+                -viewport_rect.height(),
+                viewport_rect.width(),
+                viewport_rect.height(),
+            )
+        )
+        if self._scene.sceneRect().contains(required_rect):
+            return
+        view_center: QPointF = self.mapToScene(self.viewport().rect().center())
+        self._scene.setSceneRect(required_rect)
+        self.centerOn(view_center)
+
+    def _visible_scene_rect(self) -> QRectF:
+        """返回当前视口在地图场景中的可见范围。"""
+        top_left: QPointF = self.mapToScene(self.viewport().rect().topLeft())
+        bottom_right: QPointF = self.mapToScene(self.viewport().rect().bottomRight())
+        return QRectF(top_left, bottom_right).normalized()
