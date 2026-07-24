@@ -24,8 +24,10 @@ class MapDocument:
         # 选择集合：按图层编号保存当前选中的要素编号。
         self._selection: dict[str, tuple[FeatureId, ...]] = {}
 
-        # 显示坐标系：由首个已知坐标系图层建立，全部已知图层必须一致。
+        # 显示坐标系：默认由首个图层建立，也可以由用户预先或主动指定。
         self._display_crs: CRS | None = None
+        # 用户指定标记：用户设置的地图 CRS 在删除全部图层后仍然保留。
+        self._display_crs_explicit: bool = False
 
     @property
     def layers(self) -> tuple[SpatialLayer, ...]:
@@ -42,6 +44,13 @@ class MapDocument:
         """返回地图文档当前采用的显示坐标参考系统。"""
         return self._display_crs
 
+    def set_display_crs(self, crs: CRS) -> None:
+        """设置地图显示坐标系；已有图层必须已经统一到该坐标系。"""
+        if any(layer.crs != crs for layer in self._layers):
+            raise ValueError("已有图层未统一到指定地图坐标系。")
+        self._display_crs = crs
+        self._display_crs_explicit = True
+
     def add_layer(self, layer: SpatialLayer) -> None:
         """校验坐标系后将图层添加到地图文档顶层。"""
         if any(existing.layer_id == layer.layer_id for existing in self._layers):
@@ -53,7 +62,7 @@ class MapDocument:
         self._selection[layer.layer_id] = ()
         if self._active_layer_id is None:
             self._active_layer_id = layer.layer_id
-        if len(self._layers) == 1:
+        if len(self._layers) == 1 and self._display_crs is None:
             self._display_crs = layer.crs
 
     def remove_layer(self, layer_id: str) -> SpatialLayer:
@@ -65,7 +74,8 @@ class MapDocument:
 
         if not self._layers:
             self._active_layer_id = None
-            self._display_crs = None
+            if not self._display_crs_explicit:
+                self._display_crs = None
         elif self._active_layer_id == layer_id:
             next_index: int = min(current_index, len(self._layers) - 1)
             self._active_layer_id = self._layers[next_index].layer_id
@@ -123,6 +133,8 @@ class MapDocument:
     def _validate_coordinate_reference_system(self, layer: SpatialLayer) -> None:
         """保证新增图层不会与现有地图文档坐标系静默冲突。"""
         if not self._layers:
+            if self._display_crs is not None and layer.crs != self._display_crs:
+                raise ValueError("图层坐标参考系统不一致。")
             return
         if self._display_crs is None:
             if layer.crs is not None:

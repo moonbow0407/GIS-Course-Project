@@ -55,3 +55,7 @@ class UnsupportedExportFormat(ApplicationError):
 
 class DataWriteFailed(ApplicationError):
     """表示空间图层无法写入指定输出位置。"""
+
+
+class LayerReprojectionFailed(ApplicationError):
+    """表示图层无法根据原始数据源转换到目标坐标系。"""

@@ -114,3 +114,25 @@ def test_known_crs_cannot_follow_unknown_crs_document() -> None:
 
     with pytest.raises(ValueError, match="无法与未知坐标系"):
         document.add_layer(make_layer("wgs84", 4326))
+
+
+def test_user_defined_display_crs_survives_removing_all_layers() -> None:
+    """用户指定的地图 CRS 在图层清空后应保留。"""
+    document: MapDocument = MapDocument()
+    display_crs: CRS = CRS.from_epsg(3857)
+    document.set_display_crs(display_crs)
+    document.add_layer(make_layer("roads", 3857))
+
+    document.remove_layer("roads")
+
+    assert document.display_crs == display_crs
+    assert document.layers == ()
+
+
+def test_user_defined_display_crs_rejects_unprojected_first_layer() -> None:
+    """预先指定地图 CRS 后，首个图层也必须使用该坐标系。"""
+    document: MapDocument = MapDocument()
+    document.set_display_crs(CRS.from_epsg(3857))
+
+    with pytest.raises(ValueError, match="坐标参考系统不一致"):
+        document.add_layer(make_layer("wgs84", 4326))

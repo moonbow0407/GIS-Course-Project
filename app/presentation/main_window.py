@@ -4,9 +4,11 @@ from collections.abc import Callable
 from pathlib import Path
 
 from pyproj import CRS
+from pyproj.exceptions import CRSError
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QFileDialog,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -124,6 +126,7 @@ class MainWindow(QMainWindow):
             "clear_selection": self._clear_selection,
             "toggle_layers": self._toggle_layer_panel,
             "show_attributes": self._show_active_attribute_table,
+            "set_crs": self._set_display_crs,
             "about": self._show_about,
         }
         handler: Callable[[], None] | None = implemented_actions.get(action_id)
@@ -265,6 +268,33 @@ class MainWindow(QMainWindow):
         """清除已有矢量要素选择并刷新工作区。"""
         self._application.clear_selection()
         self._refresh_workspace()
+
+    def _set_display_crs(self) -> None:
+        """通过 CRS 标识设置地图显示坐标系并重建已有图层。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        current_crs: str = snapshot.display_crs.to_string() if snapshot.display_crs else ""
+        crs_text, accepted = QInputDialog.getText(
+            self,
+            "设置地图坐标系",
+            "输入 CRS 标识（例如 EPSG:4326 或 ESRI:102026）：",
+            text=current_crs,
+        )
+        normalized_text: str = crs_text.strip()
+        if not accepted or not normalized_text:
+            return
+        try:
+            target_crs: CRS = CRS.from_user_input(normalized_text)
+        except CRSError as error:
+            QMessageBox.warning(self, "坐标系设置失败", f"无法识别坐标系：{normalized_text}")
+            self.statusBar().showMessage(str(error), 5000)
+            return
+        try:
+            self._application.set_display_crs(target_crs)
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "坐标系设置失败", str(error))
+            return
+        self._refresh_workspace()
+        self._ready_label.setText(f"地图 CRS 已设置为 {self._format_crs(target_crs)}")
 
     def _toggle_layer_panel(self) -> None:
         """切换左侧图层管理面板的显示状态。"""

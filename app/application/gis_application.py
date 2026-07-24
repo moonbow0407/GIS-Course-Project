@@ -2,9 +2,17 @@
 
 from pathlib import Path
 
+from pyproj import CRS
 from shapely.geometry import Point, Polygon
 
-from app.application.errors import DataWriteFailed, LayerNotFound, NoActiveLayer
+from app.application.analysis_environment import AnalysisEnvironment
+from app.application.errors import (
+    ApplicationError,
+    DataWriteFailed,
+    LayerNotFound,
+    LayerReprojectionFailed,
+    NoActiveLayer,
+)
 from app.application.ports import DataReader, DataWriter
 from app.application.results import (
     ExportDataResult,
@@ -163,6 +171,107 @@ class GisApplication:
         """清除全部图层选择并返回空选择结果。"""
         self._document.clear_selection()
         return SelectionResult(features=(), snapshot=self.snapshot())
+
+    def set_display_crs(self, target_crs: CRS) -> WorkspaceSnapshot:
+        """设置地图显示坐标系，并从原始数据源原子重建已有图层。"""
+        if self._document.display_crs == target_crs:
+            self._document.set_display_crs(target_crs)
+            return self.snapshot()
+        if not self._document.layers:
+            self._document.set_display_crs(target_crs)
+            return self.snapshot()
+
+        old_layers: tuple[SpatialLayer, ...] = self._document.layers
+        projected_layers: tuple[SpatialLayer, ...] = tuple(
+            self._project_layer_from_source(layer, target_crs) for layer in old_layers
+        )
+        replacement_document: MapDocument = MapDocument()
+        replacement_document.set_display_crs(target_crs)
+        for old_layer, projected_layer in zip(old_layers, projected_layers, strict=True):
+            replacement_document.add_layer(projected_layer)
+            replacement_document.set_layer_visibility(
+                projected_layer.layer_id,
+                self._document.is_visible(old_layer.layer_id),
+            )
+            if isinstance(projected_layer, VectorLayer):
+                replacement_document.set_selection(
+                    projected_layer.layer_id,
+                    self._document.selected_feature_ids(old_layer.layer_id),
+                )
+        if self._document.active_layer_id is not None:
+            replacement_document.set_active_layer(self._document.active_layer_id)
+        self._document = replacement_document
+        return self.snapshot()
+
+    def create_analysis_environment(self, analysis_crs: CRS | None = None) -> AnalysisEnvironment:
+        """创建分析环境；未指定时使用当前地图 CRS 作为明确兜底。"""
+        resolved_crs: CRS | None = analysis_crs or self._document.display_crs
+        if resolved_crs is None:
+            raise ValueError("当前地图没有可用坐标系，请先指定分析坐标系。")
+        return AnalysisEnvironment(analysis_crs=resolved_crs)
+
+    def prepare_analysis_layers(
+        self,
+        layer_ids: tuple[str, ...],
+        environment: AnalysisEnvironment,
+    ) -> tuple[SpatialLayer, ...]:
+        """按分析目标 CRS 准备输入临时副本，不修改工作区原始图层。"""
+        prepared_layers: list[SpatialLayer] = []
+        for layer_id in layer_ids:
+            layer: SpatialLayer = self._find_layer(layer_id)
+            if layer.crs == environment.analysis_crs:
+                prepared_layers.append(layer)
+            else:
+                prepared_layers.append(
+                    self._project_layer_from_source(layer, environment.analysis_crs)
+                )
+        return tuple(prepared_layers)
+
+    def _project_layer_from_source(
+        self,
+        layer: SpatialLayer,
+        target_crs: CRS,
+    ) -> SpatialLayer:
+        """从原始路径重新读取并转换图层，确保转换不覆盖源图层。"""
+        if layer.source_path is None:
+            raise LayerReprojectionFailed(
+                f"图层“{layer.name}”没有原始数据源，无法转换坐标系。"
+            )
+        try:
+            projected: SpatialLayer = self.data_reader.read(layer.source_path, target_crs)
+        except Exception as error:
+            if isinstance(error, ApplicationError):
+                raise
+            raise LayerReprojectionFailed(f"图层“{layer.name}”坐标系转换失败。") from error
+        if isinstance(layer, VectorLayer) and isinstance(projected, VectorLayer):
+            return VectorLayer.create(
+                layer_id=layer.layer_id,
+                name=projected.name,
+                features=projected.features,
+                crs=projected.crs,
+                source_path=projected.source_path,
+            )
+        if isinstance(layer, RasterLayer) and isinstance(projected, RasterLayer):
+            return RasterLayer.create(
+                layer_id=layer.layer_id,
+                name=projected.name,
+                raster_data=projected.raster_data,
+                image_data=projected.image_data,
+                valid_mask=projected.valid_mask,
+                transform=projected.transform,
+                crs=projected.crs,
+                bounds=projected.bounds,
+                nodata=projected.nodata,
+                source_path=projected.source_path,
+            )
+        raise LayerReprojectionFailed(f"图层“{layer.name}”转换后类型发生变化。")
+
+    def _find_layer(self, layer_id: str) -> SpatialLayer:
+        """按编号查找工作区图层。"""
+        for layer in self._document.layers:
+            if layer.layer_id == layer_id:
+                return layer
+        raise LayerNotFound(f"图层不存在：{layer_id}")
 
     def export_active_layer(self, path: Path) -> ExportDataResult:
         """将活动图层按当前坐标系导出到指定本地路径。
