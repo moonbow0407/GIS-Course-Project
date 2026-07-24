@@ -4,9 +4,10 @@ from pathlib import Path
 
 from shapely.geometry import Point, Polygon
 
-from app.application.errors import LayerNotFound
-from app.application.ports import DataReader
+from app.application.errors import DataWriteFailed, LayerNotFound, NoActiveLayer
+from app.application.ports import DataReader, DataWriter
 from app.application.results import (
+    ExportDataResult,
     LayerSnapshot,
     OpenDataResult,
     OpenVectorResult,
@@ -26,14 +27,18 @@ class GisApplication:
 
     # 空间数据读取端口：由启动组装模块注入真实或测试适配器。
     data_reader: DataReader
+    # 空间数据写入端口：为空时保留只读应用服务兼容能力。
+    data_writer: DataWriter | None
 
     def __init__(
         self,
         data_reader: DataReader,
+        data_writer: DataWriter | None = None,
         document: MapDocument | None = None,
     ) -> None:
         """使用空间数据读取端口和可选地图文档初始化应用入口。"""
         self.data_reader = data_reader
+        self.data_writer = data_writer
 
         # 地图文档：作为图层、显隐、活动状态和选择集的唯一事实来源。
         self._document: MapDocument = document or MapDocument()
@@ -158,6 +163,38 @@ class GisApplication:
         """清除全部图层选择并返回空选择结果。"""
         self._document.clear_selection()
         return SelectionResult(features=(), snapshot=self.snapshot())
+
+    def export_active_layer(self, path: Path) -> ExportDataResult:
+        """将活动图层按当前坐标系导出到指定本地路径。
+
+        矢量图层存在选择集时仅导出选中要素；否则导出全部要素。栅格图层
+        始终导出真实分析像元，不使用拉伸后的 RGBA 显示缓存。
+        """
+        active_layer_id: str | None = self._document.active_layer_id
+        if active_layer_id is None:
+            raise NoActiveLayer("请先打开并选择一个活动图层。")
+        if self.data_writer is None:
+            raise DataWriteFailed("空间数据导出服务尚未配置。")
+
+        layer: SpatialLayer = next(
+            item for item in self._document.layers if item.layer_id == active_layer_id
+        )
+        selected_feature_ids: tuple[FeatureId, ...] = (
+            self._document.selected_feature_ids(active_layer_id)
+            if isinstance(layer, VectorLayer)
+            else ()
+        )
+        self.data_writer.write(layer, path, selected_feature_ids)
+        exported_feature_count: int | None = None
+        if isinstance(layer, VectorLayer):
+            exported_feature_count = (
+                len(selected_feature_ids) if selected_feature_ids else len(layer.features)
+            )
+        return ExportDataResult(
+            path=path.expanduser().resolve(),
+            layer_id=active_layer_id,
+            exported_feature_count=exported_feature_count,
+        )
 
     def snapshot(self) -> WorkspaceSnapshot:
         """构造供界面一次性刷新的不可变工作区快照。"""

@@ -43,3 +43,15 @@ class UnsupportedRasterFormat(ApplicationError):
 
 class RasterReadFailed(ApplicationError):
     """表示底层栅格数据源无法正常读取。"""
+
+
+class NoActiveLayer(ApplicationError):
+    """表示导出等操作缺少活动图层。"""
+
+
+class UnsupportedExportFormat(ApplicationError):
+    """表示输出文件扩展名不属于当前支持的导出格式。"""
+
+
+class DataWriteFailed(ApplicationError):
+    """表示空间图层无法写入指定输出位置。"""

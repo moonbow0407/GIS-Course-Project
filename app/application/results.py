@@ -1,6 +1,7 @@
 """应用层命令返回的不可变结果对象。"""
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TypeAlias
 
 from pyproj import CRS
@@ -117,6 +118,20 @@ class OpenDataResult:
 
     # 用户警告：为空表示加载过程不需要额外提醒。
     warning: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExportDataResult:
+    """表示活动图层导出完成后的结构化结果。"""
+
+    # 实际输出路径：使用绝对路径，便于界面向用户准确反馈。
+    path: Path
+
+    # 导出图层编号：用于确认本次命令对应的工作区图层。
+    layer_id: str
+
+    # 导出要素数量：矢量为实际写出数量，栅格为空值。
+    exported_feature_count: int | None
 
 
 # 旧矢量结果名称：仅供既有调用代码兼容，新代码应使用 OpenDataResult。

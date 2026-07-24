@@ -66,10 +66,15 @@ class MapCanvas(QGraphicsView):
             self._reset_view_scale()
             return
         layer_snapshot: tuple[LayerSnapshot, ...] = snapshot.layers
-        minimum_x: float = min(layer.bounds[0] for layer in layer_snapshot)
-        minimum_y: float = min(layer.bounds[1] for layer in layer_snapshot)
-        maximum_x: float = max(layer.bounds[2] for layer in layer_snapshot)
-        maximum_y: float = max(layer.bounds[3] for layer in layer_snapshot)
+        # 隐藏图层仍需创建图元以便恢复显示，但不能继续撑大当前全图范围。
+        visible_layers: tuple[LayerSnapshot, ...] = tuple(
+            layer for layer in layer_snapshot if layer.visible
+        )
+        extent_layers: tuple[LayerSnapshot, ...] = visible_layers or layer_snapshot
+        minimum_x: float = min(layer.bounds[0] for layer in extent_layers)
+        minimum_y: float = min(layer.bounds[1] for layer in extent_layers)
+        maximum_x: float = max(layer.bounds[2] for layer in extent_layers)
+        maximum_y: float = max(layer.bounds[3] for layer in extent_layers)
         margin: float = max(maximum_x - minimum_x, maximum_y - minimum_y, 1.0) * 0.05
         # Qt 纵轴向下，场景范围中的地图 Y 坐标需要取反。
         map_scene_rect: QRectF = QRectF(

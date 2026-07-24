@@ -6,11 +6,12 @@ import pytest
 from pyproj import CRS
 from shapely.geometry import Point, box
 
-from app.application.errors import VectorReadFailed
+from app.application.errors import NoActiveLayer, VectorReadFailed
 from app.application.gis_application import GisApplication
-from app.application.ports import VectorReader
+from app.application.ports import DataWriter, VectorReader
 from app.application.results import OpenVectorResult, SelectionResult, WorkspaceSnapshot
 from app.domain.feature import Feature
+from app.domain.spatial_layer import SpatialLayer
 from app.domain.vector_layer import VectorLayer
 
 
@@ -39,6 +40,27 @@ class InMemoryVectorReader(VectorReader):
         if self.error is not None:
             raise self.error
         return self.layer
+
+
+class RecordingDataWriter(DataWriter):
+    """记录应用层传入的导出图层、路径和选择集。"""
+
+    def __init__(self) -> None:
+        """创建尚未执行写入的记录器。"""
+        self.layer: SpatialLayer | None = None
+        self.path: Path | None = None
+        self.selected_feature_ids: tuple[str | int, ...] = ()
+
+    def write(
+        self,
+        layer: SpatialLayer,
+        path: Path,
+        selected_feature_ids: tuple[str | int, ...] = (),
+    ) -> None:
+        """记录单次写入请求。"""
+        self.layer = layer
+        self.path = path
+        self.selected_feature_ids = selected_feature_ids
 
 
 def make_layer(layer_id: str, point_x: float = 0.0, point_y: float = 0.0) -> VectorLayer:
@@ -139,3 +161,47 @@ def test_clear_selection_returns_empty_result() -> None:
     assert selection.features == ()
     assert selection.count == 0
     assert selection.snapshot.selection_count == 0
+
+
+def test_export_active_vector_uses_selection_when_present(tmp_path: Path) -> None:
+    """活动矢量图层存在选择集时应只把选中要素交给写入端口。"""
+    reader: InMemoryVectorReader = InMemoryVectorReader(make_layer("points"))
+    writer: RecordingDataWriter = RecordingDataWriter()
+    application: GisApplication = GisApplication(data_reader=reader, data_writer=writer)
+    application.open_vector(Path("points.geojson"))
+    application.select_point(Point(0, 0), tolerance=1.0)
+    output_path: Path = tmp_path / "selected.geojson"
+
+    result = application.export_active_layer(output_path)
+
+    assert writer.layer is not None
+    assert writer.layer.layer_id == "points"
+    assert writer.path == output_path
+    assert writer.selected_feature_ids == (1,)
+    assert result.path == output_path.resolve()
+    assert result.exported_feature_count == 1
+
+
+def test_export_active_vector_without_selection_uses_all_features(tmp_path: Path) -> None:
+    """活动矢量图层没有选择集时应导出全部要素。"""
+    reader: InMemoryVectorReader = InMemoryVectorReader(make_layer("points"))
+    writer: RecordingDataWriter = RecordingDataWriter()
+    application: GisApplication = GisApplication(data_reader=reader, data_writer=writer)
+    application.open_vector(Path("points.geojson"))
+
+    result = application.export_active_layer(tmp_path / "all.geojson")
+
+    assert writer.selected_feature_ids == ()
+    assert result.exported_feature_count == 2
+
+
+def test_export_without_active_layer_is_rejected(tmp_path: Path) -> None:
+    """空工作区不能执行导出。"""
+    writer: RecordingDataWriter = RecordingDataWriter()
+    application: GisApplication = GisApplication(
+        data_reader=InMemoryVectorReader(make_layer("unused")),
+        data_writer=writer,
+    )
+
+    with pytest.raises(NoActiveLayer, match="活动图层"):
+        application.export_active_layer(tmp_path / "empty.geojson")

@@ -3,7 +3,8 @@
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from pyproj import CRS
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
@@ -17,6 +18,7 @@ from app.application.errors import ApplicationError
 from app.application.gis_application import GisApplication
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.infrastructure.file_io.auto_reader import AutoDataReader
+from app.infrastructure.file_io.auto_writer import AutoDataWriter
 from app.presentation.widgets.attribute_table import AttributeTableDialog
 from app.presentation.widgets.layer_panel import LayerPanel
 from app.presentation.widgets.map_canvas import MapCanvas
@@ -30,7 +32,7 @@ class MainWindow(QMainWindow):
         """创建不含任何演示数据的空白 GIS 工作区。"""
         super().__init__()
         # 应用服务：统一编排空间数据读取和地图文档操作。
-        self._application: GisApplication = GisApplication(AutoDataReader())
+        self._application: GisApplication = GisApplication(AutoDataReader(), AutoDataWriter())
         # 顶部功能区：集中呈现文档规划的全部现有及预留功能入口。
         self._ribbon: RibbonBar = RibbonBar()
         # 图层面板：展示并操作当前地图文档中的真实图层。
@@ -49,6 +51,8 @@ class MainWindow(QMainWindow):
         self._selection_label: QLabel = QLabel("选中要素  0")
         # 坐标系标签：显示地图文档采用的显示坐标参考系统。
         self._crs_label: QLabel = QLabel("坐标系  未设置")
+        # 延迟刷新标记：避免在图层树信号回调中删除仍在处理事件的 Qt 节点。
+        self._workspace_refresh_scheduled: bool = False
         self._create_ui()
         self._connect_signals()
         self._refresh_workspace()
@@ -111,6 +115,7 @@ class MainWindow(QMainWindow):
         # 使用操作编号映射处理函数，避免大量重复的条件分支。
         implemented_actions: dict[str, Callable[[], None]] = {
             "open_data": self._open_data,
+            "export_layer": self._export_data,
             "zoom_in": self._map_canvas.zoom_in,
             "zoom_out": self._map_canvas.zoom_out,
             "pan": self._map_canvas.set_pan_tool,
@@ -148,6 +153,52 @@ class MainWindow(QMainWindow):
         if result.warning:
             self.statusBar().showMessage(result.warning, 5000)
 
+    def _export_data(self) -> None:
+        """选择活动图层的输出位置并执行真实空间数据导出。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        active_layer: LayerSnapshot | None = next(
+            (
+                layer
+                for layer in snapshot.layers
+                if layer.layer_id == snapshot.active_layer_id
+            ),
+            None,
+        )
+        if active_layer is None:
+            self.statusBar().showMessage("请先打开并选择一个图层。", 3500)
+            return
+
+        if active_layer.is_raster:
+            suggested_path: str = f"{active_layer.name}.tif"
+            filters: str = "GeoTIFF (*.tif *.tiff)"
+        else:
+            suggested_path = f"{active_layer.name}.geojson"
+            filters = "GeoJSON (*.geojson);;Shapefile (*.shp)"
+        path_string, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "导出空间数据",
+            suggested_path,
+            filters,
+        )
+        if not path_string:
+            return
+        output_path: Path = self._with_export_suffix(
+            Path(path_string),
+            selected_filter,
+            active_layer.is_raster,
+        )
+        try:
+            result = self._application.export_active_layer(output_path)
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "导出数据失败", str(error))
+            return
+        self._ready_label.setText(f"已导出  {result.path.name}")
+        QMessageBox.information(
+            self,
+            "导出数据成功",
+            f"空间数据已导出到：\n{result.path}",
+        )
+
     def _activate_layer(self, layer_id: str) -> None:
         """设置活动图层并刷新工作区。
 
@@ -155,7 +206,7 @@ class MainWindow(QMainWindow):
             layer_id: 图层面板选中的真实图层编号。
         """
         self._application.set_active_layer(layer_id)
-        self._refresh_workspace()
+        self._schedule_workspace_refresh()
 
     def _change_visibility(self, layer_id: str, visible: bool) -> None:
         """更新图层显隐状态并刷新工作区。
@@ -165,7 +216,7 @@ class MainWindow(QMainWindow):
             visible: 图层是否参与地图绘制和空间查询。
         """
         self._application.set_layer_visibility(layer_id, visible)
-        self._refresh_workspace()
+        self._schedule_workspace_refresh()
 
     def _remove_layer(self, layer_id: str) -> None:
         """删除指定图层并刷新工作区。
@@ -174,7 +225,7 @@ class MainWindow(QMainWindow):
             layer_id: 需要从地图文档移除的真实图层编号。
         """
         self._application.remove_layer(layer_id)
-        self._refresh_workspace()
+        self._schedule_workspace_refresh()
 
     def _move_layer(self, layer_id: str, target_index: int) -> None:
         """按照图层面板请求调整真实地图图层顺序。
@@ -184,7 +235,7 @@ class MainWindow(QMainWindow):
             target_index: 图层在从底到顶显示顺序中的目标位置。
         """
         self._application.move_layer(layer_id, target_index)
-        self._refresh_workspace()
+        self._schedule_workspace_refresh()
 
     def _show_attribute_table(self, layer_id: str) -> None:
         """打开指定真实图层的只读属性或栅格元数据窗口。
@@ -254,8 +305,35 @@ class MainWindow(QMainWindow):
                 active_name = layer.name
         self._layer_label.setText(f"当前图层  {active_name}")
         self._selection_label.setText(f"选中要素  {snapshot.selection_count}")
-        crs_name: str = snapshot.display_crs.to_string() if snapshot.display_crs else "未设置"
+        crs_name: str = self._format_crs(snapshot.display_crs)
         self._crs_label.setText(f"坐标系  {crs_name}")
+
+    def _schedule_workspace_refresh(self) -> None:
+        """在当前 Qt 事件结束后合并执行一次完整工作区刷新。
+
+        图层树节点发出的激活、显隐、删除和排序信号仍处于原生鼠标事件调用栈中。
+        若同步清空树节点，Qt 会继续访问已经销毁的节点并触发访问冲突。
+        """
+        if self._workspace_refresh_scheduled:
+            return
+        self._workspace_refresh_scheduled = True
+        QTimer.singleShot(0, self._run_scheduled_workspace_refresh)
+
+    def _run_scheduled_workspace_refresh(self) -> None:
+        """执行已经离开控件事件调用栈的工作区刷新。"""
+        self._workspace_refresh_scheduled = False
+        self._refresh_workspace()
+
+    @staticmethod
+    def _format_crs(crs: CRS | None) -> str:
+        """格式化坐标系权威编号和名称，区分 EPSG 与 ESRI 编码。"""
+        if crs is None:
+            return "未设置"
+        authority: tuple[str, str] | None = crs.to_authority()
+        if authority is None:
+            return crs.name
+        authority_name, authority_code = authority
+        return f"{authority_name}:{authority_code} · {crs.name}"
 
     @staticmethod
     def _status_separator() -> QLabel:
@@ -263,3 +341,14 @@ class MainWindow(QMainWindow):
         separator: QLabel = QLabel("│")
         separator.setObjectName("statusSeparator")
         return separator
+
+    @staticmethod
+    def _with_export_suffix(path: Path, selected_filter: str, is_raster: bool) -> Path:
+        """用户未输入扩展名时，根据所选格式补充稳定后缀。"""
+        if path.suffix:
+            return path
+        if is_raster:
+            return path.with_suffix(".tif")
+        if "Shapefile" in selected_filter:
+            return path.with_suffix(".shp")
+        return path.with_suffix(".geojson")

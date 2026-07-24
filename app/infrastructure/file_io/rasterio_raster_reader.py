@@ -62,8 +62,8 @@ class RasterioRasterReader:
                 if target_crs is not None and source_crs != target_crs:
                     # WarpedVRT 在读取阶段完成重投影，避免生成临时栅格文件。
                     with WarpedVRT(source, crs=target_crs) as projected:
-                        return self._read_dataset(projected, resolved_path, target_crs, source.count)
-                return self._read_dataset(source, resolved_path, source_crs, source.count)
+                        return self._read_dataset(projected, resolved_path, target_crs)
+                return self._read_dataset(source, resolved_path, source_crs)
         except IncompatibleCoordinateReferenceSystem:
             raise
         except Exception as error:
@@ -74,7 +74,6 @@ class RasterioRasterReader:
         dataset: DatasetReader,
         path: Path,
         crs: CRS | None,
-        source_band_count: int,
     ) -> RasterLayer:
         """从已确定坐标系的数据集读取显示波段和地理定位信息。
 
@@ -82,16 +81,18 @@ class RasterioRasterReader:
             dataset: 原始数据集或已完成动态重投影的数据集。
             path: 用于记录来源和生成图层名称的文件路径。
             crs: 数据集当前坐标参考系统。
-            source_band_count: 原始文件波段数量。
-
         返回:
             完成显示波段合成的栅格领域图层。
         """
         indexes: tuple[int, ...] = self._display_band_indexes(dataset.count)
-        # Rasterio 返回“波段×高度×宽度”，后续再合成为 RGBA 通道。
-        values: NDArray[np.float64] = dataset.read(indexes).astype(np.float64)
-        masks: NDArray[np.uint8] = dataset.read_masks(indexes)
-        rgba: NDArray[np.uint8] = self._to_rgba(values, masks)
+        # 全波段真实数据供分析和导出使用；拉伸仅作用于独立的显示缓存。
+        raster_data: NDArray[np.generic] = dataset.read()
+        band_masks: NDArray[np.uint8] = dataset.read_masks()
+        display_offsets: tuple[int, ...] = tuple(index - 1 for index in indexes)
+        display_values: NDArray[np.float64] = raster_data[list(display_offsets)].astype(np.float64)
+        display_masks: NDArray[np.uint8] = band_masks[list(display_offsets)]
+        rgba: NDArray[np.uint8] = self._to_rgba(display_values, display_masks)
+        valid_mask: NDArray[np.bool_] = np.all(band_masks > 0, axis=0)
         transform: Affine = dataset.transform
         raw_bounds: tuple[float, float, float, float] = array_bounds(
             dataset.height, dataset.width, transform
@@ -104,12 +105,14 @@ class RasterioRasterReader:
         )
         return RasterLayer.create(
             name=path.stem,
+            raster_data=raster_data,
             image_data=rgba,
+            valid_mask=valid_mask,
             transform=transform,
             crs=crs,
             bounds=bounds,
+            nodata=dataset.nodata,
             source_path=path,
-            band_count=source_band_count,
         )
 
     @staticmethod
