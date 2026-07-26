@@ -166,6 +166,85 @@ QGraphicsView {
     background: #f3f6fa;
 }
 
+QLineEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox {
+    min-height: 28px;
+    padding: 2px 8px;
+    border: 1px solid #cfd9e5;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #263548;
+    selection-background-color: #dcecf9;
+    selection-color: #0f5f9f;
+}
+
+QLineEdit:focus,
+QComboBox:focus,
+QSpinBox:focus,
+QDoubleSpinBox:focus {
+    border-color: #0f6cbd;
+}
+
+QComboBox:hover,
+QSpinBox:hover,
+QDoubleSpinBox:hover {
+    border-color: #9dc3e3;
+}
+
+QComboBox::drop-down {
+    width: 26px;
+    border: none;
+    border-left: 1px solid #d9e1ea;
+    background: #f8fafc;
+}
+
+QAbstractItemView,
+QComboBox QAbstractItemView,
+QListView,
+QTreeView {
+    border: 1px solid #cbd6e2;
+    background: #ffffff;
+    color: #263548;
+    selection-background-color: #dcecf9;
+    selection-color: #0f5f9f;
+    outline: none;
+}
+
+QAbstractItemView::item,
+QComboBox QAbstractItemView::item,
+QListView::item,
+QTreeView::item {
+    min-height: 28px;
+    padding: 4px 10px;
+    background: #ffffff;
+    color: #263548;
+}
+
+QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:selected,
+QListView::item:selected,
+QTreeView::item:selected {
+    background: #dcecf9;
+    color: #0f5f9f;
+}
+
+QAbstractItemView::item:hover,
+QComboBox QAbstractItemView::item:hover,
+QListView::item:hover,
+QTreeView::item:hover {
+    background: #edf5fc;
+    color: #0f5f9f;
+}
+
+QToolTip {
+    padding: 4px 8px;
+    border: 1px solid #cbd6e2;
+    background: #ffffff;
+    color: #263548;
+}
+
 QMenu {
     min-width: 150px;
     padding: 4px;
