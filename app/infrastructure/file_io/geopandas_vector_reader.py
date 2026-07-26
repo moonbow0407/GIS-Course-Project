@@ -4,6 +4,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+import fiona
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -26,9 +27,27 @@ class GeoPandasVectorReader:
     """读取常见矢量文件并转换为应用统一领域模型。"""
 
     # 支持扩展名：限定当前经过测试且允许用户选择的矢量格式。
-    SUPPORTED_SUFFIXES: frozenset[str] = frozenset({".shp", ".geojson", ".json"})
+    SUPPORTED_SUFFIXES: frozenset[str] = frozenset({".shp", ".geojson", ".json", ".gpkg"})
 
-    def read(self, path: Path, target_crs: CRS | None = None) -> VectorLayer:
+    @staticmethod
+    def list_layers(path: Path) -> tuple[str, ...]:
+        """返回 GeoPackage 中的矢量图层名称。"""
+        resolved_path: Path = path.expanduser().resolve()
+        if resolved_path.suffix.lower() != ".gpkg":
+            return ()
+        if not resolved_path.is_file():
+            raise VectorFileNotFound(f"矢量文件不存在：{resolved_path}")
+        try:
+            return tuple(fiona.listlayers(resolved_path))
+        except Exception as error:
+            raise VectorReadFailed(f"GeoPackage 图层列表读取失败：{resolved_path.name}") from error
+
+    def read(
+        self,
+        path: Path,
+        target_crs: CRS | None = None,
+        layer_name: str | None = None,
+    ) -> VectorLayer:
         """读取矢量文件，规范化字段，并按需转换坐标参考系统。"""
         resolved_path: Path = path.expanduser().resolve()
         if not resolved_path.is_file():
@@ -38,7 +57,18 @@ class GeoPandasVectorReader:
             raise UnsupportedVectorFormat(f"暂不支持该矢量文件格式：{suffix or '无扩展名'}")
 
         try:
-            dataframe: gpd.GeoDataFrame = gpd.read_file(resolved_path)
+            resolved_layer_name: str | None = layer_name
+            if resolved_path.suffix.lower() == ".gpkg" and resolved_layer_name is None:
+                layer_names: list[str] = list(fiona.listlayers(resolved_path))
+                if len(layer_names) != 1:
+                    raise ValueError(
+                        "GeoPackage 包含多个图层，请在工程或调用方中指定图层名称。"
+                    )
+                resolved_layer_name = layer_names[0]
+            dataframe: gpd.GeoDataFrame = gpd.read_file(
+                resolved_path,
+                layer=resolved_layer_name,
+            )
         except Exception as error:
             raise VectorReadFailed(f"矢量文件读取失败：{resolved_path.name}") from error
 
@@ -89,10 +119,11 @@ class GeoPandasVectorReader:
             raise NoUsableGeometry(f"矢量数据集不包含可用几何：{resolved_path.name}")
 
         return VectorLayer.create(
-            name=resolved_path.stem,
+            name=resolved_layer_name or resolved_path.stem,
             features=tuple(features),
             crs=source_crs,
             source_path=resolved_path,
+            source_layer_name=resolved_layer_name,
         )
 
     @staticmethod

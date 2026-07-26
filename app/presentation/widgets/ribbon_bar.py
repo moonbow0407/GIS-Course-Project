@@ -208,7 +208,6 @@ class RibbonBar(QWidget):
                 (
                     RibbonGroupSpec("数据", (
                         RibbonActionSpec("open_data", "打开数据", "▱", "#d97706"),
-                        RibbonActionSpec("save_layer", "保存图层", "▣", "#2563eb"),
                         RibbonActionSpec("export_layer", "导出数据", "⇱", "#0f766e"),
                     )),
                     RibbonGroupSpec("工程", (

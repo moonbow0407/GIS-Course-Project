@@ -273,7 +273,11 @@ class GisApplication:
                 return layer
         raise LayerNotFound(f"图层不存在：{layer_id}")
 
-    def export_active_layer(self, path: Path) -> ExportDataResult:
+    def export_active_layer(
+        self,
+        path: Path,
+        layer_name: str | None = None,
+    ) -> ExportDataResult:
         """将活动图层按当前坐标系导出到指定本地路径。
 
         矢量图层存在选择集时仅导出选中要素；否则导出全部要素。栅格图层
@@ -293,7 +297,10 @@ class GisApplication:
             if isinstance(layer, VectorLayer)
             else ()
         )
-        self.data_writer.write(layer, path, selected_feature_ids)
+        if layer_name is None:
+            self.data_writer.write(layer, path, selected_feature_ids)
+        else:
+            self.data_writer.write(layer, path, selected_feature_ids, layer_name)
         exported_feature_count: int | None = None
         if isinstance(layer, VectorLayer):
             exported_feature_count = (

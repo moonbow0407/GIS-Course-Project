@@ -23,10 +23,11 @@ class AutoDataWriter:
         layer: SpatialLayer,
         path: Path,
         selected_feature_ids: tuple[FeatureId, ...] = (),
+        layer_name: str | None = None,
     ) -> None:
         """根据图层类型调用对应写入器。"""
         if isinstance(layer, VectorLayer):
-            self._vector_writer.write(layer, path, selected_feature_ids)
+            self._vector_writer.write(layer, path, selected_feature_ids, layer_name)
             return
         if isinstance(layer, RasterLayer):
             self._raster_writer.write(layer, path)

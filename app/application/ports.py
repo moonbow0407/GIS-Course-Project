@@ -5,6 +5,7 @@ from typing import Protocol
 
 from pyproj import CRS
 
+from app.application.project_models import ProjectManifest
 from app.domain.feature import FeatureId
 from app.domain.spatial_layer import SpatialLayer
 from app.domain.vector_layer import VectorLayer
@@ -13,7 +14,12 @@ from app.domain.vector_layer import VectorLayer
 class VectorReader(Protocol):
     """定义将外部矢量数据读取为统一领域图层的能力。"""
 
-    def read(self, path: Path, target_crs: CRS | None = None) -> VectorLayer:
+    def read(
+        self,
+        path: Path,
+        target_crs: CRS | None = None,
+        layer_name: str | None = None,
+    ) -> VectorLayer:
         """读取指定文件，并在需要时转换到目标坐标参考系统。"""
         ...
 
@@ -21,7 +27,12 @@ class VectorReader(Protocol):
 class DataReader(Protocol):
     """定义自动读取外部矢量或栅格数据的能力。"""
 
-    def read(self, path: Path, target_crs: CRS | None = None) -> SpatialLayer:
+    def read(
+        self,
+        path: Path,
+        target_crs: CRS | None = None,
+        layer_name: str | None = None,
+    ) -> SpatialLayer:
         """读取指定空间数据，并在需要时转换到目标坐标参考系统。"""
         ...
 
@@ -34,6 +45,19 @@ class DataWriter(Protocol):
         layer: SpatialLayer,
         path: Path,
         selected_feature_ids: tuple[FeatureId, ...] = (),
+        layer_name: str | None = None,
     ) -> None:
         """写出图层；矢量选择集非空时仅写出选中要素。"""
+        ...
+
+
+class ProjectStore(Protocol):
+    """定义工程清单的持久化能力。"""
+
+    def load(self, path: Path) -> ProjectManifest:
+        """读取并校验一个工程清单。"""
+        ...
+
+    def save(self, path: Path, manifest: ProjectManifest) -> None:
+        """将工程清单原子写入指定路径。"""
         ...

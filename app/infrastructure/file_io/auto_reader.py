@@ -24,7 +24,12 @@ class AutoDataReader:
         self._vector_reader: GeoPandasVectorReader = GeoPandasVectorReader()
         self._raster_reader: RasterioRasterReader = RasterioRasterReader()
 
-    def read(self, path: Path, target_crs: CRS | None = None) -> SpatialLayer:
+    def read(
+        self,
+        path: Path,
+        target_crs: CRS | None = None,
+        layer_name: str | None = None,
+    ) -> SpatialLayer:
         """根据扩展名自动识别并读取矢量或栅格数据。
 
         参数:
@@ -40,7 +45,11 @@ class AutoDataReader:
         """
         suffix: str = path.suffix.lower()
         if suffix in self.VECTOR_SUFFIXES:
-            return self._vector_reader.read(path, target_crs)
+            return self._vector_reader.read(path, target_crs, layer_name)
         if suffix in self.RASTER_SUFFIXES:
             return self._raster_reader.read(path, target_crs)
         raise UnsupportedVectorFormat(f"无法识别空间数据类型：{suffix or '无扩展名'}")
+
+    def list_layers(self, path: Path) -> tuple[str, ...]:
+        """返回容器型矢量数据中的可选图层名称。"""
+        return self._vector_reader.list_layers(path)

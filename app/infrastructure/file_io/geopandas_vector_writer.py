@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import fiona
 import geopandas as gpd
 
 from app.application.errors import DataWriteFailed, UnsupportedExportFormat
@@ -10,11 +11,12 @@ from app.domain.vector_layer import VectorLayer
 
 
 class GeoPandasVectorWriter:
-    """把内存矢量图层写出为 Shapefile 或 GeoJSON。"""
+    """把内存矢量图层写出为 Shapefile、GeoJSON 或 GeoPackage。"""
 
     _DRIVERS: dict[str, str] = {
         ".shp": "ESRI Shapefile",
         ".geojson": "GeoJSON",
+        ".gpkg": "GPKG",
     }
 
     def write(
@@ -22,6 +24,7 @@ class GeoPandasVectorWriter:
         layer: VectorLayer,
         path: Path,
         selected_feature_ids: tuple[FeatureId, ...] = (),
+        layer_name: str | None = None,
     ) -> None:
         """写出全部要素或非空选择集，并保留图层当前坐标系。"""
         resolved_path: Path = path.expanduser().resolve()
@@ -43,6 +46,25 @@ class GeoPandasVectorWriter:
         if not features:
             raise DataWriteFailed("选择集中没有可导出的矢量要素。")
 
+        resolved_layer_name: str | None = layer_name
+        write_mode: str = "w"
+        if suffix == ".gpkg":
+            resolved_layer_name = resolved_layer_name or layer.name
+            if not resolved_layer_name.strip():
+                raise DataWriteFailed("GeoPackage 图层名称不能为空。")
+            if resolved_path.exists():
+                try:
+                    existing_layers: list[str] = list(fiona.listlayers(resolved_path))
+                except Exception as error:
+                    raise DataWriteFailed(
+                        f"无法读取 GeoPackage 图层列表：{resolved_path.name}"
+                    ) from error
+                if resolved_layer_name in existing_layers:
+                    raise DataWriteFailed(
+                        f"GeoPackage 图层已存在，不能覆盖旧结果：{resolved_layer_name}"
+                    )
+                write_mode = "a"
+
         dataframe: gpd.GeoDataFrame = gpd.GeoDataFrame(
             [dict(feature.attributes) for feature in features],
             geometry=[feature.geometry for feature in features],
@@ -52,6 +74,8 @@ class GeoPandasVectorWriter:
             dataframe.to_file(
                 resolved_path,
                 driver=driver,
+                layer=resolved_layer_name,
+                mode=write_mode,
                 encoding="UTF-8",
                 index=False,
             )

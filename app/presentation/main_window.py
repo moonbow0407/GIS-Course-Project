@@ -176,7 +176,7 @@ class MainWindow(QMainWindow):
             filters: str = "GeoTIFF (*.tif *.tiff)"
         else:
             suggested_path = f"{active_layer.name}.geojson"
-            filters = "GeoJSON (*.geojson);;Shapefile (*.shp)"
+            filters = "GeoJSON (*.geojson);;GeoPackage (*.gpkg);;Shapefile (*.shp)"
         path_string, selected_filter = QFileDialog.getSaveFileName(
             self,
             "导出空间数据",
@@ -191,7 +191,10 @@ class MainWindow(QMainWindow):
             active_layer.is_raster,
         )
         try:
-            result = self._application.export_active_layer(output_path)
+            layer_name: str | None = (
+                active_layer.name if output_path.suffix.lower() == ".gpkg" else None
+            )
+            result = self._application.export_active_layer(output_path, layer_name)
         except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "导出数据失败", str(error))
             return
@@ -381,4 +384,6 @@ class MainWindow(QMainWindow):
             return path.with_suffix(".tif")
         if "Shapefile" in selected_filter:
             return path.with_suffix(".shp")
+        if "GeoPackage" in selected_filter:
+            return path.with_suffix(".gpkg")
         return path.with_suffix(".geojson")

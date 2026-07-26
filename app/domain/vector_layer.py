@@ -59,6 +59,9 @@ class VectorLayer:
     # 数据源路径：记录图层来源；内存构造图层时可以为空。
     source_path: Path | None = None
 
+    # 数据源内的子图层名称：GeoPackage 等容器格式需要额外记录此字段。
+    source_layer_name: str | None = None
+
     # 图层范围：根据全部有效几何计算得到的最小包围矩形。
     bounds: Bounds = field(init=False)
 
@@ -120,6 +123,7 @@ class VectorLayer:
         features: tuple[Feature, ...],
         crs: CRS | None,
         source_path: Path | None = None,
+        source_layer_name: str | None = None,
         layer_id: str | None = None,
     ) -> "VectorLayer":
         """创建矢量图层，并在未提供编号时生成稳定的随机编号。"""
@@ -130,4 +134,5 @@ class VectorLayer:
             features=features,
             crs=crs,
             source_path=source_path,
+            source_layer_name=source_layer_name,
         )
