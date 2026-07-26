@@ -86,8 +86,14 @@ uv run mypy app
 uv run pytest
 ```
 
-当前基线为 53 项测试通过，覆盖领域图层、地图文档、应用服务、矢量与栅格读写器、
+当前基线为 64 项测试通过，覆盖领域图层、地图文档、应用服务、矢量与栅格读写器、
 图层面板和 Qt 矢量渲染等已有能力。
+
+工程文件使用 `.gisproj` 扩展名。工程文件保存图层路径、图层顺序、显隐状态、活动图层、
+地图 CRS、视图状态和分析历史；分析结果默认可以写入工程目录下的
+`project_data/results.gpkg`，同一 GeoPackage 中的每次分析使用不同图层名，旧结果不会被覆盖。
+重新打开工程时会恢复结果图层和分析历史；如果输入文件的大小或修改时间发生变化，相关分析会
+标记为可能过期，但不会自动重新运行。
 
 ## 项目结构
 
@@ -96,7 +102,7 @@ gis_desktop/
 ├── app/
 │   ├── application/          # 应用服务、端口和结果对象
 │   ├── domain/               # 矢量、栅格、要素和地图文档模型
-│   ├── infrastructure/       # GeoPandas、Rasterio 文件读取适配器
+│   ├── infrastructure/       # GeoPandas、Rasterio、工程文件适配器
 │   ├── presentation/         # 主窗口、功能区、面板、画布和渲染器
 │   └── resources/styles/     # 全局 QSS 主题
 ├── tests/                    # 自动化测试

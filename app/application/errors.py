@@ -59,3 +59,23 @@ class DataWriteFailed(ApplicationError):
 
 class LayerReprojectionFailed(ApplicationError):
     """表示图层无法根据原始数据源转换到目标坐标系。"""
+
+
+class ProjectReadFailed(ApplicationError):
+    """表示工程文件无法读取或格式校验失败。"""
+
+
+class ProjectWriteFailed(ApplicationError):
+    """表示工程快照无法写入目标路径。"""
+
+
+class ProjectSourceMissing(ApplicationError):
+    """表示工程引用的外部数据源不存在。"""
+
+
+class ProjectNotSaved(ApplicationError):
+    """表示需要先为未命名工程选择保存位置。"""
+
+
+class ProjectStoreNotConfigured(ApplicationError):
+    """表示应用入口没有注入工程存储适配器。"""

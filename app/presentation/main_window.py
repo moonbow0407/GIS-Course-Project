@@ -6,6 +6,7 @@ from pathlib import Path
 from pyproj import CRS
 from pyproj.exceptions import CRSError
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QFileDialog,
     QInputDialog,
@@ -18,9 +19,11 @@ from PySide6.QtWidgets import (
 
 from app.application.errors import ApplicationError
 from app.application.gis_application import GisApplication
+from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
+from app.infrastructure.project.json_project_store import JsonProjectStore
 from app.presentation.widgets.attribute_table import AttributeTableDialog
 from app.presentation.widgets.layer_panel import LayerPanel
 from app.presentation.widgets.map_canvas import MapCanvas
@@ -34,7 +37,12 @@ class MainWindow(QMainWindow):
         """创建不含任何演示数据的空白 GIS 工作区。"""
         super().__init__()
         # 应用服务：统一编排空间数据读取和地图文档操作。
-        self._application: GisApplication = GisApplication(AutoDataReader(), AutoDataWriter())
+        self._data_reader: AutoDataReader = AutoDataReader()
+        self._application: GisApplication = GisApplication(
+            self._data_reader,
+            AutoDataWriter(),
+            project_store=JsonProjectStore(),
+        )
         # 顶部功能区：集中呈现文档规划的全部现有及预留功能入口。
         self._ribbon: RibbonBar = RibbonBar()
         # 图层面板：展示并操作当前地图文档中的真实图层。
@@ -118,6 +126,9 @@ class MainWindow(QMainWindow):
         implemented_actions: dict[str, Callable[[], None]] = {
             "open_data": self._open_data,
             "export_layer": self._export_data,
+            "new_project": self._new_project,
+            "open_project": self._open_project,
+            "save_project": self._save_project_action,
             "zoom_in": self._map_canvas.zoom_in,
             "zoom_out": self._map_canvas.zoom_out,
             "pan": self._map_canvas.set_pan_tool,
@@ -142,12 +153,33 @@ class MainWindow(QMainWindow):
             self,
             "打开空间数据",
             "",
-            "空间数据 (*.shp *.geojson *.json *.tif *.tiff *.img *.dem);;所有文件 (*.*)",
+            "空间数据 (*.shp *.geojson *.json *.gpkg *.tif *.tiff *.img *.dem);;所有文件 (*.*)",
         )[0]
         if not path_string:
             return
+        data_path: Path = Path(path_string)
+        layer_name: str | None = None
+        if data_path.suffix.lower() == ".gpkg":
+            try:
+                layer_names: tuple[str, ...] = self._data_reader.list_layers(data_path)
+            except ApplicationError as error:
+                QMessageBox.warning(self, "打开数据失败", str(error))
+                return
+            if len(layer_names) > 1:
+                layer_name, accepted = QInputDialog.getItem(
+                    self,
+                    "选择 GeoPackage 图层",
+                    "图层：",
+                    list(layer_names),
+                    0,
+                    False,
+                )
+                if not accepted or not layer_name:
+                    return
+            elif layer_names:
+                layer_name = layer_names[0]
         try:
-            result = self._application.open_data(Path(path_string))
+            result = self._application.open_data(data_path, layer_name)
         except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "打开数据失败", str(error))
             return
@@ -204,6 +236,66 @@ class MainWindow(QMainWindow):
             "导出数据成功",
             f"空间数据已导出到：\n{result.path}",
         )
+
+    def _new_project(self) -> None:
+        """新建空白工程，并在需要时处理当前未保存修改。"""
+        if not self._confirm_project_switch():
+            return
+        self._application.new_project()
+        self._refresh_workspace()
+        self._ready_label.setText("已新建空白工程")
+
+    def _open_project(self) -> None:
+        """选择工程文件并恢复其中的图层、结果和分析历史。"""
+        path_string: str = QFileDialog.getOpenFileName(
+            self,
+            "打开 GIS 工程",
+            "",
+            "GIS 工程 (*.gisproj);;所有文件 (*.*)",
+        )[0]
+        if not path_string:
+            return
+        if not self._confirm_project_switch():
+            return
+        try:
+            result = self._application.open_project(Path(path_string))
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "打开工程失败", str(error))
+            return
+        self._refresh_workspace(result.view_state)
+        self._ready_label.setText(f"已打开工程  {result.path.name}")
+        if result.warnings:
+            self.statusBar().showMessage("；".join(result.warnings), 8000)
+
+    def _save_project(self) -> bool:
+        """保存当前工程快照；未命名工程先选择工程路径。"""
+        project_path: Path | None = self._application.project_path
+        if project_path is None:
+            path_string: str = QFileDialog.getSaveFileName(
+                self,
+                "保存 GIS 工程",
+                "未命名工程.gisproj",
+                "GIS 工程 (*.gisproj)",
+            )[0]
+            if not path_string:
+                return False
+            project_path = Path(path_string)
+        if not project_path.suffix:
+            project_path = project_path.with_suffix(".gisproj")
+        try:
+            result = self._application.save_project(
+                project_path,
+                self._map_canvas.capture_view_state(),
+            )
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "保存工程失败", str(error))
+            return False
+        self._ready_label.setText(f"工程已保存  {result.path.name}")
+        return True
+
+    def _save_project_action(self) -> None:
+        """适配功能区无返回值的保存工程操作。"""
+        self._save_project()
 
     def _activate_layer(self, layer_id: str) -> None:
         """设置活动图层并刷新工作区。
@@ -327,11 +419,13 @@ class MainWindow(QMainWindow):
             "GIS 桌面通用平台\n\n基于 PySide6、GeoPandas 与 Rasterio 构建。\n当前版本已完成统一主界面和功能接口集成。",
         )
 
-    def _refresh_workspace(self) -> None:
+    def _refresh_workspace(self, view_state: MapViewState | None = None) -> None:
         """将应用层最新快照同步到图层面板、地图和状态栏。"""
         snapshot: WorkspaceSnapshot = self._application.snapshot()
         self._layer_panel.apply_snapshot(snapshot)
         self._map_canvas.set_snapshot(snapshot)
+        if view_state is not None:
+            self._map_canvas.restore_view_state(view_state)
         active_name: str = "无"
         for layer in snapshot.layers:
             if layer.layer_id == snapshot.active_layer_id:
@@ -340,6 +434,7 @@ class MainWindow(QMainWindow):
         self._selection_label.setText(f"选中要素  {snapshot.selection_count}")
         crs_name: str = self._format_crs(snapshot.display_crs)
         self._crs_label.setText(f"坐标系  {crs_name}")
+        self._update_window_title()
 
     def _schedule_workspace_refresh(self) -> None:
         """在当前 Qt 事件结束后合并执行一次完整工作区刷新。
@@ -356,6 +451,36 @@ class MainWindow(QMainWindow):
         """执行已经离开控件事件调用栈的工作区刷新。"""
         self._workspace_refresh_scheduled = False
         self._refresh_workspace()
+
+    def _confirm_project_switch(self) -> bool:
+        """在新建、打开或关闭工程前处理未保存修改。"""
+        if not self._application.is_modified or self._application.project_store is None:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "保存工程修改",
+            "当前工程有未保存修改，是否先保存？",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Save:
+            return self._save_project()
+        return answer == QMessageBox.StandardButton.Discard
+
+    def _update_window_title(self) -> None:
+        """根据工程名称和修改状态更新窗口标题。"""
+        title: str = self._application.project_name
+        if self._application.is_modified:
+            title += " *"
+        self.setWindowTitle(f"{title} · GIS桌面通用平台")
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """关闭窗口前避免未保存工程修改被静默丢弃。"""
+        if self._confirm_project_switch():
+            event.accept()
+        else:
+            event.ignore()
 
     @staticmethod
     def _format_crs(crs: CRS | None) -> str:

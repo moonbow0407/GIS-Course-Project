@@ -4,6 +4,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QMouseEvent, QPainter, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView, QLabel, QVBoxLayout
 
+from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.raster_layer import RasterLayer
 from app.presentation.renderers.qt_raster_renderer import QtRasterRenderer
@@ -107,6 +108,29 @@ class MapCanvas(QGraphicsView):
         self.fitInView(map_scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
         self._ensure_pan_area()
         self._reset_view_scale()
+
+    def capture_view_state(self) -> MapViewState:
+        """捕获当前地图中心和相对于全图的缩放比例。"""
+        center: QPointF = self.mapToScene(self.viewport().rect().center())
+        # 场景 Y 轴为屏幕向下，工程中的地图坐标仍使用向上为正的约定。
+        return MapViewState(
+            center_x=center.x(),
+            center_y=-center.y(),
+            zoom_percent=self._zoom_percent,
+        )
+
+    def restore_view_state(self, view_state: MapViewState) -> None:
+        """在当前图层场景上恢复工程保存的地图中心和缩放比例。"""
+        if self._map_scene_rect is None:
+            return
+        self.fitInView(self._map_scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
+        scale_factor: float = view_state.zoom_percent / 100.0
+        if scale_factor != 1.0:
+            self.scale(scale_factor, scale_factor)
+        self._zoom_percent = view_state.zoom_percent
+        self._ensure_pan_area()
+        self.centerOn(QPointF(view_state.center_x, -view_state.center_y))
+        self._emit_view_scale()
 
     def set_pan_tool(self) -> None:
         """切换到地图平移工具。"""

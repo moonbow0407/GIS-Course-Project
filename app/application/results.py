@@ -6,6 +6,7 @@ from typing import TypeAlias
 
 from pyproj import CRS
 
+from app.application.project_models import AnalysisRun, MapViewState
 from app.domain.feature import Feature, FeatureId
 from app.domain.layer_style import GeometryFamily
 from app.domain.raster_layer import RasterLayer
@@ -132,6 +133,34 @@ class ExportDataResult:
 
     # 导出要素数量：矢量为实际写出数量，栅格为空值。
     exported_feature_count: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectOpenResult:
+    """表示工程打开并恢复完成后的工作区结果。"""
+
+    path: Path
+    snapshot: WorkspaceSnapshot
+    view_state: MapViewState | None
+    analysis_runs: tuple[AnalysisRun, ...]
+    warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectSaveResult:
+    """表示工程快照保存完成后的结果。"""
+
+    path: Path
+    layer_count: int
+    analysis_run_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisResultPersisted:
+    """表示分析结果已写入 GeoPackage 并加入当前工作区。"""
+
+    run: AnalysisRun
+    snapshot: WorkspaceSnapshot
 
 
 # 旧矢量结果名称：仅供既有调用代码兼容，新代码应使用 OpenDataResult。
