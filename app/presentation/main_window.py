@@ -8,6 +8,7 @@ from pyproj.exceptions import CRSError
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QInputDialog,
     QLabel,
@@ -25,6 +26,7 @@ from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
 from app.infrastructure.project.json_project_store import JsonProjectStore
 from app.presentation.widgets.attribute_table import AttributeTableDialog
+from app.presentation.widgets.buffer_analysis_dialog import BufferAnalysisDialog
 from app.presentation.widgets.layer_panel import LayerPanel
 from app.presentation.widgets.map_canvas import MapCanvas
 from app.presentation.widgets.ribbon_bar import RibbonBar
@@ -135,6 +137,7 @@ class MainWindow(QMainWindow):
             "full_extent": self._map_canvas.zoom_to_full_extent,
             "refresh_map": self._refresh_workspace,
             "clear_selection": self._clear_selection,
+            "buffer_analysis": self._buffer_analysis,
             "toggle_layers": self._toggle_layer_panel,
             "show_attributes": self._show_active_attribute_table,
             "set_crs": self._set_display_crs,
@@ -390,6 +393,38 @@ class MainWindow(QMainWindow):
             return
         self._refresh_workspace()
         self._ready_label.setText(f"地图 CRS 已设置为 {self._format_crs(target_crs)}")
+
+    def _buffer_analysis(self) -> None:
+        """打开缓冲区参数窗口并执行真实分析结果写出。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        vector_layers: tuple[LayerSnapshot, ...] = tuple(
+            layer for layer in snapshot.layers if not layer.is_raster
+        )
+        if not vector_layers:
+            self.statusBar().showMessage("当前工作区没有可用于缓冲区分析的矢量图层。", 4000)
+            return
+
+        dialog: BufferAnalysisDialog = BufferAnalysisDialog(
+            snapshot.layers,
+            display_crs=snapshot.display_crs,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            result = self._application.buffer_analysis(dialog.request())
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "缓冲区分析失败", str(error))
+            return
+        self._refresh_workspace()
+        self._ready_label.setText(f"已生成缓冲区  {result.output_layer_name}")
+        QMessageBox.information(
+            self,
+            "缓冲区分析完成",
+            f"结果图层：{result.output_layer_name}\n"
+            f"要素数量：{result.feature_count}\n"
+            f"输出位置：\n{result.output_path}",
+        )
 
     def _toggle_layer_panel(self) -> None:
         """切换左侧图层管理面板的显示状态。"""

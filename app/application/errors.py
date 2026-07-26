@@ -57,6 +57,22 @@ class DataWriteFailed(ApplicationError):
     """表示空间图层无法写入指定输出位置。"""
 
 
+class InvalidBufferParameters(ApplicationError):
+    """表示缓冲区分析参数不满足业务约束。"""
+
+
+class UnsupportedBufferInput(ApplicationError):
+    """表示缓冲区分析输入不是可处理的矢量图层。"""
+
+
+class BufferAnalysisFailed(ApplicationError):
+    """表示缓冲区几何计算失败。"""
+
+
+class EmptyBufferResult(ApplicationError):
+    """表示缓冲区计算后没有产生可用几何。"""
+
+
 class LayerReprojectionFailed(ApplicationError):
     """表示图层无法根据原始数据源转换到目标坐标系。"""
 

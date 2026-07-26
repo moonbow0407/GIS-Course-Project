@@ -9,14 +9,18 @@ from pyproj import CRS
 from shapely.geometry import Point, Polygon
 
 from app.application.analysis_environment import AnalysisEnvironment
+from app.application.buffer_analysis import BufferRequest, buffer_features, reproject_features
 from app.application.errors import (
     ApplicationError,
+    BufferAnalysisFailed,
     DataWriteFailed,
+    InvalidBufferParameters,
     LayerNotFound,
     LayerReprojectionFailed,
     NoActiveLayer,
     ProjectNotSaved,
     ProjectStoreNotConfigured,
+    UnsupportedBufferInput,
 )
 from app.application.ports import DataReader, DataWriter, ProjectStore
 from app.application.project_models import (
@@ -27,6 +31,7 @@ from app.application.project_models import (
 from app.application.project_service import ProjectService
 from app.application.results import (
     AnalysisResultPersisted,
+    BufferAnalysisResult,
     ExportDataResult,
     LayerSnapshot,
     OpenDataResult,
@@ -335,6 +340,112 @@ class GisApplication:
         self._analysis_runs = self._analysis_runs + (run,)
         self._modified = True
         return AnalysisResultPersisted(run=run, snapshot=self.snapshot())
+
+    def buffer_analysis(self, request: BufferRequest) -> BufferAnalysisResult:
+        """执行缓冲区分析、写出结果并将结果图层加入当前工作区。
+
+        参数:
+            request: 输入图层、输出位置、距离和几何样式等分析参数。
+
+        返回:
+            包含输出图层编号、写出路径、要素数量和最新工作区快照的结果。
+
+        异常:
+            UnsupportedBufferInput: 输入图层不是有坐标系的矢量图层。
+            DataWriteFailed: 输出服务未配置或结果无法写出。
+            ApplicationError: 输入图层转换或缓冲计算失败。
+        """
+        if self.data_writer is None:
+            raise DataWriteFailed("空间数据写出服务尚未配置。")
+
+        input_layer: SpatialLayer = self._find_layer(request.input_layer_id)
+        if not isinstance(input_layer, VectorLayer):
+            raise UnsupportedBufferInput("缓冲区分析的输入必须是矢量图层。")
+        if input_layer.crs is None:
+            raise UnsupportedBufferInput(
+                f"输入图层“{input_layer.name}”没有坐标参考系统，无法安全执行缓冲区分析。"
+            )
+        display_crs: CRS | None = self._document.display_crs
+        if display_crs is None:
+            raise UnsupportedBufferInput("当前地图没有坐标参考系统，无法加入缓冲区结果。")
+
+        output_path: Path = request.output_path.expanduser().resolve()
+        output_name: str = request.output_layer_name.strip()
+        if not output_name:
+            raise InvalidBufferParameters("缓冲区输出图层名不能为空。")
+        if (
+            input_layer.source_path is not None
+            and output_path == input_layer.source_path.resolve()
+            and output_path.suffix.lower() != ".gpkg"
+        ):
+            raise InvalidBufferParameters("缓冲区输出位置不能覆盖输入图层源文件。")
+        if output_path.exists() and output_path.suffix.lower() != ".gpkg":
+            raise InvalidBufferParameters("分析结果输出已存在，请使用新的结果文件或图层名称。")
+
+        environment: AnalysisEnvironment = self.create_analysis_environment(request.analysis_crs)
+        prepared_layers: tuple[SpatialLayer, ...] = self.prepare_analysis_layers(
+            (input_layer.layer_id,),
+            environment,
+        )
+        prepared_layer: SpatialLayer = prepared_layers[0]
+        if not isinstance(prepared_layer, VectorLayer) or prepared_layer.crs is None:
+            raise UnsupportedBufferInput("缓冲区分析输入无法转换为有坐标系的矢量图层。")
+
+        calculated_features = buffer_features(prepared_layer, request)
+        try:
+            output_features = reproject_features(
+                calculated_features,
+                prepared_layer.crs,
+                display_crs,
+            )
+        except BufferAnalysisFailed:
+            raise
+        except Exception as error:
+            raise BufferAnalysisFailed("缓冲区结果无法转换到地图显示坐标系。") from error
+
+        source_layer_name: str | None = (
+            output_name if output_path.suffix.lower() == ".gpkg" else None
+        )
+        output_layer: VectorLayer = VectorLayer.create(
+            name=output_name,
+            features=output_features,
+            crs=display_crs,
+            source_path=output_path,
+            source_layer_name=source_layer_name,
+        )
+        self.data_writer.write(output_layer, output_path, (), output_name)
+        self._document.add_layer(output_layer)
+        self._document.set_active_layer(output_layer.layer_id)
+        run: AnalysisRun = self._create_analysis_run(
+            algorithm_id="buffer",
+            input_layer_ids=(input_layer.layer_id,),
+            parameters={
+                "distance": request.distance,
+                "segments": request.segments,
+                "cap_style": request.cap_style,
+                "join_style": request.join_style,
+                "mitre_limit": request.mitre_limit,
+                "dissolve": request.dissolve,
+                "analysis_crs": (
+                    request.analysis_crs.to_string()
+                    if request.analysis_crs is not None
+                    else None
+                ),
+            },
+            output_layer_id=output_layer.layer_id,
+            output_path=output_path,
+            output_layer_name=output_name,
+        )
+        self._analysis_runs = self._analysis_runs + (run,)
+        self._modified = True
+        return BufferAnalysisResult(
+            input_layer_id=input_layer.layer_id,
+            output_layer_id=output_layer.layer_id,
+            output_layer_name=output_name,
+            output_path=output_path,
+            feature_count=len(output_layer.features),
+            snapshot=self.snapshot(),
+        )
 
     def set_display_crs(self, target_crs: CRS) -> WorkspaceSnapshot:
         """设置地图显示坐标系，并从原始数据源原子重建已有图层。"""
