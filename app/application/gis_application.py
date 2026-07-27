@@ -9,7 +9,15 @@ from pyproj import CRS
 from shapely.geometry import Point, Polygon
 
 from app.application.analysis_environment import AnalysisEnvironment
-from app.application.buffer_analysis import BufferRequest, buffer_features, reproject_features
+from app.application.buffer_analysis import (
+    BufferRequest,
+    buffer_features,
+    distance_to_crs_units,
+    distance_to_meters,
+    reproject_features,
+    reproject_vector_layer,
+    resolve_buffer_analysis_crs,
+)
 from app.application.errors import (
     ApplicationError,
     BufferAnalysisFailed,
@@ -382,20 +390,22 @@ class GisApplication:
         if output_path.exists() and output_path.suffix.lower() != ".gpkg":
             raise InvalidBufferParameters("分析结果输出已存在，请使用新的结果文件或图层名称。")
 
-        environment: AnalysisEnvironment = self.create_analysis_environment(request.analysis_crs)
-        prepared_layers: tuple[SpatialLayer, ...] = self.prepare_analysis_layers(
-            (input_layer.layer_id,),
-            environment,
+        calculation_crs: CRS = resolve_buffer_analysis_crs(input_layer, request.analysis_crs)
+        prepared_layer: VectorLayer = reproject_vector_layer(input_layer, calculation_crs)
+        calculation_distance: float = distance_to_crs_units(
+            request.distance,
+            request.distance_unit,
+            calculation_crs,
         )
-        prepared_layer: SpatialLayer = prepared_layers[0]
-        if not isinstance(prepared_layer, VectorLayer) or prepared_layer.crs is None:
-            raise UnsupportedBufferInput("缓冲区分析输入无法转换为有坐标系的矢量图层。")
-
-        calculated_features = buffer_features(prepared_layer, request)
+        calculated_features = buffer_features(
+            prepared_layer,
+            request,
+            distance=calculation_distance,
+        )
         try:
             output_features = reproject_features(
                 calculated_features,
-                prepared_layer.crs,
+                calculation_crs,
                 display_crs,
             )
         except BufferAnalysisFailed:
@@ -420,7 +430,14 @@ class GisApplication:
             algorithm_id="buffer",
             input_layer_ids=(input_layer.layer_id,),
             parameters={
+                "geometry_family": input_layer.geometry_family.value,
                 "distance": request.distance,
+                "distance_unit": request.distance_unit,
+                "distance_meters": distance_to_meters(
+                    request.distance,
+                    request.distance_unit,
+                ),
+                "side_type": request.side_type,
                 "segments": request.segments,
                 "cap_style": request.cap_style,
                 "join_style": request.join_style,
@@ -431,6 +448,7 @@ class GisApplication:
                     if request.analysis_crs is not None
                     else None
                 ),
+                "calculation_crs": calculation_crs.to_string(),
             },
             output_layer_id=output_layer.layer_id,
             output_path=output_path,

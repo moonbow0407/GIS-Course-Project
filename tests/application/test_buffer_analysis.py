@@ -6,9 +6,13 @@ from typing import cast
 import geopandas as gpd
 import pytest
 from pyproj import CRS
-from shapely.geometry import Point
+from shapely.geometry import LineString, Point, Polygon
 
-from app.application.buffer_analysis import BufferRequest
+from app.application.buffer_analysis import (
+    BufferDistanceUnitName,
+    BufferRequest,
+    BufferSideTypeName,
+)
 from app.application.errors import DataWriteFailed, InvalidBufferParameters
 from app.application.gis_application import GisApplication
 from app.application.ports import DataReader, DataWriter
@@ -87,6 +91,34 @@ def make_layer() -> VectorLayer:
     )
 
 
+def make_line_layer() -> VectorLayer:
+    """创建一条有方向的米制测试线，用于验证左右侧缓冲。"""
+    return VectorLayer.create(
+        layer_id="lines",
+        name="测试线",
+        features=(
+            Feature(fid=1, geometry=LineString([(0, 0), (10, 0)]), attributes={}),
+        ),
+        crs=CRS.from_epsg(3857),
+    )
+
+
+def make_polygon_layer() -> VectorLayer:
+    """创建一个米制测试面，用于验证外侧和负距离缓冲。"""
+    return VectorLayer.create(
+        layer_id="polygons",
+        name="测试面",
+        features=(
+            Feature(
+                fid=1,
+                geometry=Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]),
+                attributes={},
+            ),
+        ),
+        crs=CRS.from_epsg(3857),
+    )
+
+
 def make_request(path: Path, *, dissolve: bool = False) -> BufferRequest:
     """创建一份使用米制坐标的缓冲区请求。"""
     return BufferRequest(
@@ -96,6 +128,26 @@ def make_request(path: Path, *, dissolve: bool = False) -> BufferRequest:
         distance=10.0,
         segments=8,
         dissolve=dissolve,
+    )
+
+
+def make_geometry_request(
+    input_layer_id: str,
+    path: Path,
+    distance: float,
+    *,
+    side_type: str = "full",
+    distance_unit: str = "meter",
+) -> BufferRequest:
+    """创建点线面专用参数测试请求。"""
+    return BufferRequest(
+        input_layer_id=input_layer_id,
+        output_path=path,
+        output_layer_name="几何缓冲区",
+        distance=distance,
+        distance_unit=cast(BufferDistanceUnitName, distance_unit),
+        side_type=cast(BufferSideTypeName, side_type),
+        cap_style="flat",
     )
 
 
@@ -116,6 +168,9 @@ def test_buffer_analysis_writes_and_activates_new_result_layer(tmp_path: Path) -
     assert result.feature_count == 2
     assert result.snapshot.active_layer_id == result.output_layer_id
     assert [layer.name for layer in result.snapshot.layers] == ["测试点", "点缓冲区"]
+    result_layer = result.snapshot.layers[-1].layer
+    assert isinstance(result_layer, VectorLayer)
+    assert result_layer.source_path == result.output_path
     assert writer.path == result.output_path
     assert writer.layer_name == "点缓冲区"
     output_layer = cast(VectorLayer, writer.layer)
@@ -140,6 +195,132 @@ def test_buffer_analysis_dissolves_overlapping_features(tmp_path: Path) -> None:
     output_layer = cast(VectorLayer, writer.layer)
     assert output_layer.features[0].attributes == {"source_count": 2}
     assert output_layer.features[0].geometry.geom_type == "Polygon"
+
+
+def test_buffer_distance_unit_is_converted_before_projected_calculation(tmp_path: Path) -> None:
+    """用户输入一千米时，即使内部 CRS 使用米，也应生成一千米半径。"""
+    writer: RecordingDataWriter = RecordingDataWriter()
+    application: GisApplication = GisApplication(
+        InMemoryDataReader(make_layer()),
+        data_writer=writer,
+    )
+    application.open_data(Path("points.geojson"))
+
+    application.buffer_analysis(
+        make_geometry_request(
+            "points",
+            tmp_path / "kilometer.geojson",
+            1.0,
+            distance_unit="kilometer",
+        )
+    )
+
+    output_layer = cast(VectorLayer, writer.layer)
+    bounds = output_layer.features[0].geometry.bounds
+    assert bounds[0] == pytest.approx(-1000.0)
+    assert bounds[2] == pytest.approx(1000.0)
+
+
+def test_buffer_distance_unit_works_for_geographic_input_crs(tmp_path: Path) -> None:
+    """经纬度图层输入米制距离时，应自动使用本地米制投影而不是直接按度缓冲。"""
+    geographic_layer: VectorLayer = VectorLayer.create(
+        layer_id="geographic_points",
+        name="经纬度点",
+        features=(Feature(fid=1, geometry=Point(0, 0), attributes={}),),
+        crs=CRS.from_epsg(4326),
+    )
+    writer: RecordingDataWriter = RecordingDataWriter()
+    application: GisApplication = GisApplication(
+        InMemoryDataReader(geographic_layer),
+        data_writer=writer,
+    )
+    application.open_data(Path("geographic_points.geojson"))
+
+    application.buffer_analysis(
+        make_geometry_request(
+            "geographic_points",
+            tmp_path / "geographic_buffer.geojson",
+            1.0,
+            distance_unit="kilometer",
+        )
+    )
+
+    output_layer = cast(VectorLayer, writer.layer)
+    bounds = output_layer.features[0].geometry.bounds
+    assert 0.008 < abs(bounds[0]) < 0.010
+    assert 0.008 < abs(bounds[1]) < 0.010
+    assert output_layer.crs == CRS.from_epsg(4326)
+
+
+def test_line_buffer_supports_left_side_only(tmp_path: Path) -> None:
+    """线图层选择左侧缓冲时，结果应只位于有方向线的左侧。"""
+    writer: RecordingDataWriter = RecordingDataWriter()
+    application: GisApplication = GisApplication(
+        InMemoryDataReader(make_line_layer()),
+        data_writer=writer,
+    )
+    application.open_data(Path("lines.geojson"))
+
+    application.buffer_analysis(
+        make_geometry_request("lines", tmp_path / "left.geojson", 2.0, side_type="left")
+    )
+
+    output_layer = cast(VectorLayer, writer.layer)
+    bounds = output_layer.features[0].geometry.bounds
+    assert bounds[1] == pytest.approx(0.0)
+    assert bounds[3] == pytest.approx(2.0)
+
+
+def test_polygon_buffer_supports_outside_only_and_negative_distance(tmp_path: Path) -> None:
+    """面图层应支持仅外侧环带和负距离向内缓冲。"""
+    writer: RecordingDataWriter = RecordingDataWriter()
+    application: GisApplication = GisApplication(
+        InMemoryDataReader(make_polygon_layer()),
+        data_writer=writer,
+    )
+    application.open_data(Path("polygons.geojson"))
+
+    outside_result = application.buffer_analysis(
+        make_geometry_request(
+            "polygons",
+            tmp_path / "outside.geojson",
+            2.0,
+            side_type="outside",
+        )
+    )
+    outside_layer = cast(VectorLayer, writer.layer)
+    assert not outside_layer.features[0].geometry.contains(Point(5, 5))
+    assert outside_result.feature_count == 1
+
+    inward_result = application.buffer_analysis(
+        make_geometry_request("polygons", tmp_path / "inward.geojson", -2.0)
+    )
+    inward_layer = cast(VectorLayer, writer.layer)
+    assert inward_result.feature_count == 1
+    assert inward_layer.features[0].geometry.area < 100.0
+
+
+def test_mixed_geometry_layer_is_rejected_before_buffering(tmp_path: Path) -> None:
+    """混合几何图层不能被错误地套用某一种点线面参数。"""
+    mixed_layer: VectorLayer = VectorLayer.create(
+        layer_id="mixed",
+        name="混合图层",
+        features=(
+            Feature(fid=1, geometry=Point(0, 0), attributes={}),
+            Feature(fid=2, geometry=LineString([(0, 0), (1, 0)]), attributes={}),
+        ),
+        crs=CRS.from_epsg(3857),
+    )
+    application: GisApplication = GisApplication(
+        InMemoryDataReader(mixed_layer),
+        data_writer=RecordingDataWriter(),
+    )
+    application.open_data(Path("mixed.geojson"))
+
+    with pytest.raises(InvalidBufferParameters, match="混合几何"):
+        application.buffer_analysis(
+            make_geometry_request("mixed", tmp_path / "mixed_buffer.geojson", 1.0)
+        )
 
 
 def test_buffer_analysis_writes_readable_geojson(tmp_path: Path) -> None:
@@ -175,7 +356,7 @@ def test_buffer_analysis_write_failure_does_not_add_partial_result(tmp_path: Pat
 
 
 def test_buffer_request_rejects_non_positive_distance(tmp_path: Path) -> None:
-    """缓冲距离为零或负数时应在执行前被拒绝。"""
+    """缓冲距离为零时应在执行前被拒绝；面图层的负距离由几何类型校验。"""
     with pytest.raises(InvalidBufferParameters, match="大于零"):
         BufferRequest(
             input_layer_id="points",
