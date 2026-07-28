@@ -2,6 +2,107 @@ QMainWindow#mainWindow {
     background: #f5f7fa;
 }
 
+QDockWidget#symbologyDock,
+QWidget#symbologyPanel {
+    background: #ffffff;
+    color: #263548;
+}
+
+QDockWidget#symbologyDock::title {
+    padding: 7px 10px;
+    border-bottom: 1px solid #d9e1ea;
+    background: #eef4fa;
+    color: #263548;
+    font-weight: 600;
+}
+
+QWidget#symbologyScrollContent,
+QScrollArea#symbologyScrollArea {
+    background: #eef3f8;
+}
+
+QFrame#symbologyHeaderCard,
+QFrame#symbologySettingsCard,
+QFrame#symbologyClassesCard {
+    border: 1px solid #d7e0e9;
+    border-radius: 6px;
+    background: #ffffff;
+}
+
+QLabel#symbologyTitle {
+    border: none;
+    background: transparent;
+    color: #17263b;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+QLabel#symbologyLayerMetadata {
+    border: none;
+    background: transparent;
+    color: #64748b;
+    font-size: 12px;
+}
+
+QLabel#symbologyPreview {
+    border: none;
+    border-radius: 5px;
+    background: #f8fafc;
+}
+
+QLabel#symbologySectionTitle {
+    border: none;
+    background: transparent;
+    color: #22344a;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QLabel#symbologyHint {
+    border: none;
+    background: transparent;
+    color: #718096;
+    font-size: 11px;
+}
+
+QLabel#symbologyClassCount {
+    min-width: 38px;
+    padding: 2px 7px;
+    border: 1px solid #c8d7e6;
+    border-radius: 9px;
+    background: #eef5fb;
+    color: #356587;
+    font-size: 11px;
+}
+
+QLabel#symbologyAutoApplyStatus {
+    padding: 8px 14px;
+    border-top: 1px solid #d7e0e9;
+    background: #f8fafc;
+    color: #21845a;
+    font-size: 12px;
+}
+
+QFrame#symbologySettingsCard QLabel {
+    border: none;
+    background: transparent;
+    color: #475569;
+}
+
+QFrame#symbologyClassesCard QTableWidget {
+    border: 1px solid #d7e0e9;
+    border-radius: 4px;
+}
+
+QFrame#symbologyClassesCard QHeaderView::section {
+    padding: 6px 7px;
+    border: none;
+    border-bottom: 1px solid #d7e0e9;
+    background: #f3f6f9;
+    color: #4b5f73;
+    font-weight: 600;
+}
+
 QWidget {
     font-family: "Microsoft YaHei UI", "Segoe UI";
     font-size: 13px;

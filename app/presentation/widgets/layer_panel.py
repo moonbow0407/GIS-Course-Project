@@ -1,7 +1,9 @@
 """真实地图文档对应的图层管理控件。"""
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -14,6 +16,12 @@ from PySide6.QtWidgets import (
 )
 
 from app.application.results import WorkspaceSnapshot
+from app.domain.layer_style import LayerStyle
+from app.domain.raster_layer import RasterLayer
+from app.domain.symbology import GraduatedClass, UniqueValueClass, VectorRendererType
+from app.domain.vector_layer import VectorLayer
+
+_CATEGORY_ROLE: int = int(Qt.ItemDataRole.UserRole) + 1
 
 
 class LayerPanel(QWidget):
@@ -29,6 +37,12 @@ class LayerPanel(QWidget):
     layer_removed = Signal(str)
     # 图层移动信号：携带图层编号及其在地图文档中的目标位置。
     layer_move_requested = Signal(str, int)
+    # 图层定位信号：请求画布缩放至指定图层的完整范围。
+    layer_zoom_requested = Signal(str)
+    # 符号系统信号：请求打开指定图层的符号编辑面板。
+    layer_symbology_requested = Signal(str)
+    # 类别显隐信号：携带图层编号、类别索引和目标状态。
+    category_visibility_changed = Signal(str, int, bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """创建空的图层管理控件。
@@ -65,8 +79,12 @@ class LayerPanel(QWidget):
             item: QTreeWidgetItem = QTreeWidgetItem([f"[{layer_kind}] {layer_snapshot.name}"])
             item.setData(0, Qt.ItemDataRole.UserRole, layer_snapshot.layer_id)
             item.setCheckState(0, Qt.CheckState.Checked if layer_snapshot.visible else Qt.CheckState.Unchecked)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setFlags(
+                (item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsDragEnabled)
+                & ~Qt.ItemFlag.ItemIsDropEnabled
+            )
             self._tree.addTopLevelItem(item)
+            self._add_legend_items(item, layer_snapshot.layer)
             if layer_snapshot.layer_id == snapshot.active_layer_id:
                 self._tree.setCurrentItem(item)
         self._updating = False
@@ -90,10 +108,15 @@ class LayerPanel(QWidget):
         self._search_input.textChanged.connect(self._filter_layers)
         self._tree.setHeaderHidden(True)
         self._tree.setObjectName("layerTree")
+        self._tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self._tree.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._tree.setDropIndicatorShown(True)
+        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.currentItemChanged.connect(self._on_current_item_changed)
         self._tree.itemChanged.connect(self._on_item_changed)
         self._tree.customContextMenuRequested.connect(self._on_context_menu_requested)
+        self._tree.model().rowsMoved.connect(self._on_rows_moved)
         up_button: QToolButton = QToolButton()
         up_button.setText("↑")
         up_button.setToolTip("上移图层")
@@ -131,6 +154,8 @@ class LayerPanel(QWidget):
         """
         if self._updating or current is None:
             return
+        if current.parent() is not None:
+            current = current.parent()
         layer_id: str = str(current.data(0, Qt.ItemDataRole.UserRole))
         self.layer_activated.emit(layer_id)
 
@@ -143,11 +168,22 @@ class LayerPanel(QWidget):
         """
         if self._updating or column != 0:
             return
+        parent: QTreeWidgetItem | None = item.parent()
+        if parent is not None:
+            parent_layer_id = str(parent.data(0, Qt.ItemDataRole.UserRole))
+            category_index = int(item.data(0, _CATEGORY_ROLE))
+            category_visible = item.checkState(0) == Qt.CheckState.Checked
+            self.category_visibility_changed.emit(
+                parent_layer_id,
+                category_index,
+                category_visible,
+            )
+            return
         layer_id: str = str(item.data(0, Qt.ItemDataRole.UserRole))
         visible: bool = item.checkState(0) == Qt.CheckState.Checked
         self.layer_visibility_changed.emit(layer_id, visible)
 
-    def _on_context_menu_requested(self, position) -> None:
+    def _on_context_menu_requested(self, position: QPoint) -> None:
         """显示图层属性表和删除等上下文操作。
 
         参数:
@@ -157,14 +193,39 @@ class LayerPanel(QWidget):
         if item is None:
             return
         menu: QMenu = QMenu(self)
+        zoom_action = menu.addAction("缩放至图层")
+        symbology_action = menu.addAction("符号系统")
         attribute_action = menu.addAction("打开属性表")
         remove_action = menu.addAction("删除图层")
-        selected_action: object | None = menu.exec(self._tree.viewport().mapToGlobal(position))
+        selected_action: object | None = self._execute_context_menu(menu, position)
         layer_id: str = str(item.data(0, Qt.ItemDataRole.UserRole))
-        if selected_action is attribute_action:
+        if selected_action is zoom_action:
+            self.layer_zoom_requested.emit(layer_id)
+        elif selected_action is symbology_action:
+            self.layer_symbology_requested.emit(layer_id)
+        elif selected_action is attribute_action:
             self.layer_attribute_requested.emit(layer_id)
         elif selected_action is remove_action:
             self.layer_removed.emit(layer_id)
+
+    def _execute_context_menu(self, menu: QMenu, position: QPoint) -> object | None:
+        """在图层树请求位置显示上下文菜单并返回所选操作。"""
+        return menu.exec(self._tree.viewport().mapToGlobal(position))
+
+    def _on_rows_moved(self, *args: object) -> None:
+        """把树节点拖放后的面板行号转换为地图文档图层位置。"""
+        if self._updating:
+            return
+        item: QTreeWidgetItem | None = self._tree.currentItem()
+        if item is None:
+            return
+        target_row: int = self._tree.indexOfTopLevelItem(item)
+        if target_row < 0:
+            return
+        layer_id: str = str(item.data(0, Qt.ItemDataRole.UserRole))
+        # 面板从顶到底显示，文档按底到顶保存，因此目标索引需要反向换算。
+        target_index: int = self._tree.topLevelItemCount() - 1 - target_row
+        self.layer_move_requested.emit(layer_id, target_index)
 
     def _move_current(self, offset: int) -> None:
         """请求把当前图层移动到相邻的有效位置。
@@ -203,3 +264,89 @@ class LayerPanel(QWidget):
             item: QTreeWidgetItem | None = self._tree.topLevelItem(row)
             if item is not None:
                 item.setHidden(normalized_text not in item.text(0).casefold())
+
+    def _add_legend_items(
+        self,
+        parent: QTreeWidgetItem,
+        layer: VectorLayer | RasterLayer,
+    ) -> None:
+        """在图层节点下添加符号类别或栅格色带摘要。"""
+        if isinstance(layer, RasterLayer):
+            raster_symbology = layer.symbology
+            if raster_symbology is None:
+                return
+            label = (
+                "RGB 合成"
+                if raster_symbology.renderer_type.value == "rgb"
+                else (
+                    f"{raster_symbology.color_scheme} · "
+                    f"波段 {raster_symbology.stretch_band + 1}"
+                )
+            )
+            child = QTreeWidgetItem([f"▰  {label}"])
+            child.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            parent.addChild(child)
+            return
+        vector_symbology = layer.symbology
+        if vector_symbology is None:
+            return
+        if vector_symbology.renderer_type is VectorRendererType.SIMPLE:
+            self._add_symbol_child(
+                parent,
+                0,
+                "单一符号",
+                vector_symbology.base_symbol,
+                True,
+                False,
+            )
+            return
+        classes: tuple[UniqueValueClass | GraduatedClass, ...] = (
+            tuple(vector_symbology.unique_classes)
+            if vector_symbology.unique_classes
+            else tuple(vector_symbology.graduated_classes)
+        )
+        for index, category in enumerate(classes):
+            self._add_symbol_child(
+                parent,
+                index,
+                category.label,
+                category.symbol,
+                category.visible,
+                True,
+            )
+        if (
+            vector_symbology.renderer_type is VectorRendererType.UNIQUE
+            and vector_symbology.other_symbol
+        ):
+            self._add_symbol_child(
+                parent,
+                len(classes),
+                "其他值",
+                vector_symbology.other_symbol,
+                vector_symbology.other_visible,
+                True,
+            )
+
+    @staticmethod
+    def _add_symbol_child(
+        parent: QTreeWidgetItem,
+        index: int,
+        label: str,
+        symbol: LayerStyle,
+        visible: bool,
+        checkable: bool,
+    ) -> None:
+        """添加带颜色预览的单个图例子项。"""
+        color = symbol.stroke_color if symbol.fill_color == "transparent" else symbol.fill_color
+        child = QTreeWidgetItem([f"■  {label}"])
+        child.setForeground(0, QColor(color))
+        child.setData(0, _CATEGORY_ROLE, index)
+        flags = Qt.ItemFlag.ItemIsEnabled
+        if checkable:
+            flags |= Qt.ItemFlag.ItemIsUserCheckable
+            child.setCheckState(
+                0,
+                Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked,
+            )
+        child.setFlags(flags)
+        parent.addChild(child)

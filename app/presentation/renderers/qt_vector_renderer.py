@@ -46,14 +46,19 @@ class QtVectorRenderer:
         for feature in snapshot.layer.features:
             if feature.geometry.is_empty:
                 continue
+            if snapshot.layer.symbology is None:
+                continue
+            style: LayerStyle | None = snapshot.layer.symbology.symbol_for(feature)
+            if style is None:
+                continue
             path: QPainterPath = QPainterPath()
-            point_size: float = snapshot.layer.style.point_size * map_units_per_pixel
+            point_size: float = style.point_size * map_units_per_pixel
             self._append_geometry(path, feature.geometry, point_size)
             if path.isEmpty():
                 continue
             item: QGraphicsPathItem = QGraphicsPathItem(path)
             selected: bool = feature.fid in snapshot.selected_feature_ids
-            self._apply_style(item, snapshot.layer.style, selected)
+            self._apply_style(item, style, selected)
             # 自定义数据把 Qt 图元关联回领域图层和要素。
             item.setData(0, snapshot.layer_id)
             item.setData(1, feature.fid)

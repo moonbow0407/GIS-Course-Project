@@ -89,6 +89,12 @@ class MapDocument:
         layer: SpatialLayer = self._layers.pop(current_index)
         self._layers.insert(target_index, layer)
 
+    def replace_layer(self, layer: SpatialLayer) -> None:
+        """以相同稳定编号替换图层内容，并保留顺序和工作区状态。"""
+        current_index: int = self._layer_index(layer.layer_id)
+        self._validate_replacement_coordinate_reference_system(layer)
+        self._layers[current_index] = layer
+
     def set_active_layer(self, layer_id: str) -> None:
         """将已存在的图层设置为活动图层。"""
         self._require_layer(layer_id)
@@ -142,6 +148,15 @@ class MapDocument:
             return
         if layer.crs is None or layer.crs != self._display_crs:
             raise ValueError("图层坐标参考系统不一致。")
+
+    def _validate_replacement_coordinate_reference_system(self, layer: SpatialLayer) -> None:
+        """保证替换图层仍遵守当前地图显示坐标系。"""
+        if self._display_crs is None:
+            if layer.crs is not None:
+                raise ValueError("替换图层坐标参考系统不一致。")
+            return
+        if layer.crs != self._display_crs:
+            raise ValueError("替换图层坐标参考系统不一致。")
 
     def _layer_index(self, layer_id: str) -> int:
         """返回指定图层的位置，不存在时抛出明确异常。"""

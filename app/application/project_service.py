@@ -20,9 +20,15 @@ from app.application.project_models import (
     ProjectManifest,
     SourceFingerprint,
 )
+from app.application.symbology_service import apply_raster_symbology
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
+from app.domain.symbology import (
+    raster_symbology_from_dict,
+    symbology_to_dict,
+    vector_symbology_from_dict,
+)
 from app.domain.vector_layer import VectorLayer
 
 
@@ -184,6 +190,11 @@ class ProjectService:
                     visible=document.is_visible(layer.layer_id),
                     selected_feature_ids=document.selected_feature_ids(layer.layer_id),
                     fingerprint=self._fingerprint(source_path),
+                    symbology=(
+                        symbology_to_dict(layer.symbology)
+                        if layer.symbology is not None
+                        else None
+                    ),
                 )
             )
 
@@ -247,6 +258,11 @@ class ProjectService:
     ) -> SpatialLayer:
         """将读取器生成的临时编号替换为工程中稳定的图层身份。"""
         if reference.layer_kind == "vector" and isinstance(layer, VectorLayer):
+            symbology = (
+                vector_symbology_from_dict(dict(reference.symbology))
+                if reference.symbology is not None
+                else None
+            )
             return VectorLayer.create(
                 layer_id=reference.layer_id,
                 name=reference.name,
@@ -254,9 +270,10 @@ class ProjectService:
                 crs=layer.crs,
                 source_path=source_path,
                 source_layer_name=reference.source_layer_name,
+                symbology=symbology,
             )
         if reference.layer_kind == "raster" and isinstance(layer, RasterLayer):
-            return RasterLayer.create(
+            restored = RasterLayer.create(
                 name=reference.name,
                 raster_data=layer.raster_data,
                 image_data=layer.image_data,
@@ -267,6 +284,12 @@ class ProjectService:
                 nodata=layer.nodata,
                 source_path=source_path,
                 layer_id=reference.layer_id,
+            )
+            if reference.symbology is None:
+                return restored
+            return apply_raster_symbology(
+                restored,
+                raster_symbology_from_dict(dict(reference.symbology)),
             )
         raise ProjectReadFailed(
             f"工程图层“{reference.name}”的数据类型与记录不一致。"

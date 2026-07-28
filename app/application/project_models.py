@@ -41,6 +41,7 @@ class LayerReference:
     visible: bool
     selected_feature_ids: tuple[FeatureId, ...]
     fingerprint: SourceFingerprint | None
+    symbology: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

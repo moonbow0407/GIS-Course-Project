@@ -118,6 +118,11 @@ class JsonProjectStore:
             visible=self._boolean(layer.get("visible"), f"图层 {index}.visible"),
             selected_feature_ids=selected_feature_ids,
             fingerprint=self._decode_fingerprint(layer.get("fingerprint")),
+            symbology=(
+                self._mapping(layer.get("symbology"), f"图层 {index}.symbology")
+                if layer.get("symbology") is not None
+                else None
+            ),
         )
 
     def _decode_analysis_run(self, value: object, index: int) -> AnalysisRun:
@@ -235,6 +240,7 @@ class JsonProjectStore:
             "visible": layer.visible,
             "selected_feature_ids": list(layer.selected_feature_ids),
             "fingerprint": fingerprint,
+            "symbology": dict(layer.symbology) if layer.symbology is not None else None,
         }
 
     @staticmethod

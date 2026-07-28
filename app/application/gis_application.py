@@ -50,10 +50,16 @@ from app.application.results import (
     SelectionResult,
     WorkspaceSnapshot,
 )
+from app.application.symbology_service import (
+    apply_raster_symbology,
+    create_graduated_symbology,
+    create_unique_value_symbology,
+)
 from app.domain.feature import Feature, FeatureId
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
+from app.domain.symbology import RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
 
 
@@ -169,6 +175,79 @@ class GisApplication:
             self._document.set_active_layer(layer_id)
         except KeyError as error:
             raise LayerNotFound(f"图层不存在：{layer_id}") from error
+        self._modified = True
+        return self.snapshot()
+
+    def apply_vector_symbology(
+        self,
+        layer_id: str,
+        symbology: VectorSymbology,
+    ) -> WorkspaceSnapshot:
+        """替换矢量图层符号配置并保留图层身份和工作区状态。"""
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ValueError("矢量符号只能应用到矢量图层。")
+        updated_layer = VectorLayer.create(
+            layer_id=layer.layer_id,
+            name=layer.name,
+            features=layer.features,
+            crs=layer.crs,
+            source_path=layer.source_path,
+            source_layer_name=layer.source_layer_name,
+            symbology=symbology,
+        )
+        self._document.replace_layer(updated_layer)
+        self._modified = True
+        return self.snapshot()
+
+    def apply_unique_value_symbology(
+        self,
+        layer_id: str,
+        field_name: str,
+        color_scheme: str,
+    ) -> WorkspaceSnapshot:
+        """为矢量图层生成最多一百类的唯一值符号。"""
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ValueError("唯一值符号只能应用到矢量图层。")
+        return self.apply_vector_symbology(
+            layer_id,
+            create_unique_value_symbology(layer, field_name, color_scheme),
+        )
+
+    def apply_graduated_symbology(
+        self,
+        layer_id: str,
+        field_name: str,
+        color_scheme: str,
+        classification_method: str,
+        class_count: int,
+    ) -> WorkspaceSnapshot:
+        """为矢量数值字段生成等间隔或分位数颜色。"""
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ValueError("分级颜色只能应用到矢量图层。")
+        return self.apply_vector_symbology(
+            layer_id,
+            create_graduated_symbology(
+                layer,
+                field_name,
+                color_scheme,
+                classification_method,
+                class_count,
+            ),
+        )
+
+    def apply_raster_symbology(
+        self,
+        layer_id: str,
+        symbology: RasterSymbology,
+    ) -> WorkspaceSnapshot:
+        """按 RGB 或单波段拉伸配置重建栅格显示缓存。"""
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, RasterLayer):
+            raise ValueError("栅格符号只能应用到栅格图层。")
+        self._document.replace_layer(apply_raster_symbology(layer, symbology))
         self._modified = True
         return self.snapshot()
 
@@ -554,9 +633,10 @@ class GisApplication:
                 crs=projected.crs,
                 source_path=projected.source_path,
                 source_layer_name=projected.source_layer_name,
+                symbology=layer.symbology,
             )
         if isinstance(layer, RasterLayer) and isinstance(projected, RasterLayer):
-            return RasterLayer.create(
+            restored_raster = RasterLayer.create(
                 layer_id=layer.layer_id,
                 name=projected.name,
                 raster_data=projected.raster_data,
@@ -567,7 +647,11 @@ class GisApplication:
                 bounds=projected.bounds,
                 nodata=projected.nodata,
                 source_path=projected.source_path,
+                symbology=layer.symbology,
             )
+            if layer.symbology is None:
+                return restored_raster
+            return apply_raster_symbology(restored_raster, layer.symbology)
         raise LayerReprojectionFailed(f"图层“{layer.name}”转换后类型发生变化。")
 
     def _find_layer(self, layer_id: str) -> SpatialLayer:

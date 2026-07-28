@@ -10,6 +10,7 @@ from shapely.geometry.base import BaseGeometry
 
 from app.domain.feature import Feature
 from app.domain.layer_style import GeometryFamily, LayerStyle
+from app.domain.symbology import VectorRendererType, VectorSymbology
 
 Bounds: TypeAlias = tuple[float, float, float, float]
 
@@ -61,6 +62,9 @@ class VectorLayer:
 
     # 数据源内的子图层名称：GeoPackage 等容器格式需要额外记录此字段。
     source_layer_name: str | None = None
+
+    # 符号系统：为空时按几何类型生成单一符号。
+    symbology: VectorSymbology | None = None
 
     # 图层范围：根据全部有效几何计算得到的最小包围矩形。
     bounds: Bounds = field(init=False)
@@ -114,7 +118,13 @@ class VectorLayer:
         # frozen 数据类的派生字段只能在初始化阶段通过底层接口写入。
         object.__setattr__(self, "geometry_family", geometry_family)
         object.__setattr__(self, "bounds", bounds)
-        object.__setattr__(self, "style", LayerStyle.for_geometry_family(geometry_family))
+        default_style: LayerStyle = LayerStyle.for_geometry_family(geometry_family)
+        resolved_symbology: VectorSymbology = self.symbology or VectorSymbology(
+            renderer_type=VectorRendererType.SIMPLE,
+            base_symbol=default_style,
+        )
+        object.__setattr__(self, "symbology", resolved_symbology)
+        object.__setattr__(self, "style", resolved_symbology.base_symbol)
 
     @classmethod
     def create(
@@ -125,6 +135,7 @@ class VectorLayer:
         source_path: Path | None = None,
         source_layer_name: str | None = None,
         layer_id: str | None = None,
+        symbology: VectorSymbology | None = None,
     ) -> "VectorLayer":
         """创建矢量图层，并在未提供编号时生成稳定的随机编号。"""
         resolved_layer_id: str = layer_id or uuid4().hex
@@ -135,4 +146,5 @@ class VectorLayer:
             crs=crs,
             source_path=source_path,
             source_layer_name=source_layer_name,
+            symbology=symbology,
         )

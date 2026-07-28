@@ -4,7 +4,7 @@ from pathlib import Path
 
 import geopandas as gpd
 import pytest
-from pyproj import CRS
+from pyproj import CRS, Transformer
 from shapely.geometry import Point
 
 from app.application.errors import UnsupportedExportFormat
@@ -35,6 +35,32 @@ def test_write_geojson_preserves_features_attributes_and_crs(tmp_path: Path) -> 
     assert list(dataframe["名称"]) == ["甲", "乙"]
     assert dataframe.crs == CRS.from_epsg(4326)
     assert dataframe.geometry.iloc[0].x == pytest.approx(118.78)
+
+
+def test_write_geojson_converts_unidentified_projected_crs_to_wgs84(
+    tmp_path: Path,
+) -> None:
+    """无 EPSG 编号的投影图层写为 GeoJSON 时也必须生成有效经纬度坐标。"""
+    custom_crs = CRS.from_proj4(
+        "+proj=tmerc +lat_0=0 +lon_0=120 +k=1 "
+        "+x_0=500123 +y_0=0 +datum=WGS84 +units=m +no_defs"
+    )
+    assert custom_crs.to_epsg() is None
+    transformer = Transformer.from_crs(CRS.from_epsg(4326), custom_crs, always_xy=True)
+    x, y = transformer.transform(120.0, 30.0)
+    layer = VectorLayer.create(
+        name="自定义投影点",
+        features=(Feature(fid=1, geometry=Point(x, y), attributes={}),),
+        crs=custom_crs,
+    )
+    path = tmp_path / "custom-projected.geojson"
+
+    GeoPandasVectorWriter().write(layer, path)
+
+    dataframe = gpd.read_file(path)
+    assert dataframe.crs == CRS.from_epsg(4326)
+    assert dataframe.geometry.iloc[0].x == pytest.approx(120.0, abs=1e-6)
+    assert dataframe.geometry.iloc[0].y == pytest.approx(30.0, abs=1e-6)
 
 
 def test_write_only_selected_features(tmp_path: Path) -> None:

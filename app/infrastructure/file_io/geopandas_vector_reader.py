@@ -78,6 +78,7 @@ class GeoPandasVectorReader:
         source_crs: CRS | None = (
             CRS.from_user_input(dataframe.crs) if dataframe.crs is not None else None
         )
+        self._validate_coordinate_bounds(dataframe, source_crs, resolved_path.name)
         if target_crs is not None:
             if source_crs is None:
                 raise IncompatibleCoordinateReferenceSystem(
@@ -92,6 +93,11 @@ class GeoPandasVectorReader:
                         "矢量图层无法转换到地图显示坐标系。"
                     ) from error
                 source_crs = target_crs
+                self._validate_coordinate_bounds(
+                    dataframe,
+                    source_crs,
+                    resolved_path.name,
+                )
 
         features: list[Feature] = []
         # GeoPandas 行对象缺少可稳定使用的精确静态类型，仅在适配器边缘使用 Any。
@@ -125,6 +131,35 @@ class GeoPandasVectorReader:
             source_path=resolved_path,
             source_layer_name=resolved_layer_name,
         )
+
+    @staticmethod
+    def _validate_coordinate_bounds(
+        dataframe: gpd.GeoDataFrame,
+        crs: CRS | None,
+        file_name: str,
+    ) -> None:
+        """拒绝非有限坐标和被误报为经纬度的投影坐标。"""
+        bounds = np.asarray(dataframe.total_bounds, dtype=np.float64)
+        if np.isnan(bounds).all():
+            # 全空几何由后续 NoUsableGeometry 分支提供更准确的错误信息。
+            return
+        if not np.isfinite(bounds).all():
+            raise IncompatibleCoordinateReferenceSystem(
+                f"矢量数据坐标无效，无法显示：{file_name}"
+            )
+        if crs is None or not crs.is_geographic:
+            return
+        minimum_x, minimum_y, maximum_x, maximum_y = bounds
+        if (
+            minimum_x < -180.0
+            or maximum_x > 180.0
+            or minimum_y < -90.0
+            or maximum_y > 90.0
+        ):
+            raise IncompatibleCoordinateReferenceSystem(
+                f"GeoJSON 坐标超出经纬度范围，文件可能缺失或声明了错误的坐标系："
+                f"{file_name}"
+            )
 
     @staticmethod
     def _normalize_feature_id(value: Any) -> FeatureId:

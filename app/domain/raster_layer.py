@@ -9,6 +9,7 @@ from affine import Affine
 from numpy.typing import NDArray
 from pyproj import CRS
 
+from app.domain.symbology import RasterRendererType, RasterSymbology
 from app.domain.vector_layer import Bounds
 
 
@@ -46,6 +47,9 @@ class RasterLayer:
     # 数据源路径：记录栅格来源，内存构造时可以为空。
     source_path: Path | None = None
 
+    # 符号系统：为空时根据波段数量生成默认 RGB 或灰度拉伸配置。
+    symbology: RasterSymbology | None = None
+
     # 波段数量：根据真实分析像元派生，不等同于显示通道数量。
     band_count: int = field(init=False)
 
@@ -72,6 +76,17 @@ class RasterLayer:
         if self.bounds[0] >= self.bounds[2] or self.bounds[1] >= self.bounds[3]:
             raise ValueError("栅格图层范围无效。")
         object.__setattr__(self, "band_count", self.raster_data.shape[0])
+        if self.symbology is None:
+            renderer_type = (
+                RasterRendererType.RGB
+                if self.raster_data.shape[0] >= 3
+                else RasterRendererType.STRETCH
+            )
+            object.__setattr__(
+                self,
+                "symbology",
+                RasterSymbology(renderer_type=renderer_type),
+            )
 
     @classmethod
     def create(
@@ -86,6 +101,7 @@ class RasterLayer:
         nodata: float | int | None = None,
         source_path: Path | None = None,
         layer_id: str | None = None,
+        symbology: RasterSymbology | None = None,
     ) -> "RasterLayer":
         """创建栅格图层，并在未提供编号时生成唯一编号。"""
         return cls(
@@ -99,4 +115,5 @@ class RasterLayer:
             bounds=bounds,
             nodata=nodata,
             source_path=source_path,
+            symbology=symbology,
         )

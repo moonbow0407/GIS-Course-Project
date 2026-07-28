@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView, QLabel, QVB
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.raster_layer import RasterLayer
+from app.domain.vector_layer import Bounds
 from app.presentation.renderers.qt_raster_renderer import QtRasterRenderer
 from app.presentation.renderers.qt_vector_renderer import QtVectorRenderer
 
@@ -49,6 +50,11 @@ class MapCanvas(QGraphicsView):
         self.setMouseTracking(True)
         self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
+    @property
+    def has_map_data(self) -> bool:
+        """返回画布当前是否已经建立真实地图范围。"""
+        return self._map_scene_rect is not None
+
     def set_snapshot(self, snapshot: WorkspaceSnapshot) -> None:
         """原子替换场景中的图层图元并适配真实数据范围。
 
@@ -76,13 +82,8 @@ class MapCanvas(QGraphicsView):
         minimum_y: float = min(layer.bounds[1] for layer in extent_layers)
         maximum_x: float = max(layer.bounds[2] for layer in extent_layers)
         maximum_y: float = max(layer.bounds[3] for layer in extent_layers)
-        margin: float = max(maximum_x - minimum_x, maximum_y - minimum_y, 1.0) * 0.05
-        # Qt 纵轴向下，场景范围中的地图 Y 坐标需要取反。
-        map_scene_rect: QRectF = QRectF(
-            minimum_x - margin,
-            -(maximum_y + margin),
-            maximum_x - minimum_x + 2 * margin,
-            maximum_y - minimum_y + 2 * margin,
+        map_scene_rect: QRectF = self._scene_rect_from_bounds(
+            (minimum_x, minimum_y, maximum_x, maximum_y)
         )
         self._map_scene_rect = map_scene_rect
         self._scene.setSceneRect(map_scene_rect)
@@ -146,6 +147,26 @@ class MapCanvas(QGraphicsView):
         self.fitInView(fit_rect, Qt.AspectRatioMode.KeepAspectRatio)
         self._ensure_pan_area()
         self._reset_view_scale()
+
+    def zoom_to_layer(self, bounds: Bounds) -> None:
+        """将指定图层的完整空间范围缩放到视图内。
+
+        参数:
+            bounds: 图层在地图显示坐标系下的最小外包范围。
+        """
+        if self._map_scene_rect is None:
+            return
+        layer_scene_rect: QRectF = self._scene_rect_from_bounds(bounds)
+        # 隐藏图层可能位于当前可见全图范围之外，导航场景也要包含其定位范围。
+        self._scene.setSceneRect(self._scene.sceneRect().united(layer_scene_rect))
+        self.fitInView(layer_scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
+        full_scale: float = self._fit_scale_for_rect(self._map_scene_rect)
+        layer_scale: float = self._fit_scale_for_rect(layer_scene_rect)
+        self._zoom_percent = (
+            layer_scale / full_scale * 100.0 if full_scale > 0.0 else 100.0
+        )
+        self._ensure_pan_area()
+        self._emit_view_scale()
 
     def zoom_in(self) -> None:
         """以画布中心为基准将地图视图放大一级。"""
@@ -267,3 +288,24 @@ class MapCanvas(QGraphicsView):
         top_left: QPointF = self.mapToScene(self.viewport().rect().topLeft())
         bottom_right: QPointF = self.mapToScene(self.viewport().rect().bottomRight())
         return QRectF(top_left, bottom_right).normalized()
+
+    @staticmethod
+    def _scene_rect_from_bounds(bounds: Bounds) -> QRectF:
+        """把地图坐标范围转换为带边距且 Y 轴反向的 Qt 场景范围。"""
+        minimum_x, minimum_y, maximum_x, maximum_y = bounds
+        margin: float = max(maximum_x - minimum_x, maximum_y - minimum_y, 1.0) * 0.05
+        return QRectF(
+            minimum_x - margin,
+            -(maximum_y + margin),
+            maximum_x - minimum_x + 2 * margin,
+            maximum_y - minimum_y + 2 * margin,
+        )
+
+    def _fit_scale_for_rect(self, rect: QRectF) -> float:
+        """估算指定场景范围适配当前视口时使用的缩放比例。"""
+        if rect.width() <= 0.0 or rect.height() <= 0.0:
+            return 0.0
+        return min(
+            max(self.viewport().width(), 1) / rect.width(),
+            max(self.viewport().height(), 1) / rect.height(),
+        )

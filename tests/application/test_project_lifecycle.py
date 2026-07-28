@@ -49,6 +49,7 @@ def test_project_round_trip_restores_workspace_and_relative_source_path(
     application: GisApplication = make_application()
     opened = application.open_data(source_path)
     layer_id: str = opened.layer_id
+    application.apply_unique_value_symbology(layer_id, "名称", "soft")
     application.set_layer_visibility(layer_id, False)
     application.save_project(project_path, MapViewState(118.05, 31.05, 150.0))
 
@@ -59,6 +60,8 @@ def test_project_round_trip_restores_workspace_and_relative_source_path(
     assert restored_layer.layer_id == layer_id
     assert restored_layer.visible is False
     assert restored_layer.layer.source_path == source_path.resolve()
+    assert restored_layer.layer.symbology.color_scheme == "soft"
+    assert len(restored_layer.layer.symbology.unique_classes) == 2
     assert restored.view_state == MapViewState(118.05, 31.05, 150.0)
     assert restored_application.is_modified is False
 

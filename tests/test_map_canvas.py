@@ -116,3 +116,53 @@ def test_canvas_extent_ignores_hidden_layers() -> None:
     assert canvas._map_scene_rect is not None
     assert canvas._map_scene_rect.width() == pytest.approx(22.0)
     assert canvas._map_scene_rect.height() == pytest.approx(22.0)
+
+
+def test_canvas_can_zoom_to_one_layer_extent() -> None:
+    """图层级全图显示应定位到指定范围，而不是全部可见图层的联合范围。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    small_layer = VectorLayer.create(
+        layer_id="small",
+        name="小范围图层",
+        features=(
+            Feature(
+                fid=1,
+                geometry=Polygon([(10, 20), (20, 20), (20, 30), (10, 30), (10, 20)]),
+                attributes={},
+            ),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    large_layer = VectorLayer.create(
+        layer_id="large",
+        name="大范围图层",
+        features=(
+            Feature(
+                fid=1,
+                geometry=Polygon([(-100, -100), (200, -100), (200, 200), (-100, 200)]),
+                attributes={},
+            ),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(
+                LayerSnapshot(layer=large_layer, visible=True, selected_feature_ids=()),
+                LayerSnapshot(layer=small_layer, visible=True, selected_feature_ids=()),
+            ),
+            active_layer_id=small_layer.layer_id,
+            display_crs=small_layer.crs,
+        )
+    )
+    application.processEvents()
+
+    canvas.zoom_to_layer(small_layer.bounds)
+    view_state = canvas.capture_view_state()
+
+    assert view_state.center_x == pytest.approx(15.0, abs=0.5)
+    assert view_state.center_y == pytest.approx(25.0, abs=0.5)
+    assert view_state.zoom_percent > 100.0

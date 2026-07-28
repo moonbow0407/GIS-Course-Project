@@ -1,6 +1,7 @@
 """GIS 桌面通用平台主窗口。"""
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from pyproj import CRS
@@ -8,7 +9,9 @@ from pyproj.exceptions import CRSError
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
+    QDockWidget,
     QFileDialog,
     QInputDialog,
     QLabel,
@@ -22,6 +25,7 @@ from app.application.errors import ApplicationError
 from app.application.gis_application import GisApplication
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
+from app.domain.symbology import RasterSymbology, VectorSymbology
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
 from app.infrastructure.project.json_project_store import JsonProjectStore
@@ -30,6 +34,7 @@ from app.presentation.widgets.buffer_analysis_dialog import BufferAnalysisDialog
 from app.presentation.widgets.layer_panel import LayerPanel
 from app.presentation.widgets.map_canvas import MapCanvas
 from app.presentation.widgets.ribbon_bar import RibbonBar
+from app.presentation.widgets.symbology_panel import SymbologyPanel
 
 
 class MainWindow(QMainWindow):
@@ -51,6 +56,9 @@ class MainWindow(QMainWindow):
         self._layer_panel: LayerPanel = LayerPanel()
         # 地图画布：显示矢量与栅格图层并提供基础导航能力。
         self._map_canvas: MapCanvas = MapCanvas()
+        # 符号系统面板：右侧停靠并跟随当前活动图层。
+        self._symbology_panel: SymbologyPanel = SymbologyPanel()
+        self._symbology_dock: QDockWidget = QDockWidget("符号系统", self)
         # 状态提示标签：显示就绪状态和最近一次操作反馈。
         self._ready_label: QLabel = QLabel("就绪")
         # 坐标标签：实时显示鼠标对应的地图坐标。
@@ -67,7 +75,7 @@ class MainWindow(QMainWindow):
         self._workspace_refresh_scheduled: bool = False
         self._create_ui()
         self._connect_signals()
-        self._refresh_workspace()
+        self._refresh_workspace(preserve_view=False)
 
     def _create_ui(self) -> None:
         """创建功能区、双栏工作区和多信息状态栏。"""
@@ -86,6 +94,13 @@ class MainWindow(QMainWindow):
         workspace.setStretchFactor(0, 0)
         workspace.setStretchFactor(1, 1)
         self.setCentralWidget(workspace)
+        self._symbology_dock.setObjectName("symbologyDock")
+        self._symbology_dock.setWidget(self._symbology_panel)
+        self._symbology_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._symbology_dock)
+        self._symbology_dock.hide()
 
         status_bar: QStatusBar = QStatusBar(self)
         status_bar.setObjectName("mainStatusBar")
@@ -110,7 +125,15 @@ class MainWindow(QMainWindow):
         self._layer_panel.layer_visibility_changed.connect(self._change_visibility)
         self._layer_panel.layer_removed.connect(self._remove_layer)
         self._layer_panel.layer_attribute_requested.connect(self._show_attribute_table)
+        self._layer_panel.layer_zoom_requested.connect(self._zoom_to_layer)
+        self._layer_panel.layer_symbology_requested.connect(self._show_symbology)
+        self._layer_panel.category_visibility_changed.connect(
+            self._change_category_visibility
+        )
         self._layer_panel.layer_move_requested.connect(self._move_layer)
+        self._symbology_panel.symbology_changed.connect(self._apply_symbology)
+        self._symbology_panel.unique_requested.connect(self._apply_unique_symbology)
+        self._symbology_panel.graduated_requested.connect(self._apply_graduated_symbology)
         self._map_canvas.coordinate_changed.connect(self._coordinate_label.setText)
         self._map_canvas.view_scale_changed.connect(self._scale_label.setText)
 
@@ -150,46 +173,72 @@ class MainWindow(QMainWindow):
         self._show_placeholder(RibbonBar.action_title(action_id) or "该功能")
 
     def _open_data(self) -> None:
-        """选择真实空间数据文件并交给应用层识别和读取。"""
-        # Qt 同时返回文件路径和所选过滤器，这里只需要第一个值。
-        path_string: str = QFileDialog.getOpenFileName(
+        """选择一个或多个空间数据文件，并逐个交给应用层读取。"""
+        # 原生多选对话框同时支持单击、Ctrl 追加选择和 Shift 连续选择。
+        path_strings: list[str] = QFileDialog.getOpenFileNames(
             self,
             "打开空间数据",
             "",
             "空间数据 (*.shp *.geojson *.json *.gpkg *.tif *.tiff *.img *.dem);;所有文件 (*.*)",
         )[0]
-        if not path_string:
+        if not path_strings:
             return
-        data_path: Path = Path(path_string)
-        layer_name: str | None = None
-        if data_path.suffix.lower() == ".gpkg":
+
+        loaded_paths: list[Path] = []
+        failures: list[str] = []
+        warnings: list[str] = []
+        for path_string in path_strings:
+            data_path: Path = Path(path_string)
             try:
-                layer_names: tuple[str, ...] = self._data_reader.list_layers(data_path)
-            except ApplicationError as error:
-                QMessageBox.warning(self, "打开数据失败", str(error))
-                return
-            if len(layer_names) > 1:
-                layer_name, accepted = QInputDialog.getItem(
-                    self,
-                    "选择 GeoPackage 图层",
-                    "图层：",
-                    list(layer_names),
-                    0,
-                    False,
-                )
-                if not accepted or not layer_name:
-                    return
-            elif layer_names:
-                layer_name = layer_names[0]
-        try:
-            result = self._application.open_data(data_path, layer_name)
-        except (ApplicationError, ValueError) as error:
-            QMessageBox.warning(self, "打开数据失败", str(error))
-            return
-        self._refresh_workspace()
-        self._ready_label.setText(f"已加载  {Path(path_string).name}")
-        if result.warning:
-            self.statusBar().showMessage(result.warning, 5000)
+                layer_name, accepted = self._select_geopackage_layer(data_path)
+                if not accepted:
+                    continue
+                result = self._application.open_data(data_path, layer_name)
+            except (ApplicationError, ValueError) as error:
+                failures.append(f"{data_path.name}：{error}")
+                continue
+            loaded_paths.append(data_path)
+            if result.warning:
+                warnings.append(f"{data_path.name}：{result.warning}")
+
+        if loaded_paths:
+            # 全部文件处理完后只刷新一次，避免大批量导入时反复重绘地图。
+            self._refresh_workspace()
+            if len(loaded_paths) == 1:
+                self._ready_label.setText(f"已加载  {loaded_paths[0].name}")
+            else:
+                self._ready_label.setText(f"已加载  {len(loaded_paths)} 个数据")
+        if warnings:
+            self.statusBar().showMessage("；".join(warnings), 5000)
+        if failures:
+            title: str = "部分数据打开失败" if loaded_paths else "打开数据失败"
+            QMessageBox.warning(self, title, "\n".join(failures))
+
+    def _select_geopackage_layer(self, data_path: Path) -> tuple[str | None, bool]:
+        """为 GeoPackage 选择内部图层，其他格式直接允许读取。
+
+        参数:
+            data_path: 用户选择的空间数据文件。
+
+        返回:
+            内部图层名称和是否继续读取；用户取消选择时仅跳过当前文件。
+        """
+        if data_path.suffix.lower() != ".gpkg":
+            return None, True
+        layer_names: tuple[str, ...] = self._data_reader.list_layers(data_path)
+        if len(layer_names) > 1:
+            layer_name, accepted = QInputDialog.getItem(
+                self,
+                "选择 GeoPackage 图层",
+                "图层：",
+                list(layer_names),
+                0,
+                False,
+            )
+            return (layer_name or None), bool(accepted and layer_name)
+        if layer_names:
+            return layer_names[0], True
+        return None, True
 
     def _export_data(self) -> None:
         """选择活动图层的输出位置并执行真实空间数据导出。"""
@@ -245,7 +294,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_project_switch():
             return
         self._application.new_project()
-        self._refresh_workspace()
+        self._refresh_workspace(preserve_view=False)
         self._ready_label.setText("已新建空白工程")
 
     def _open_project(self) -> None:
@@ -354,6 +403,131 @@ class MainWindow(QMainWindow):
         dialog: AttributeTableDialog = AttributeTableDialog(layer_snapshot, self)
         dialog.exec()
 
+    def _zoom_to_layer(self, layer_id: str) -> None:
+        """将地图画布定位到指定工作区图层的完整范围。
+
+        参数:
+            layer_id: 图层面板右键请求定位的真实图层编号。
+        """
+        layer_snapshot: LayerSnapshot | None = next(
+            (
+                layer
+                for layer in self._application.snapshot().layers
+                if layer.layer_id == layer_id
+            ),
+            None,
+        )
+        if layer_snapshot is None:
+            return
+        self._map_canvas.zoom_to_layer(layer_snapshot.bounds)
+        self._ready_label.setText(f"已缩放至图层  {layer_snapshot.name}")
+
+    def _show_symbology(self, layer_id: str) -> None:
+        """激活图层并显示跟随活动图层的右侧符号系统面板。"""
+        try:
+            self._application.set_active_layer(layer_id)
+        except ApplicationError:
+            return
+        self._symbology_dock.show()
+        self._refresh_workspace()
+
+    def _apply_symbology(
+        self,
+        layer_id: str,
+        symbology: VectorSymbology | RasterSymbology,
+    ) -> None:
+        """自动应用面板提交的完整矢量或栅格符号配置。"""
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            if isinstance(symbology, VectorSymbology):
+                self._application.apply_vector_symbology(layer_id, symbology)
+            else:
+                self._application.apply_raster_symbology(layer_id, symbology)
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "符号系统更新失败", str(error))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._refresh_workspace()
+
+    def _apply_unique_symbology(
+        self,
+        layer_id: str,
+        field_name: str,
+        color_scheme: str,
+    ) -> None:
+        """生成并自动应用唯一值符号。"""
+        try:
+            self._application.apply_unique_value_symbology(
+                layer_id,
+                field_name,
+                color_scheme,
+            )
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "唯一值符号更新失败", str(error))
+            return
+        self._refresh_workspace()
+
+    def _apply_graduated_symbology(
+        self,
+        layer_id: str,
+        field_name: str,
+        color_scheme: str,
+        method: str,
+        class_count: int,
+    ) -> None:
+        """生成并自动应用数值分级颜色。"""
+        try:
+            self._application.apply_graduated_symbology(
+                layer_id,
+                field_name,
+                color_scheme,
+                method,
+                class_count,
+            )
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "分级颜色更新失败", str(error))
+            return
+        self._refresh_workspace()
+
+    def _change_category_visibility(
+        self,
+        layer_id: str,
+        category_index: int,
+        visible: bool,
+    ) -> None:
+        """从图层树图例复选框更新单个矢量类别显隐。"""
+        layer_snapshot = next(
+            (
+                layer
+                for layer in self._application.snapshot().layers
+                if layer.layer_id == layer_id
+            ),
+            None,
+        )
+        if layer_snapshot is None or not hasattr(layer_snapshot.layer, "symbology"):
+            return
+        symbology = layer_snapshot.layer.symbology
+        if not isinstance(symbology, VectorSymbology):
+            return
+        if symbology.unique_classes:
+            if category_index == len(symbology.unique_classes):
+                updated = replace(symbology, other_visible=visible)
+            elif 0 <= category_index < len(symbology.unique_classes):
+                classes = list(symbology.unique_classes)
+                classes[category_index] = replace(classes[category_index], visible=visible)
+                updated = replace(symbology, unique_classes=tuple(classes))
+            else:
+                return
+        elif 0 <= category_index < len(symbology.graduated_classes):
+            classes2 = list(symbology.graduated_classes)
+            classes2[category_index] = replace(classes2[category_index], visible=visible)
+            updated = replace(symbology, graduated_classes=tuple(classes2))
+        else:
+            return
+        self._application.apply_vector_symbology(layer_id, updated)
+        self._refresh_workspace()
+
     def _show_active_attribute_table(self) -> None:
         """打开活动图层属性表；无图层时显示轻量提示。"""
         active_layer_id: str | None = self._application.snapshot().active_layer_id
@@ -391,7 +565,7 @@ class MainWindow(QMainWindow):
         except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "坐标系设置失败", str(error))
             return
-        self._refresh_workspace()
+        self._refresh_workspace(preserve_view=False)
         self._ready_label.setText(f"地图 CRS 已设置为 {self._format_crs(target_crs)}")
 
     def _buffer_analysis(self) -> None:
@@ -454,13 +628,27 @@ class MainWindow(QMainWindow):
             "GIS 桌面通用平台\n\n基于 PySide6、GeoPandas 与 Rasterio 构建。\n当前版本已完成统一主界面和功能接口集成。",
         )
 
-    def _refresh_workspace(self, view_state: MapViewState | None = None) -> None:
-        """将应用层最新快照同步到图层面板、地图和状态栏。"""
+    def _refresh_workspace(
+        self,
+        view_state: MapViewState | None = None,
+        preserve_view: bool = True,
+    ) -> None:
+        """将应用层最新快照同步到界面，并按需保留当前地图视图。
+
+        参数:
+            view_state: 工程恢复时明确指定的地图中心和缩放状态。
+            preserve_view: 同一坐标系内刷新图层时是否保留当前视图。
+        """
+        previous_view_state: MapViewState | None = None
+        if preserve_view and view_state is None and self._map_canvas.has_map_data:
+            # 缓冲结果通常远小于全图范围；刷新后保留视图，避免面退化成亚像素淡点。
+            previous_view_state = self._map_canvas.capture_view_state()
         snapshot: WorkspaceSnapshot = self._application.snapshot()
         self._layer_panel.apply_snapshot(snapshot)
         self._map_canvas.set_snapshot(snapshot)
-        if view_state is not None:
-            self._map_canvas.restore_view_state(view_state)
+        resolved_view_state: MapViewState | None = view_state or previous_view_state
+        if resolved_view_state is not None:
+            self._map_canvas.restore_view_state(resolved_view_state)
         active_name: str = "无"
         for layer in snapshot.layers:
             if layer.layer_id == snapshot.active_layer_id:
@@ -469,6 +657,16 @@ class MainWindow(QMainWindow):
         self._selection_label.setText(f"选中要素  {snapshot.selection_count}")
         crs_name: str = self._format_crs(snapshot.display_crs)
         self._crs_label.setText(f"坐标系  {crs_name}")
+        if self._symbology_dock.isVisible():
+            active_snapshot: LayerSnapshot | None = next(
+                (
+                    layer
+                    for layer in snapshot.layers
+                    if layer.layer_id == snapshot.active_layer_id
+                ),
+                None,
+            )
+            self._symbology_panel.set_layer(active_snapshot)
         self._update_window_title()
 
     def _schedule_workspace_refresh(self) -> None:

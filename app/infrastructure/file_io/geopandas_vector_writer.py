@@ -70,6 +70,19 @@ class GeoPandasVectorWriter:
             geometry=[feature.geometry for feature in features],
             crs=layer.crs,
         )
+        if suffix == ".geojson":
+            if layer.crs is None:
+                raise DataWriteFailed(
+                    "GeoJSON 导出需要已知坐标系，无法安全写出坐标系未知的图层。"
+                )
+            try:
+                # RFC 7946 GeoJSON 使用 WGS84 经纬度。若直接写入无 EPSG 编号的
+                # 投影坐标，GDAL 会省略 CRS，重新读取时就会被误判为 EPSG:4326。
+                dataframe = dataframe.to_crs(epsg=4326)
+            except Exception as error:
+                raise DataWriteFailed(
+                    f"图层无法转换为 GeoJSON 所需的 WGS84 坐标：{layer.name}"
+                ) from error
         try:
             dataframe.to_file(
                 resolved_path,

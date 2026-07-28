@@ -8,6 +8,7 @@ from pyproj import CRS
 
 from app.application.errors import (
     EmptyVectorDataset,
+    IncompatibleCoordinateReferenceSystem,
     NoUsableGeometry,
     UnsupportedVectorFormat,
     VectorFileNotFound,
@@ -67,6 +68,34 @@ def test_read_reprojects_known_crs_to_target(tmp_path: Path) -> None:
 
     assert layer.crs == CRS.from_epsg(3857)
     assert layer.features[0].geometry.x == pytest.approx(111319.49, rel=1e-5)
+
+
+def test_read_rejects_geojson_with_projected_values_declared_as_longitude_latitude(
+    tmp_path: Path,
+) -> None:
+    """GeoJSON 米制坐标被误报为经纬度时应明确拒绝，不能生成无限地图范围。"""
+    path = tmp_path / "wrong-crs.geojson"
+    content: dict[str, object] = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {},
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [477075.65, 213509.17],
+                },
+            }
+        ],
+    }
+    write_geojson(path, content)
+    reader = GeoPandasVectorReader()
+
+    with pytest.raises(
+        IncompatibleCoordinateReferenceSystem,
+        match="经纬度范围",
+    ):
+        reader.read(path, CRS.from_epsg(32145))
 
 
 def test_read_rejects_missing_file(tmp_path: Path) -> None:

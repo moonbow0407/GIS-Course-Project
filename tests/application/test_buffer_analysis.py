@@ -324,7 +324,7 @@ def test_mixed_geometry_layer_is_rejected_before_buffering(tmp_path: Path) -> No
 
 
 def test_buffer_analysis_writes_readable_geojson(tmp_path: Path) -> None:
-    """缓冲区应用用例应能通过真实写入器生成可重新读取的结果文件。"""
+    """缓冲区应用用例应生成采用 WGS84 坐标且可重新读取的 GeoJSON。"""
     application: GisApplication = GisApplication(
         InMemoryDataReader(make_layer()),
         data_writer=GeoPandasVectorWriter(),
@@ -336,7 +336,8 @@ def test_buffer_analysis_writes_readable_geojson(tmp_path: Path) -> None:
 
     dataframe: gpd.GeoDataFrame = gpd.read_file(output_path)
     assert len(dataframe) == 2
-    assert dataframe.crs == CRS.from_epsg(3857)
+    assert dataframe.crs == CRS.from_epsg(4326)
+    assert dataframe.geometry.is_valid.all()
     assert dataframe.geometry.iloc[0].geom_type == "Polygon"
 
 

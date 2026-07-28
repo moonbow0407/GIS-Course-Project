@@ -6,15 +6,19 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+import pytest
 from affine import Affine
 from pyproj import CRS
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QTreeWidget, QTreeWidgetItem
+from shapely.geometry import Point, Polygon
 
 from app.application.gis_application import GisApplication
+from app.domain.feature import Feature
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
+from app.domain.vector_layer import VectorLayer
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
 from app.presentation.main_window import MainWindow
@@ -59,6 +63,58 @@ def test_raster_visibility_can_be_toggled_twice_with_real_mouse_events() -> None
     ]
     assert len(raster_items) == 1
     assert raster_items[0].isVisible() is True
+    window.close()
+
+
+def test_workspace_refresh_preserves_zoom_after_buffer_layer_is_added() -> None:
+    """缓冲结果加入工作区时应保留用户视图，避免小缓冲面退化成全图淡点。"""
+    qt_application: QApplication = QApplication.instance() or QApplication([])
+    crs: CRS = CRS.from_epsg(4549)
+    source_layer: VectorLayer = VectorLayer.create(
+        layer_id="points",
+        name="测试点",
+        features=(
+            Feature(fid=1, geometry=Point(0, 0), attributes={}),
+            Feature(fid=2, geometry=Point(1000, 1000), attributes={}),
+        ),
+        crs=crs,
+    )
+    buffer_layer: VectorLayer = VectorLayer.create(
+        layer_id="buffers",
+        name="测试缓冲",
+        features=(
+            Feature(
+                fid=1,
+                geometry=Polygon(
+                    [(-10, -10), (10, -10), (10, 10), (-10, 10), (-10, -10)]
+                ),
+                attributes={},
+            ),
+        ),
+        crs=crs,
+    )
+    document: MapDocument = MapDocument()
+    document.add_layer(source_layer)
+    window: MainWindow = MainWindow()
+    window._application = GisApplication(AutoDataReader(), AutoDataWriter(), document)
+    window.resize(800, 600)
+    window.show()
+    window._refresh_workspace()
+    qt_application.processEvents()
+    window._map_canvas.zoom_in()
+    window._map_canvas.zoom_in()
+    before_refresh = window._map_canvas.capture_view_state()
+
+    document.add_layer(buffer_layer)
+    window._refresh_workspace()
+    qt_application.processEvents()
+    after_refresh = window._map_canvas.capture_view_state()
+
+    assert before_refresh.zoom_percent > 100.0
+    assert after_refresh.zoom_percent == before_refresh.zoom_percent
+    # QGraphicsView 的滚动条使用整数像素，中心点允许最多约一个屏幕像素的舍入差。
+    assert after_refresh.center_x == pytest.approx(before_refresh.center_x, abs=2.0)
+    assert after_refresh.center_y == pytest.approx(before_refresh.center_y, abs=2.0)
     window.close()
 
 
