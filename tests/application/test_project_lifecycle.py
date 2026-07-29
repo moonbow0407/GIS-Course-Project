@@ -3,9 +3,12 @@
 from pathlib import Path
 
 import fiona
+import pytest
 from pyproj import CRS
 from shapely.geometry import Point
 
+from app.application.buffer_analysis import BufferRequest
+from app.application.errors import InvalidBufferParameters
 from app.application.gis_application import GisApplication
 from app.application.project_models import MapViewState
 from app.domain.feature import Feature
@@ -146,3 +149,38 @@ def test_changed_input_marks_dependent_analysis_history_stale(tmp_path: Path) ->
 
     assert restored.analysis_runs[0].status == "stale"
     assert any("数据源已变化" in warning for warning in restored.warnings)
+
+
+def test_failed_analysis_history_remains_failed_when_input_changes(tmp_path: Path) -> None:
+    """失败记录是执行事实，输入文件变化后不能被错误标记为过期。"""
+    source_path: Path = tmp_path / "roads.geojson"
+    GeoPandasVectorWriter().write(make_layer(), source_path)
+    project_path: Path = tmp_path / "roads.gisproj"
+
+    application: GisApplication = make_application()
+    source_result = application.open_data(source_path)
+    application.save_project(project_path)
+    with pytest.raises(InvalidBufferParameters):
+        application.buffer_analysis(
+            BufferRequest(
+                input_layer_id=source_result.layer_id,
+                output_path=source_path,
+                output_layer_name="失败结果",
+                distance=500,
+            )
+        )
+    application.save_project()
+
+    changed_layer: VectorLayer = VectorLayer.create(
+        name="道路",
+        features=make_layer().features
+        + (Feature(fid=3, geometry=Point(118.2, 31.2), attributes={"名称": "丙"}),),
+        crs=CRS.from_epsg(4326),
+    )
+    GeoPandasVectorWriter().write(changed_layer, source_path)
+
+    restored_application: GisApplication = make_application()
+    restored = restored_application.open_project(project_path)
+
+    assert restored.analysis_runs[0].status == "failed"
+    assert restored.analysis_runs[0].message is not None

@@ -176,6 +176,15 @@ def test_buffer_analysis_writes_and_activates_new_result_layer(tmp_path: Path) -
     output_layer = cast(VectorLayer, writer.layer)
     assert output_layer.features[0].attributes["名称"] == "甲"
     assert output_layer.features[0].geometry.area == pytest.approx(312.1445, rel=1e-3)
+    assert len(application.analysis_runs) == 1
+    run = application.analysis_runs[0]
+    assert run.status == "completed"
+    assert run.input_layer_ids == ("points",)
+    assert run.output_layer_ids == (result.output_layer_id,)
+    assert run.completed_at is not None
+    assert run.duration_seconds is not None
+    assert run.parameters["distance"] == 10.0
+    assert run.parameters["output_path"] == str(result.output_path)
 
 
 def test_buffer_analysis_dissolves_overlapping_features(tmp_path: Path) -> None:
@@ -354,6 +363,28 @@ def test_buffer_analysis_write_failure_does_not_add_partial_result(tmp_path: Pat
 
     assert len(application.snapshot().layers) == 1
     assert application.snapshot().active_layer_id == "points"
+    assert len(application.analysis_runs) == 1
+    failed_run = application.analysis_runs[0]
+    assert failed_run.status == "failed"
+    assert failed_run.message == "测试写出失败"
+    assert failed_run.input_layer_ids == ("points",)
+    assert failed_run.output_layer_ids == ()
+
+
+def test_clear_analysis_history_keeps_result_layer(tmp_path: Path) -> None:
+    """清除分析历史时应保留已加入地图的结果图层。"""
+    application: GisApplication = GisApplication(
+        InMemoryDataReader(make_layer()),
+        data_writer=RecordingDataWriter(),
+    )
+    application.open_data(Path("points.geojson"))
+    application.buffer_analysis(make_request(tmp_path / "buffers.geojson"))
+
+    application.clear_analysis_history()
+
+    assert application.analysis_runs == ()
+    assert [layer.name for layer in application.snapshot().layers] == ["测试点", "点缓冲区"]
+    assert application.is_modified is True
 
 
 def test_buffer_request_rejects_non_positive_distance(tmp_path: Path) -> None:

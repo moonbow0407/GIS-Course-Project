@@ -67,6 +67,9 @@ class AnalysisRun:
     status: str
     created_at: str
     supersedes_run_id: str | None = None
+    completed_at: str | None = None
+    duration_seconds: float | None = None
+    message: str | None = None
 
     def __post_init__(self) -> None:
         """复制参数映射，避免调用方在保存前修改分析记录。"""

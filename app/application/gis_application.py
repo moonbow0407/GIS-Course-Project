@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from uuid import uuid4
 
 from pyproj import CRS
@@ -111,6 +112,11 @@ class GisApplication:
     def analysis_runs(self) -> tuple[AnalysisRun, ...]:
         """返回当前工程的只读分析历史。"""
         return self._analysis_runs
+
+    def clear_analysis_history(self) -> None:
+        """清除当前工程的分析历史，但保留地图中的结果图层和结果文件。"""
+        self._analysis_runs = ()
+        self._modified = True
 
     def open_vector(self, path: Path, layer_name: str | None = None) -> OpenVectorResult:
         """兼容旧调用方式读取矢量文件，并返回打开数据结果。"""
@@ -429,6 +435,31 @@ class GisApplication:
         return AnalysisResultPersisted(run=run, snapshot=self.snapshot())
 
     def buffer_analysis(self, request: BufferRequest) -> BufferAnalysisResult:
+        """执行缓冲区分析，并为成功或失败的执行追加一条历史记录。
+
+        参数:
+            request: 输入图层、输出位置、距离和几何样式等分析参数。
+
+        返回:
+            包含输出图层编号、写出路径、要素数量和最新工作区快照的结果。
+
+        异常:
+            ApplicationError: 分析参数、输入数据或结果写出失败时抛出。
+        """
+        started_at: str = self._now()
+        started_monotonic: float = perf_counter()
+        try:
+            return self._execute_buffer_analysis(request, started_at, started_monotonic)
+        except Exception as error:
+            self._append_failed_analysis_run(request, started_at, started_monotonic, error)
+            raise
+
+    def _execute_buffer_analysis(
+        self,
+        request: BufferRequest,
+        started_at: str,
+        started_monotonic: float,
+    ) -> BufferAnalysisResult:
         """执行缓冲区分析、写出结果并将结果图层加入当前工作区。
 
         参数:
@@ -528,10 +559,14 @@ class GisApplication:
                     else None
                 ),
                 "calculation_crs": calculation_crs.to_string(),
+                "output_path": str(output_path),
             },
             output_layer_id=output_layer.layer_id,
             output_path=output_path,
             output_layer_name=output_name,
+            started_at=started_at,
+            completed_at=self._now(),
+            duration_seconds=perf_counter() - started_monotonic,
         )
         self._analysis_runs = self._analysis_runs + (run,)
         self._modified = True
@@ -747,15 +782,48 @@ class GisApplication:
         except ValueError:
             return str(path.resolve()).replace("\\", "/")
 
+    def _append_failed_analysis_run(
+        self,
+        request: BufferRequest,
+        started_at: str,
+        started_monotonic: float,
+        error: Exception,
+    ) -> None:
+        """将失败的缓冲区执行写入历史，保留输入和用户参数便于回溯。"""
+        parameters: dict[str, object] = self._buffer_request_parameters(request)
+        input_layer: SpatialLayer | None = next(
+            (layer for layer in self._document.layers if layer.layer_id == request.input_layer_id),
+            None,
+        )
+        if isinstance(input_layer, VectorLayer):
+            parameters["geometry_family"] = input_layer.geometry_family.value
+        run: AnalysisRun = self._create_analysis_run(
+            algorithm_id="buffer",
+            input_layer_ids=(request.input_layer_id,),
+            parameters=parameters,
+            status="failed",
+            message=str(error),
+            started_at=started_at,
+            completed_at=self._now(),
+            duration_seconds=perf_counter() - started_monotonic,
+        )
+        self._analysis_runs = self._analysis_runs + (run,)
+        self._modified = True
+
     def _create_analysis_run(
         self,
         algorithm_id: str,
         input_layer_ids: tuple[str, ...],
         parameters: Mapping[str, object],
-        output_layer_id: str,
-        output_path: Path,
-        output_layer_name: str | None,
+        output_layer_id: str | None = None,
+        output_path: Path | None = None,
+        output_layer_name: str | None = None,
         run_id: str | None = None,
+        started_at: str | None = None,
+        completed_at: str | None = None,
+        duration_seconds: float | None = None,
+        status: str = "completed",
+        message: str | None = None,
     ) -> AnalysisRun:
         """为分析服务创建统一格式的不可变历史记录。"""
         resolved_run_id: str = run_id or uuid4().hex
@@ -764,28 +832,54 @@ class GisApplication:
             for run in self._analysis_runs
             if set(run.output_layer_ids).intersection(input_layer_ids)
         )
-        source_path: str = (
-            self._relative_to_project(output_path)
-            if self._project_path is not None
-            else str(output_path.expanduser().resolve()).replace("\\", "/")
-        )
-        return AnalysisRun(
-            run_id=resolved_run_id,
-            algorithm_id=algorithm_id,
-            input_layer_ids=input_layer_ids,
-            parameters=parameters,
-            output_layer_ids=(output_layer_id,),
-            outputs=(
+        outputs: tuple[AnalysisOutputReference, ...] = ()
+        if output_layer_id is not None and output_path is not None:
+            source_path: str = (
+                self._relative_to_project(output_path)
+                if self._project_path is not None
+                else str(output_path.expanduser().resolve()).replace("\\", "/")
+            )
+            outputs = (
                 AnalysisOutputReference(
                     layer_id=output_layer_id,
                     source_path=source_path,
                     source_layer_name=output_layer_name,
                 ),
-            ),
+            )
+        return AnalysisRun(
+            run_id=resolved_run_id,
+            algorithm_id=algorithm_id,
+            input_layer_ids=input_layer_ids,
+            parameters=parameters,
+            output_layer_ids=((output_layer_id,) if output_layer_id is not None else ()),
+            outputs=outputs,
             parent_run_ids=parent_run_ids,
-            status="completed",
-            created_at=self._now(),
+            status=status,
+            created_at=started_at or self._now(),
+            completed_at=completed_at or self._now(),
+            duration_seconds=duration_seconds,
+            message=message,
         )
+
+    @staticmethod
+    def _buffer_request_parameters(request: BufferRequest) -> dict[str, object]:
+        """将缓冲区请求转换为可持久化的历史参数。"""
+        return {
+            "distance": request.distance,
+            "distance_unit": request.distance_unit,
+            "distance_meters": distance_to_meters(request.distance, request.distance_unit),
+            "side_type": request.side_type,
+            "segments": request.segments,
+            "cap_style": request.cap_style,
+            "join_style": request.join_style,
+            "mitre_limit": request.mitre_limit,
+            "dissolve": request.dissolve,
+            "analysis_crs": (
+                request.analysis_crs.to_string() if request.analysis_crs is not None else None
+            ),
+            "output_path": str(request.output_path.expanduser().resolve()),
+            "output_layer_name": request.output_layer_name,
+        }
 
     @staticmethod
     def _safe_algorithm_id(algorithm_id: str) -> str:

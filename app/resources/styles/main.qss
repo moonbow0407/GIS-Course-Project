@@ -8,12 +8,92 @@ QWidget#symbologyPanel {
     color: #263548;
 }
 
-QDockWidget#symbologyDock::title {
+QDockWidget#symbologyDock::title,
+QDockWidget#analysisHistoryDock::title {
     padding: 7px 10px;
     border-bottom: 1px solid #d9e1ea;
     background: #eef4fa;
     color: #263548;
+    font-family: "Microsoft YaHei UI", "Segoe UI";
+    font-size: 14px;
     font-weight: 600;
+}
+
+QDockWidget#analysisHistoryDock,
+QWidget#analysisHistoryPanel {
+    background: #ffffff;
+    color: #263548;
+}
+
+QLabel#analysisHistorySubtitle {
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+QPushButton#analysisHistoryClear {
+    min-width: 52px;
+    min-height: 26px;
+    padding: 0 9px;
+    border: 1px solid #cbd6e2;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #526277;
+}
+
+QPushButton#analysisHistoryClear:hover {
+    border-color: #d97706;
+    background: #fff7ed;
+    color: #b45309;
+}
+
+QListWidget#analysisHistoryList {
+    border: 1px solid #d9e1ea;
+    background: #ffffff;
+    alternate-background-color: #f8fafc;
+    outline: none;
+}
+
+QListWidget#analysisHistoryList::item {
+    min-height: 34px;
+    padding: 0;
+    border-bottom: 1px solid #eef2f6;
+}
+
+QListWidget#analysisHistoryList::item:hover {
+    background: #edf5fc;
+}
+
+QListWidget#analysisHistoryList::item:selected {
+    background: #dcecf9;
+    color: #0f5f9f;
+}
+
+QWidget#analysisHistoryRow,
+QLabel#analysisHistoryOperation,
+QLabel#analysisHistoryStatus {
+    background: transparent;
+}
+
+QLabel#analysisHistoryStatus {
+    min-width: 20px;
+    color: #64748b;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+QLabel#analysisHistoryStatus[status="completed"] {
+    color: #3b9b62;
+}
+
+QLabel#analysisHistoryStatus[status="failed"],
+QLabel#analysisHistoryStatus[status="stale"] {
+    color: #d86b3b;
+}
+
+QLabel#analysisHistoryOperation {
+    color: #263548;
+    font-size: 13px;
 }
 
 QWidget#symbologyScrollContent,
@@ -114,9 +194,11 @@ QWidget#ribbonBar {
     border-bottom: 1px solid #d9e1ea;
 }
 
-QLabel#applicationBrand {
-    color: #17263b;
-    font-size: 16px;
+QLabel#applicationBrand,
+QLabel#panelTitle {
+    color: #1e2f45;
+    font-family: "Microsoft YaHei UI", "Segoe UI";
+    font-size: 15px;
     font-weight: 600;
     padding: 1px 0 4px 0;
 }
@@ -197,12 +279,6 @@ QSplitter#workspaceSplitter::handle {
 LayerPanel {
     background: #ffffff;
     border-right: 1px solid #d9e1ea;
-}
-
-QLabel#panelTitle {
-    color: #1e2f45;
-    font-size: 15px;
-    font-weight: 600;
 }
 
 QLabel#panelHint {

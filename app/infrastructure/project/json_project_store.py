@@ -160,6 +160,13 @@ class JsonProjectStore:
             status=self._string(run.get("status"), f"分析历史 {index}.status"),
             created_at=self._string(run.get("created_at"), f"分析历史 {index}.created_at"),
             supersedes_run_id=self._optional_string(run.get("supersedes_run_id")),
+            completed_at=self._optional_string(run.get("completed_at")),
+            duration_seconds=(
+                self._number(run.get("duration_seconds"), f"分析历史 {index}.duration_seconds")
+                if run.get("duration_seconds") is not None
+                else None
+            ),
+            message=self._optional_string(run.get("message")),
         )
 
     def _decode_output(
@@ -275,6 +282,9 @@ class JsonProjectStore:
             "status": run.status,
             "created_at": run.created_at,
             "supersedes_run_id": run.supersedes_run_id,
+            "completed_at": run.completed_at,
+            "duration_seconds": run.duration_seconds,
+            "message": run.message,
         }
 
     @staticmethod

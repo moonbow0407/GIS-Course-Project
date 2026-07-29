@@ -29,6 +29,7 @@ from app.domain.symbology import RasterSymbology, VectorSymbology
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
 from app.infrastructure.project.json_project_store import JsonProjectStore
+from app.presentation.widgets.analysis_history_panel import AnalysisHistoryPanel
 from app.presentation.widgets.attribute_table import AttributeTableDialog
 from app.presentation.widgets.buffer_analysis_dialog import BufferAnalysisDialog
 from app.presentation.widgets.layer_panel import LayerPanel
@@ -59,6 +60,9 @@ class MainWindow(QMainWindow):
         # 符号系统面板：右侧停靠并跟随当前活动图层。
         self._symbology_panel: SymbologyPanel = SymbologyPanel()
         self._symbology_dock: QDockWidget = QDockWidget("符号系统", self)
+        # 分析历史面板：右侧停靠展示空间分析执行记录。
+        self._analysis_history_panel: AnalysisHistoryPanel = AnalysisHistoryPanel()
+        self._analysis_history_dock: QDockWidget = QDockWidget("分析记录", self)
         # 状态提示标签：显示就绪状态和最近一次操作反馈。
         self._ready_label: QLabel = QLabel("就绪")
         # 坐标标签：实时显示鼠标对应的地图坐标。
@@ -101,6 +105,13 @@ class MainWindow(QMainWindow):
         )
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._symbology_dock)
         self._symbology_dock.hide()
+        self._analysis_history_dock.setObjectName("analysisHistoryDock")
+        self._analysis_history_dock.setWidget(self._analysis_history_panel)
+        self._analysis_history_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._analysis_history_dock)
+        self._analysis_history_dock.hide()
 
         status_bar: QStatusBar = QStatusBar(self)
         status_bar.setObjectName("mainStatusBar")
@@ -134,6 +145,7 @@ class MainWindow(QMainWindow):
         self._symbology_panel.symbology_changed.connect(self._apply_symbology)
         self._symbology_panel.unique_requested.connect(self._apply_unique_symbology)
         self._symbology_panel.graduated_requested.connect(self._apply_graduated_symbology)
+        self._analysis_history_panel.clear_requested.connect(self._clear_analysis_history)
         self._map_canvas.coordinate_changed.connect(self._coordinate_label.setText)
         self._map_canvas.view_scale_changed.connect(self._scale_label.setText)
 
@@ -161,6 +173,7 @@ class MainWindow(QMainWindow):
             "refresh_map": self._refresh_workspace,
             "clear_selection": self._clear_selection,
             "buffer_analysis": self._buffer_analysis,
+            "analysis_history": self._toggle_analysis_history,
             "toggle_layers": self._toggle_layer_panel,
             "show_attributes": self._show_active_attribute_table,
             "set_crs": self._set_display_crs,
@@ -588,6 +601,7 @@ class MainWindow(QMainWindow):
         try:
             result = self._application.buffer_analysis(dialog.request())
         except (ApplicationError, ValueError) as error:
+            self._refresh_analysis_history()
             QMessageBox.warning(self, "缓冲区分析失败", str(error))
             return
         self._refresh_workspace()
@@ -599,6 +613,32 @@ class MainWindow(QMainWindow):
             f"要素数量：{result.feature_count}\n"
             f"输出位置：\n{result.output_path}",
         )
+
+    def _toggle_analysis_history(self) -> None:
+        """切换分析历史面板的显示状态。"""
+        if self._analysis_history_dock.isVisible():
+            self._analysis_history_dock.hide()
+            return
+        self._refresh_analysis_history()
+        self._analysis_history_dock.show()
+        self._analysis_history_dock.raise_()
+
+    def _clear_analysis_history(self) -> None:
+        """清除分析历史记录，但不删除已有结果图层和结果文件。"""
+        if not self._application.analysis_runs:
+            return
+        answer = QMessageBox.question(
+            self,
+            "清除分析记录",
+            "确定清除当前工程的全部分析记录吗？\n分析结果图层和文件不会被删除。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._application.clear_analysis_history()
+        self._refresh_analysis_history()
+        self._ready_label.setText("已清除分析记录")
 
     def _toggle_layer_panel(self) -> None:
         """切换左侧图层管理面板的显示状态。"""
@@ -657,6 +697,7 @@ class MainWindow(QMainWindow):
         self._selection_label.setText(f"选中要素  {snapshot.selection_count}")
         crs_name: str = self._format_crs(snapshot.display_crs)
         self._crs_label.setText(f"坐标系  {crs_name}")
+        self._refresh_analysis_history(snapshot)
         if self._symbology_dock.isVisible():
             active_snapshot: LayerSnapshot | None = next(
                 (
@@ -668,6 +709,17 @@ class MainWindow(QMainWindow):
             )
             self._symbology_panel.set_layer(active_snapshot)
         self._update_window_title()
+
+    def _refresh_analysis_history(self, snapshot: WorkspaceSnapshot | None = None) -> None:
+        """将当前工程的分析历史和图层名称同步到分析记录面板。"""
+        resolved_snapshot: WorkspaceSnapshot = snapshot or self._application.snapshot()
+        layer_names: dict[str, str] = {
+            layer.layer_id: layer.name for layer in resolved_snapshot.layers
+        }
+        self._analysis_history_panel.set_history(
+            self._application.analysis_runs,
+            layer_names,
+        )
 
     def _schedule_workspace_refresh(self) -> None:
         """在当前 Qt 事件结束后合并执行一次完整工作区刷新。

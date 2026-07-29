@@ -264,7 +264,6 @@ class RibbonBar(QWidget):
                     )),
                     RibbonGroupSpec("结果", (
                         RibbonActionSpec("analysis_history", "分析记录", "≣", "#475569"),
-                        RibbonActionSpec("export_result", "导出结果", "⇱", "#0f766e"),
                     )),
                 ),
             ),

@@ -124,6 +124,10 @@ class ProjectService:
         while changed:
             changed = False
             for run in manifest.analysis_runs:
+                # 只有成功生成结果的分析才需要沿依赖关系检查是否过期；失败记录
+                # 代表一次执行事实，不应因为输入文件后来变化而覆盖成 stale。
+                if run.status != "completed":
+                    continue
                 if run.run_id in stale_run_ids:
                     continue
                 input_is_stale: bool = any(
