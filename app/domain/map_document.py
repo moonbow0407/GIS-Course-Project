@@ -100,6 +100,10 @@ class MapDocument:
         self._require_layer(layer_id)
         self._active_layer_id = layer_id
 
+    def clear_active_layer(self) -> None:
+        """取消当前活动图层，使工作区无活动图层。"""
+        self._active_layer_id = None
+
     def set_layer_visibility(self, layer_id: str, visible: bool) -> None:
         """设置图层显隐状态，并在隐藏时清除该图层选择。"""
         self._require_layer(layer_id)

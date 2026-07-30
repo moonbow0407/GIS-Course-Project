@@ -71,7 +71,7 @@ def test_layer_tree_supports_flat_drag_reordering() -> None:
     assert tree.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
     top_item = tree.topLevelItem(0)
     assert top_item.flags() & Qt.ItemFlag.ItemIsDragEnabled
-    assert not top_item.flags() & Qt.ItemFlag.ItemIsDropEnabled
+    assert top_item.flags() & Qt.ItemFlag.ItemIsDropEnabled
     requested_moves: list[tuple[str, int]] = []
     panel.layer_move_requested.connect(
         lambda layer_id, target_index: requested_moves.append((layer_id, target_index))

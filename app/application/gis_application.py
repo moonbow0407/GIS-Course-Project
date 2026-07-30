@@ -238,6 +238,11 @@ class GisApplication:
         self._modified = True
         return self.snapshot()
 
+    def clear_active_layer(self) -> None:
+        """取消当前活动图层。"""
+        self._document.clear_active_layer()
+        self._modified = True
+
     def apply_vector_symbology(
         self,
         layer_id: str,

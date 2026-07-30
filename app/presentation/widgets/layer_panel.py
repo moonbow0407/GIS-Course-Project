@@ -1,7 +1,7 @@
 """真实地图文档对应的图层管理控件。"""
 
-from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QDropEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -14,6 +14,63 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+class _LayerTreeWidget(QTreeWidget):
+    """在 InternalMove 拖拽完成后通知面板的图层树控件。
+
+    QTreeWidget 的 InternalMove 不经过 model.moveRows，
+    导致 rowsMoved 信号不会发射。本子类通过比对拖拽前后
+    的图层 ID 顺序来可靠检测被移动节点，不依赖 currentItem。
+    """
+
+    # 拖拽排序完成信号：携带被移动的顶层节点供面板换算索引。
+    rows_reordered = Signal(QTreeWidgetItem)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """点击空白区域时清除当前选中节点。"""
+        super().mousePressEvent(event)
+        if self.itemAt(event.position().toPoint()) is None:
+            self.clearSelection()
+            self.setCurrentItem(None)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        """记录拖拽前顺序，完成 InternalMove 后比对找出移动节点。"""
+        # 拖拽前：记录当前顶层图层 ID 的快照顺序。
+        pre_order: list[str] = [
+            str(self.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole))
+            for i in range(self.topLevelItemCount())
+        ]
+        super().dropEvent(event)
+        # 延迟比对：确保 QTreeWidget 内部状态完全落定。
+        QTimer.singleShot(0, lambda: self._detect_reorder(pre_order))
+
+    def _detect_reorder(self, pre_order: list[str]) -> None:
+        """比对拖拽前后顺序，找出位移最大的节点即为被拖拽节点。
+
+        向下拖拽时，源位置和目标位置之间的节点会向上移位填补空档；
+        向上拖拽时中间节点向下移位。无论方向，被拖拽节点的位移绝对值
+        始终最大——它跨越了所有中间节点。
+        """
+        post_order: list[str] = [
+            str(self.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole))
+            for i in range(self.topLevelItemCount())
+        ]
+        if post_order == pre_order:
+            return  # 拖到原位，无变化。
+        best_item: QTreeWidgetItem | None = None
+        best_delta: int = 0
+        for i, layer_id in enumerate(post_order):
+            try:
+                old_pos: int = pre_order.index(layer_id)
+            except ValueError:
+                continue
+            delta: int = abs(i - old_pos)
+            if delta > best_delta:
+                best_delta = delta
+                best_item = self.topLevelItem(i)
+        if best_item is not None and best_item.parent() is None:
+            self.rows_reordered.emit(best_item)
 
 from app.application.results import WorkspaceSnapshot
 from app.domain.layer_style import LayerStyle
@@ -43,6 +100,8 @@ class LayerPanel(QWidget):
     layer_symbology_requested = Signal(str)
     # 类别显隐信号：携带图层编号、类别索引和目标状态。
     category_visibility_changed = Signal(str, int, bool)
+    # 选择清除信号：点击图层树空白区域时发出，请求取消活动图层。
+    selection_cleared = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """创建空的图层管理控件。
@@ -55,12 +114,17 @@ class LayerPanel(QWidget):
         """
         super().__init__(parent)
         # 图层树：按地图显示顺序展示图层名称和显隐复选框。
-        self._tree: QTreeWidget = QTreeWidget()
+        self._tree: _LayerTreeWidget = _LayerTreeWidget()
         # 快照更新标记：防止程序刷新控件时反向触发业务信号。
         self._updating: bool = False
         # 图层搜索框：根据名称即时筛选当前真实图层，不创建额外数据。
         self._search_input: QLineEdit = QLineEdit()
         self._create_ui()
+
+    def clear_layer_selection(self) -> None:
+        """取消图层树中当前选中节点，触发 selection_cleared 信号。"""
+        self._tree.clearSelection()
+        self._tree.setCurrentItem(None)
 
     def apply_snapshot(self, snapshot: WorkspaceSnapshot) -> None:
         """按照工作区快照刷新图层名称、顺序、显隐和活动状态。
@@ -80,8 +144,10 @@ class LayerPanel(QWidget):
             item.setData(0, Qt.ItemDataRole.UserRole, layer_snapshot.layer_id)
             item.setCheckState(0, Qt.CheckState.Checked if layer_snapshot.visible else Qt.CheckState.Unchecked)
             item.setFlags(
-                (item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsDragEnabled)
-                & ~Qt.ItemFlag.ItemIsDropEnabled
+                item.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsDragEnabled
+                | Qt.ItemFlag.ItemIsDropEnabled
             )
             self._tree.addTopLevelItem(item)
             self._add_legend_items(item, layer_snapshot.layer)
@@ -116,7 +182,7 @@ class LayerPanel(QWidget):
         self._tree.currentItemChanged.connect(self._on_current_item_changed)
         self._tree.itemChanged.connect(self._on_item_changed)
         self._tree.customContextMenuRequested.connect(self._on_context_menu_requested)
-        self._tree.model().rowsMoved.connect(self._on_rows_moved)
+        self._tree.rows_reordered.connect(self._on_rows_reordered)
         up_button: QToolButton = QToolButton()
         up_button.setText("↑")
         up_button.setToolTip("上移图层")
@@ -140,8 +206,8 @@ class LayerPanel(QWidget):
         layout.setSpacing(8)
         layout.addLayout(title_row)
         layout.addWidget(self._search_input)
-        layout.addWidget(self._tree, 1)
         layout.addLayout(buttons)
+        layout.addWidget(self._tree, 1)
 
     def _on_current_item_changed(self, current: QTreeWidgetItem | None) -> None:
         """将用户选择的当前树节点转换为活动图层请求。
@@ -152,7 +218,10 @@ class LayerPanel(QWidget):
         说明:
             程序同步工作区快照期间忽略节点变化，防止刷新再次触发刷新。
         """
-        if self._updating or current is None:
+        if self._updating:
+            return
+        if current is None:
+            self.selection_cleared.emit()
             return
         if current.parent() is not None:
             current = current.parent()
@@ -212,8 +281,24 @@ class LayerPanel(QWidget):
         """在图层树请求位置显示上下文菜单并返回所选操作。"""
         return menu.exec(self._tree.viewport().mapToGlobal(position))
 
+    def _on_rows_reordered(self, item: QTreeWidgetItem) -> None:
+        """拖拽排序完成后，根据节点面板位置换算地图文档索引。
+
+        参数:
+            item: dropEvent 中捕获的被拖拽顶层节点。
+        """
+        if self._updating:
+            return
+        target_row: int = self._tree.indexOfTopLevelItem(item)
+        if target_row < 0:
+            return
+        layer_id: str = str(item.data(0, Qt.ItemDataRole.UserRole))
+        # 面板从顶到底显示，文档按底到顶保存，因此目标索引需要反向换算。
+        target_index: int = self._tree.topLevelItemCount() - 1 - target_row
+        self.layer_move_requested.emit(layer_id, target_index)
+
     def _on_rows_moved(self, *args: object) -> None:
-        """把树节点拖放后的面板行号转换为地图文档图层位置。"""
+        """↑↓ 按钮或测试代码触发的图层重排回调。"""
         if self._updating:
             return
         item: QTreeWidgetItem | None = self._tree.currentItem()
@@ -223,7 +308,7 @@ class LayerPanel(QWidget):
         if target_row < 0:
             return
         layer_id: str = str(item.data(0, Qt.ItemDataRole.UserRole))
-        # 面板从顶到底显示，文档按底到顶保存，因此目标索引需要反向换算。
+        # 面板从顶到底显示，文档却从底到顶保存，需要反向换算索引。
         target_index: int = self._tree.topLevelItemCount() - 1 - target_row
         self.layer_move_requested.emit(layer_id, target_index)
 

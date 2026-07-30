@@ -7,7 +7,7 @@ from pathlib import Path
 from pyproj import CRS
 from pyproj.exceptions import CRSError
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -84,8 +84,16 @@ class MainWindow(QMainWindow):
         self._crs_label: QLabel = QLabel("坐标系  未设置")
         # 延迟刷新标记：避免在图层树信号回调中删除仍在处理事件的 Qt 节点。
         self._workspace_refresh_scheduled: bool = False
+        # 撤销栈：每项为 (操作描述, 逆向操作, 重做操作)，最多保留 50 步。
+        self._undo_stack: list[tuple[str, Callable[[], None], Callable[[], None]]] = []
+        # 重做栈：撤销后暂存被撤销的操作，新操作执行时清空。
+        self._redo_stack: list[tuple[str, Callable[[], None], Callable[[], None]]] = []
         self._create_ui()
         self._connect_signals()
+        # Ctrl+Z 撤销最近一次地图修改。
+        QShortcut(QKeySequence.StandardKey.Undo, self, activated=self._undo)
+        # Ctrl+Shift+Z 重做最近一次撤销。
+        QShortcut(QKeySequence.StandardKey.Redo, self, activated=self._redo)
         self._refresh_workspace(preserve_view=False)
 
     def _create_ui(self) -> None:
@@ -149,12 +157,14 @@ class MainWindow(QMainWindow):
             self._change_category_visibility
         )
         self._layer_panel.layer_move_requested.connect(self._move_layer)
+        self._layer_panel.selection_cleared.connect(self._clear_active_layer)
         self._symbology_panel.symbology_changed.connect(self._apply_symbology)
         self._symbology_panel.unique_requested.connect(self._apply_unique_symbology)
         self._symbology_panel.graduated_requested.connect(self._apply_graduated_symbology)
         self._analysis_history_panel.clear_requested.connect(self._clear_analysis_history)
         self._map_canvas.coordinate_changed.connect(self._coordinate_label.setText)
         self._map_canvas.view_scale_changed.connect(self._scale_label.setText)
+        self._map_canvas.canvas_clicked.connect(self._on_canvas_clicked)
 
     def _handle_action(self, action_id: str) -> None:
         """把稳定功能编号路由到已实现能力或预留接口。
@@ -471,13 +481,48 @@ class MainWindow(QMainWindow):
         self._save_project()
 
     def _activate_layer(self, layer_id: str) -> None:
-        """设置活动图层并刷新工作区。
+        """设置活动图层并仅刷新状态栏和符号面板，不重建任何控件。
 
         参数:
             layer_id: 图层面板选中的真实图层编号。
+
+        说明:
+            图层激活只影响状态栏标签和符号系统面板，不涉及地图显示
+            或图层树重建。若在此处调用 apply_snapshot 重建图层树，会
+            在拖拽排序过程中因 QTreeWidget 内部 currentItem 变化而
+            触发同步树清空，导致 drop 目标位置被重置为相邻行。
         """
         self._application.set_active_layer(layer_id)
-        self._schedule_workspace_refresh()
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        active_name: str = "无"
+        for layer in snapshot.layers:
+            if layer.layer_id == snapshot.active_layer_id:
+                active_name = layer.name
+        self._layer_label.setText(f"当前图层  {active_name}")
+        # 符号系统面板若已打开需跟随活动图层切换。
+        if self._symbology_dock.isVisible():
+            active_snapshot: LayerSnapshot | None = next(
+                (
+                    layer
+                    for layer in snapshot.layers
+                    if layer.layer_id == snapshot.active_layer_id
+                ),
+                None,
+            )
+            self._symbology_panel.set_layer(active_snapshot)
+
+    def _clear_active_layer(self) -> None:
+        """点击图层面板空白处时清除活动图层。"""
+        try:
+            self._application.clear_active_layer()
+        except ApplicationError:
+            pass
+        self._layer_label.setText("当前图层  无")
+        self._symbology_panel.set_layer(None)
+
+    def _on_canvas_clicked(self) -> None:
+        """点击地图画布时取消图层面板选中。"""
+        self._layer_panel.clear_layer_selection()
 
     def _change_visibility(self, layer_id: str, visible: bool) -> None:
         """更新图层显隐状态并刷新工作区。
@@ -486,6 +531,15 @@ class MainWindow(QMainWindow):
             layer_id: 需要更新的真实图层编号。
             visible: 图层是否参与地图绘制和空间查询。
         """
+        self._push_undo(
+            "图层显隐",
+            undo_action=lambda lid=layer_id, vis=not visible: self._application.set_layer_visibility(
+                lid, vis
+            ),
+            redo_action=lambda lid=layer_id, vis=visible: self._application.set_layer_visibility(
+                lid, vis
+            ),
+        )
         self._application.set_layer_visibility(layer_id, visible)
         self._schedule_workspace_refresh()
 
@@ -505,6 +559,18 @@ class MainWindow(QMainWindow):
             layer_id: 需要移动的真实图层编号。
             target_index: 图层在从底到顶显示顺序中的目标位置。
         """
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        for i, layer in enumerate(snapshot.layers):
+            if layer.layer_id == layer_id:
+                old_index: int = i
+                break
+        else:
+            return
+        self._push_undo(
+            "图层排序",
+            undo_action=lambda lid=layer_id, idx=old_index: self._application.move_layer(lid, idx),
+            redo_action=lambda lid=layer_id, idx=target_index: self._application.move_layer(lid, idx),
+        )
         self._application.move_layer(layer_id, target_index)
         self._schedule_workspace_refresh()
 
@@ -781,22 +847,21 @@ class MainWindow(QMainWindow):
         view_state: MapViewState | None = None,
         preserve_view: bool = True,
     ) -> None:
-        """将应用层最新快照同步到界面，并按需保留当前地图视图。
+        """将应用层最新快照同步到界面。
 
         参数:
             view_state: 工程恢复时明确指定的地图中心和缩放状态。
-            preserve_view: 同一坐标系内刷新图层时是否保留当前视图。
+            preserve_view: 已被 set_snapshot 内部处理，保留此参数以兼容调用方。
+
+        说明:
+            set_snapshot 内部在非首次加载时自动保存并恢复视图中心，
+            无需在此处重复捕获/恢复；仅工程加载需显式传入 view_state。
         """
-        previous_view_state: MapViewState | None = None
-        if preserve_view and view_state is None and self._map_canvas.has_map_data:
-            # 缓冲结果通常远小于全图范围；刷新后保留视图，避免面退化成亚像素淡点。
-            previous_view_state = self._map_canvas.capture_view_state()
         snapshot: WorkspaceSnapshot = self._application.snapshot()
         self._layer_panel.apply_snapshot(snapshot)
         self._map_canvas.set_snapshot(snapshot)
-        resolved_view_state: MapViewState | None = view_state or previous_view_state
-        if resolved_view_state is not None:
-            self._map_canvas.restore_view_state(resolved_view_state)
+        if view_state is not None:
+            self._map_canvas.restore_view_state(view_state)
         active_name: str = "无"
         for layer in snapshot.layers:
             if layer.layer_id == snapshot.active_layer_id:
@@ -867,6 +932,49 @@ class MainWindow(QMainWindow):
         if self._application.is_modified:
             title += " *"
         self.setWindowTitle(f"{title} · GIS桌面通用平台")
+
+    # ── 撤销 ────────────────────────────────────────────────
+
+    def _push_undo(
+        self,
+        description: str,
+        undo_action: Callable[[], None],
+        redo_action: Callable[[], None],
+    ) -> None:
+        """将一条可撤销操作压入栈，同时清空重做栈。
+
+        参数:
+            description: 撤销操作的中文描述，用于状态栏提示。
+            undo_action: 执行撤销的可调用对象。
+            redo_action: 执行重做的可调用对象。
+        """
+        self._undo_stack.append((description, undo_action, redo_action))
+        self._redo_stack.clear()
+        # 限制栈深度，丢弃最早的记录。
+        if len(self._undo_stack) > 50:
+            self._undo_stack.pop(0)
+
+    def _undo(self) -> None:
+        """Ctrl+Z：撤销最近一次地图修改，并将其移入重做栈。"""
+        if not self._undo_stack:
+            self.statusBar().showMessage("没有可撤销的操作", 3000)
+            return
+        description, undo_action, redo_action = self._undo_stack.pop()
+        undo_action()
+        self._redo_stack.append((description, undo_action, redo_action))
+        self._refresh_workspace()
+        self._ready_label.setText(f"已撤销  {description}")
+
+    def _redo(self) -> None:
+        """Ctrl+Shift+Z：重做最近一次撤销，并将其移回撤销栈。"""
+        if not self._redo_stack:
+            self.statusBar().showMessage("没有可重做的操作", 3000)
+            return
+        description, undo_action, redo_action = self._redo_stack.pop()
+        redo_action()
+        self._undo_stack.append((description, undo_action, redo_action))
+        self._refresh_workspace()
+        self._ready_label.setText(f"已重做  {description}")
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """关闭窗口前避免未保存工程修改被静默丢弃。"""

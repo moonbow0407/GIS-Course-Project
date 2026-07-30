@@ -33,6 +33,8 @@ class MapCanvas(QGraphicsView):
     coordinate_changed = Signal(str)
     # 视图比例信号：携带相对于全图视图的近似缩放百分比文本。
     view_scale_changed = Signal(str)
+    # 画布点击信号：单击地图任意位置时发出，供外部取消图层选中。
+    canvas_clicked = Signal()
 
     def __init__(self, parent: QGraphicsView | None = None) -> None:
         """创建空地图场景和矢量、栅格渲染器。
@@ -109,6 +111,14 @@ class MapCanvas(QGraphicsView):
         map_scene_rect: QRectF = self._scene_rect_from_bounds(
             (minimum_x, minimum_y, maximum_x, maximum_y)
         )
+        # 捕获当前视图中心：若已有地图数据（非首次加载），重建后恢复原位，
+        # 避免 fitInView 重置全图导致地图偏移闪烁。
+        is_first_load: bool = self._map_scene_rect is None
+        view_center: QPointF | None = (
+            None
+            if is_first_load
+            else self.mapToScene(self.viewport().rect().center())
+        )
         self._map_scene_rect = map_scene_rect
         self._scene.setSceneRect(map_scene_rect)
         viewport_width: int = max(self.viewport().width(), 1)
@@ -129,10 +139,12 @@ class MapCanvas(QGraphicsView):
                     float(z_value),
                     map_units_per_pixel,
                 )
-        # 全图只按真实数据范围适配；随后扩展场景范围，给手形拖动留下余量。
-        self.fitInView(map_scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
+        if is_first_load:
+            self.fitInView(map_scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
+            self._reset_view_scale()
+        elif view_center is not None:
+            self.centerOn(view_center)
         self._ensure_pan_area()
-        self._reset_view_scale()
 
     def capture_view_state(self) -> MapViewState:
         """捕获当前地图中心和相对于全图的缩放比例。"""
@@ -277,6 +289,8 @@ class MapCanvas(QGraphicsView):
             中键按下时进入手动平移模式并切换抓取光标；
             Shift+左键或框选工具模式下创建橡皮筋矩形起点。
         """
+        # 通知外部（如主窗口）可据此取消图层面板选中。
+        self.canvas_clicked.emit()
         # 中键平移：手动跟踪位移，不依赖 ScrollHandDrag。
         if event.button() == Qt.MouseButton.MiddleButton:
             self._pan_mode = "middle"
