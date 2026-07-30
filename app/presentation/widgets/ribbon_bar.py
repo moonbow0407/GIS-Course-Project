@@ -224,6 +224,7 @@ class RibbonBar(QWidget):
                         RibbonActionSpec("zoom_in", "放大", "⊕"),
                         RibbonActionSpec("zoom_out", "缩小", "⊖"),
                         RibbonActionSpec("pan", "平移", "✋", "#475569"),
+                        RibbonActionSpec("zoom_rect", "框选放大", "▭", "#0f766e"),
                         RibbonActionSpec("full_extent", "全图显示", "⌗", "#0f766e"),
                     )),
                     RibbonGroupSpec("查询", (

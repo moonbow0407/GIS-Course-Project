@@ -1,8 +1,22 @@
 """基于领域图层快照的地图画布。"""
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QMouseEvent, QPainter, QResizeEvent, QWheelEvent
-from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView, QLabel, QVBoxLayout
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QMouseEvent,
+    QPainter,
+    QResizeEvent,
+    QWheelEvent,
+)
+from PySide6.QtWidgets import (
+    QFrame,
+    QGraphicsScene,
+    QGraphicsView,
+    QLabel,
+    QRubberBand,
+    QVBoxLayout,
+)
 
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
@@ -42,6 +56,16 @@ class MapCanvas(QGraphicsView):
         self._zoom_percent: float = 100.0
         # 真实地图范围与可导航场景范围分开保存，避免小图层没有平移余量。
         self._map_scene_rect: QRectF | None = None
+        # 中键平移状态：记录鼠标中键是否正在执行拖拽平移。
+        self._pan_mode: str = "none"
+        # 中键平移上一帧位置：用于计算帧间位移并驱动视图滚动。
+        self._last_middle_pos: QPoint | None = None
+        # 框选放大激活标记：为 True 时左键拖拽绘制橡皮筋矩形而非平移。
+        self._zoom_rect_active: bool = False
+        # 框选起点：橡皮筋矩形起始位置的视口像素坐标。
+        self._zoom_origin: QPoint = QPoint()
+        # 橡皮筋矩形：框选放大时跟随鼠标绘制的临时可视化控件。
+        self._rubber_band: QRubberBand | None = None
         self._scene.setSceneRect(0, 0, 1000, 700)
         self.setScene(self._scene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -135,7 +159,19 @@ class MapCanvas(QGraphicsView):
 
     def set_pan_tool(self) -> None:
         """切换到地图平移工具。"""
+        self._zoom_rect_active = False
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self._update_cursor()
+
+    def set_zoom_rect_tool(self) -> None:
+        """切换到框选放大模式。
+
+        状态变化:
+            关闭 ScrollHandDrag，激活框选标记并将光标改为十字准星。
+        """
+        self._zoom_rect_active = True
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.CrossCursor)
 
     def zoom_to_full_extent(self) -> None:
         """将当前地图范围完整缩放到视图内。"""
@@ -168,49 +204,206 @@ class MapCanvas(QGraphicsView):
         self._ensure_pan_area()
         self._emit_view_scale()
 
+    # ── 缩放 ────────────────────────────────────────────────
+
     def zoom_in(self) -> None:
         """以画布中心为基准将地图视图放大一级。"""
-        self.scale(1.25, 1.25)
-        self._zoom_percent *= 1.25
-        self._emit_view_scale()
+        center: QPointF = self.viewport().rect().center()
+        self._zoom_at_screen_point(center, 1.25)
 
     def zoom_out(self) -> None:
         """以画布中心为基准将地图视图缩小一级。"""
-        self.scale(0.8, 0.8)
-        self._zoom_percent *= 0.8
+        center: QPointF = self.viewport().rect().center()
+        self._zoom_at_screen_point(center, 0.8)
+
+    def _zoom_at_screen_point(self, anchor: QPoint | QPointF, factor: float) -> None:
+        """以指定屏幕点为锚点进行缩放，使该点对应的地图位置保持不变。
+
+        参数:
+            anchor: 缩放锚点在视口中的像素位置（如鼠标光标或视图中心）。
+            factor: 缩放倍率，大于 1 为放大，小于 1 为缩小。
+
+        状态变化:
+            更新视图变换矩阵、缩放百分比和状态栏比例文本。
+        """
+        # 缩放前光标对应的场景坐标。
+        target_scene: QPointF = self.mapToScene(
+            QPoint(int(anchor.x()), int(anchor.y()))
+        )
+        self.scale(factor, factor)
+        self._zoom_percent *= factor
+        # 缩放后同一场景坐标落在屏幕上的新位置。
+        moved_to: QPoint = self.mapFromScene(target_scene)
+        # 场景点漂移量 = moved_to - anchor：正值表示场景点跑到了光标右/下方，
+        # 需要同向增大滚动条值才能把场景点拉回光标位置。
+        drift_x: int = moved_to.x() - int(anchor.x())
+        drift_y: int = moved_to.y() - int(anchor.y())
+        if drift_x != 0:
+            self.horizontalScrollBar().setValue(
+                self.horizontalScrollBar().value() + drift_x
+            )
+        if drift_y != 0:
+            self.verticalScrollBar().setValue(
+                self.verticalScrollBar().value() + drift_y
+            )
+        self._ensure_pan_area()
         self._emit_view_scale()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        """把鼠标滚轮动作转换为连续地图缩放。
+        """把鼠标滚轮动作转换为以光标为锚点的连续地图缩放。
 
         参数:
             event: 包含滚动方向和步长的 Qt 滚轮事件。
 
         状态变化:
-            更新画布变换和状态栏视图比例，并消费该事件。
+            以鼠标所在位置为锚点缩放视图并消费该事件。
         """
-        if event.angleDelta().y() > 0:
-            self.zoom_in()
-        else:
-            self.zoom_out()
-        self._ensure_pan_area()
+        angle: int = event.angleDelta().y()
+        if angle == 0:
+            return
+        factor: float = 1.25 if angle > 0 else 0.8
+        self._zoom_at_screen_point(event.position().toPoint(), factor)
         event.accept()
 
+    # ── 平移 ────────────────────────────────────────────────
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """拦截中键平移和框选放大的按下事件，其余交由父类处理。
+
+        参数:
+            event: 包含按钮类型和修饰键状态的 Qt 鼠标按下事件。
+
+        状态变化:
+            中键按下时进入手动平移模式并切换抓取光标；
+            Shift+左键或框选工具模式下创建橡皮筋矩形起点。
+        """
+        # 中键平移：手动跟踪位移，不依赖 ScrollHandDrag。
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._pan_mode = "middle"
+            self._last_middle_pos = event.position().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
+        # 框选放大：Shift+左键拖拽 或 框选放大工具模式下左键拖拽。
+        if event.button() == Qt.MouseButton.LeftButton and (
+            bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            or self._zoom_rect_active
+        ):
+            self._zoom_origin = event.position().toPoint()
+            self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
+            self._rubber_band.setGeometry(QRect(self._zoom_origin, QSize()))
+            self._rubber_band.show()
+            event.accept()
+            return
+
+        super().mousePressEvent(event)
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        """更新状态栏地图坐标并保留当前导航交互。
+        """驱动中键平移、更新框选橡皮筋或发出状态栏坐标。
 
         参数:
             event: 包含当前视口位置的 Qt 鼠标移动事件。
 
         状态变化:
-            发出地图坐标文本，再交由父类继续处理平移交互。
+            中键拖拽时通过滚动条平移视图并发出坐标信号；
+            框选拖拽时实时更新橡皮筋矩形；
+            其余情况发出地图坐标文本后交由父类继续处理。
         """
+        # 中键平移：计算位移并通过滚动条移动视图。
+        if self._pan_mode == "middle" and self._last_middle_pos is not None:
+            current_pos: QPoint = event.position().toPoint()
+            delta: QPoint = self._last_middle_pos - current_pos
+            self._last_middle_pos = current_pos
+            self.horizontalScrollBar().setValue(
+                self.horizontalScrollBar().value() + delta.x()
+            )
+            self.verticalScrollBar().setValue(
+                self.verticalScrollBar().value() + delta.y()
+            )
+            # 平移时同样更新状态栏坐标。
+            scene_pos: QPointF = self.mapToScene(current_pos)
+            self.coordinate_changed.emit(
+                f"坐标  {scene_pos.x():.6f}, {-scene_pos.y():.6f}"
+            )
+            event.accept()
+            return
+
+        # 框选橡皮筋：跟随鼠标实时更新选择矩形。
+        if self._rubber_band is not None:
+            self._rubber_band.setGeometry(
+                QRect(self._zoom_origin, event.position().toPoint()).normalized()
+            )
+            event.accept()
+            return
+
+        # 默认：更新状态栏坐标并交由父类处理平移/选择交互。
         scene_position: QPointF = self.mapToScene(event.position().toPoint())
-        # 渲染时反转过 Y 轴，状态栏输出地图坐标时需要恢复方向。
         self.coordinate_changed.emit(
             f"坐标  {scene_position.x():.6f}, {-scene_position.y():.6f}"
         )
         super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        """结束中键平移或执行框选缩放，其余交由父类处理。
+
+        参数:
+            event: 包含释放按钮类型的 Qt 鼠标释放事件。
+
+        状态变化:
+            中键释放时退出平移模式并恢复光标样式；
+            左键释放时关闭橡皮筋并按框选范围缩放地图。
+        """
+        # 中键释放：恢复光标样式。
+        if self._pan_mode == "middle" and event.button() == Qt.MouseButton.MiddleButton:
+            self._pan_mode = "none"
+            self._last_middle_pos = None
+            self._update_cursor()
+            event.accept()
+            return
+
+        # 框选释放：关闭橡皮筋，计算场景范围并缩放到该区域。
+        if self._rubber_band is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._rubber_band.close()
+            self._rubber_band = None
+            screen_rect: QRect = QRect(
+                self._zoom_origin, event.position().toPoint()
+            ).normalized()
+            # 忽略过小的拖拽（可能是误触），阈值设为 8 像素。
+            if screen_rect.width() > 8 and screen_rect.height() > 8:
+                scene_rect: QRectF = QRectF(
+                    self.mapToScene(screen_rect.topLeft()),
+                    self.mapToScene(screen_rect.bottomRight()),
+                ).normalized()
+                self.fitInView(scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
+                if self._map_scene_rect is not None:
+                    full_scale: float = self._fit_scale_for_rect(self._map_scene_rect)
+                    new_scale: float = self._fit_scale_for_rect(scene_rect)
+                    self._zoom_percent = (
+                        new_scale / full_scale * 100.0 if full_scale > 0.0 else 100.0
+                    )
+                self._ensure_pan_area()
+                self._emit_view_scale()
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
+
+    # ── 光标管理 ─────────────────────────────────────────────
+
+    def _update_cursor(self) -> None:
+        """根据当前工具模式恢复合适的光标样式。
+
+        状态变化:
+            框选工具激活时显示十字准星；手形拖拽模式显示张开手掌；
+            其余模式恢复默认箭头。
+        """
+        if self._zoom_rect_active:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        elif self.dragMode() == QGraphicsView.DragMode.ScrollHandDrag:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         """在画布尺寸变化时保持空状态引导居中。

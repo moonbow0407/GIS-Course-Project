@@ -181,6 +181,7 @@ class MainWindow(QMainWindow):
             "zoom_in": self._map_canvas.zoom_in,
             "zoom_out": self._map_canvas.zoom_out,
             "pan": self._map_canvas.set_pan_tool,
+            "zoom_rect": self._map_canvas.set_zoom_rect_tool,
             "full_extent": self._map_canvas.zoom_to_full_extent,
             "refresh_map": self._refresh_workspace,
             "clear_selection": self._clear_selection,
