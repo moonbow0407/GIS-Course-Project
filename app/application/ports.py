@@ -5,6 +5,10 @@ from typing import Protocol
 
 from pyproj import CRS
 
+from app.application.database_models import (
+    DatabaseLayerInfo,
+    DatabaseServerInfo,
+)
 from app.application.project_models import ProjectManifest
 from app.domain.feature import FeatureId
 from app.domain.spatial_layer import SpatialLayer
@@ -60,4 +64,36 @@ class ProjectStore(Protocol):
 
     def save(self, path: Path, manifest: ProjectManifest) -> None:
         """将工程清单原子写入指定路径。"""
+        ...
+
+
+class DatabaseGateway(Protocol):
+    """定义应用层访问 PostgreSQL/PostGIS 所需的数据库端口。"""
+
+    def test_connection(self) -> DatabaseServerInfo:
+        """测试连接并确认服务端启用了 PostGIS。"""
+        ...
+
+    def ensure_schema(self) -> None:
+        """幂等创建数据库模块所需的扩展、表和索引。"""
+        ...
+
+    def list_layers(self) -> tuple[DatabaseLayerInfo, ...]:
+        """读取数据库中的矢量图层目录。"""
+        ...
+
+    def import_layer(self, layer: VectorLayer) -> DatabaseLayerInfo:
+        """以事务方式导入一个内存矢量图层。"""
+        ...
+
+    def load_layer(
+        self,
+        layer_id: int,
+        target_crs: CRS | None = None,
+    ) -> VectorLayer:
+        """读取数据库图层，并按需转换到目标 CRS。"""
+        ...
+
+    def close(self) -> None:
+        """释放数据库连接池资源。"""
         ...

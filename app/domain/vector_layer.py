@@ -63,6 +63,9 @@ class VectorLayer:
     # 数据源内的子图层名称：GeoPackage 等容器格式需要额外记录此字段。
     source_layer_name: str | None = None
 
+    # 数据库图层编号：非空时表示可通过数据库服务重新读取原始几何。
+    database_layer_id: int | None = None
+
     # 符号系统：为空时按几何类型生成单一符号。
     symbology: VectorSymbology | None = None
 
@@ -134,6 +137,7 @@ class VectorLayer:
         crs: CRS | None,
         source_path: Path | None = None,
         source_layer_name: str | None = None,
+        database_layer_id: int | None = None,
         layer_id: str | None = None,
         symbology: VectorSymbology | None = None,
     ) -> "VectorLayer":
@@ -146,5 +150,6 @@ class VectorLayer:
             crs=crs,
             source_path=source_path,
             source_layer_name=source_layer_name,
+            database_layer_id=database_layer_id,
             symbology=symbology,
         )

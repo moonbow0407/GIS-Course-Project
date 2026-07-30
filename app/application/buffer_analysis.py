@@ -244,6 +244,7 @@ def reproject_vector_layer(layer: VectorLayer, target_crs: CRS) -> VectorLayer:
         crs=target_crs,
         source_path=layer.source_path,
         source_layer_name=layer.source_layer_name,
+        database_layer_id=layer.database_layer_id,
     )
 
 

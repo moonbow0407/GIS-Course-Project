@@ -19,9 +19,17 @@ from app.application.buffer_analysis import (
     reproject_vector_layer,
     resolve_buffer_analysis_crs,
 )
+from app.application.database_models import (
+    DatabaseConnectionConfig,
+    DatabaseLayerInfo,
+    DatabaseServerInfo,
+)
+from app.application.database_service import DatabaseService
 from app.application.errors import (
     ApplicationError,
     BufferAnalysisFailed,
+    DatabaseImportFailed,
+    DatabaseNotConfigured,
     DataWriteFailed,
     InvalidBufferParameters,
     LayerNotFound,
@@ -78,11 +86,13 @@ class GisApplication:
         data_writer: DataWriter | None = None,
         document: MapDocument | None = None,
         project_store: ProjectStore | None = None,
+        database_service: DatabaseService | None = None,
     ) -> None:
         """使用空间数据读取端口和可选地图文档初始化应用入口。"""
         self.data_reader = data_reader
         self.data_writer = data_writer
         self.project_store = project_store
+        self.database_service = database_service
 
         # 地图文档：作为图层、显隐、活动状态和选择集的唯一事实来源。
         self._document: MapDocument = document or MapDocument()
@@ -148,6 +158,50 @@ class GisApplication:
             warning=warning,
         )
 
+    def add_layer(self, layer: SpatialLayer) -> OpenDataResult:
+        """将已经由其他数据源构造好的图层加入当前地图文档。"""
+        self._document.add_layer(layer)
+        self._modified = True
+        warning: str | None = "数据未声明坐标参考系统。" if layer.crs is None else None
+        return OpenDataResult(
+            layer_id=layer.layer_id,
+            snapshot=self.snapshot(),
+            warning=warning,
+        )
+
+    @property
+    def database_is_connected(self) -> bool:
+        """返回数据库服务是否已经建立并通过连接测试。"""
+        return self.database_service is not None and self.database_service.is_connected
+
+    def connect_database(self, config: DatabaseConnectionConfig) -> DatabaseServerInfo:
+        """连接 PostgreSQL/PostGIS，并返回服务端版本信息。"""
+        return self._require_database_service().connect(config)
+
+    def disconnect_database(self) -> None:
+        """断开当前数据库连接。"""
+        self._require_database_service().disconnect()
+
+    def list_database_layers(self) -> tuple[DatabaseLayerInfo, ...]:
+        """读取当前数据库中的图层目录。"""
+        return self._require_database_service().list_layers()
+
+    def import_active_layer_to_database(self) -> DatabaseLayerInfo:
+        """将当前活动矢量图层完整导入数据库。"""
+        active_layer_id: str | None = self._document.active_layer_id
+        if active_layer_id is None:
+            raise NoActiveLayer("请先选择要导入数据库的活动图层。")
+        layer: SpatialLayer = self._find_layer(active_layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise DatabaseImportFailed("数据库模块当前只支持导入矢量图层。")
+        return self._require_database_service().import_layer(layer)
+
+    def load_database_layer(self, layer_id: int) -> OpenDataResult:
+        """加载数据库图层，并按当前地图 CRS 统一后加入工作区。"""
+        target_crs: CRS | None = self._document.display_crs
+        layer: VectorLayer = self._require_database_service().load_layer(layer_id, target_crs)
+        return self.add_layer(layer)
+
     def remove_layer(self, layer_id: str) -> WorkspaceSnapshot:
         """移除指定图层并返回最新工作区快照。"""
         try:
@@ -200,6 +254,7 @@ class GisApplication:
             crs=layer.crs,
             source_path=layer.source_path,
             source_layer_name=layer.source_layer_name,
+            database_layer_id=layer.database_layer_id,
             symbology=symbology,
         )
         self._document.replace_layer(updated_layer)
@@ -643,6 +698,25 @@ class GisApplication:
         target_crs: CRS,
     ) -> SpatialLayer:
         """从原始路径重新读取并转换图层，确保转换不覆盖源图层。"""
+        if isinstance(layer, VectorLayer) and layer.database_layer_id is not None:
+            try:
+                projected_database_layer: VectorLayer = self._require_database_service().load_layer(
+                    layer.database_layer_id,
+                    target_crs,
+                )
+            except ApplicationError as error:
+                raise LayerReprojectionFailed(
+                    f"数据库图层“{layer.name}”无法转换到目标坐标系。"
+                ) from error
+            return VectorLayer.create(
+                layer_id=layer.layer_id,
+                name=projected_database_layer.name,
+                features=projected_database_layer.features,
+                crs=projected_database_layer.crs,
+                source_layer_name=projected_database_layer.source_layer_name,
+                database_layer_id=layer.database_layer_id,
+                symbology=layer.symbology,
+            )
         if layer.source_path is None:
             raise LayerReprojectionFailed(
                 f"图层“{layer.name}”没有原始数据源，无法转换坐标系。"
@@ -771,6 +845,12 @@ class GisApplication:
         if self.project_store is None:
             raise ProjectStoreNotConfigured("工程存储服务尚未配置。")
         return self.project_store
+
+    def _require_database_service(self) -> DatabaseService:
+        """返回数据库服务；未组装时给出统一应用异常。"""
+        if self.database_service is None:
+            raise DatabaseNotConfigured("数据库服务尚未配置。")
+        return self.database_service
 
     def _relative_to_project(self, path: Path) -> str:
         """返回相对于当前工程目录的路径。"""

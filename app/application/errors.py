@@ -95,3 +95,35 @@ class ProjectNotSaved(ApplicationError):
 
 class ProjectStoreNotConfigured(ApplicationError):
     """表示应用入口没有注入工程存储适配器。"""
+
+
+class DatabaseConnectionFailed(ApplicationError):
+    """表示 PostgreSQL 连接或 PostGIS 能力检查失败。"""
+
+
+class DatabaseNotConnected(ApplicationError):
+    """表示数据库操作缺少当前活动连接。"""
+
+
+class DatabaseNotConfigured(ApplicationError):
+    """表示应用入口没有注入数据库服务。"""
+
+
+class DatabaseSchemaFailed(ApplicationError):
+    """表示 PostGIS 扩展、表或索引初始化失败。"""
+
+
+class DatabaseImportFailed(ApplicationError):
+    """表示矢量图层导入数据库失败。"""
+
+
+class DatabaseLayerNotFound(ApplicationError):
+    """表示请求的数据库图层不存在。"""
+
+
+class DatabaseListFailed(ApplicationError):
+    """表示数据库图层目录读取失败。"""
+
+
+class DatabaseLoadFailed(ApplicationError):
+    """表示数据库图层加载或空间数据转换失败。"""

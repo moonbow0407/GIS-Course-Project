@@ -1,0 +1,76 @@
+{
+  "type": "FeatureCollection",
+  "name": "management_zones",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "zone-A",
+      "properties": {
+        "name": "生态保育区",
+        "zone_code": "A01",
+        "risk_level": "低",
+        "area_ha": 74.2,
+        "manager": "张敏"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [116.3620, 39.9875],
+            [116.3780, 39.9875],
+            [116.3780, 39.9970],
+            [116.3620, 39.9970],
+            [116.3620, 39.9875]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "zone-B",
+      "properties": {
+        "name": "公共活动区",
+        "zone_code": "B01",
+        "risk_level": "中",
+        "area_ha": 82.6,
+        "manager": "李伟"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [116.3780, 39.9840],
+            [116.3940, 39.9840],
+            [116.3940, 39.9970],
+            [116.3780, 39.9970],
+            [116.3780, 39.9840]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "zone-C",
+      "properties": {
+        "name": "设施维护区",
+        "zone_code": "C01",
+        "risk_level": "高",
+        "area_ha": 91.3,
+        "manager": "王芳"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [116.3620, 39.9745],
+            [116.3940, 39.9745],
+            [116.3940, 39.9840],
+            [116.3780, 39.9840],
+            [116.3620, 39.9875],
+            [116.3620, 39.9745]
+          ]
+        ]
+      }
+    }
+  ]
+}

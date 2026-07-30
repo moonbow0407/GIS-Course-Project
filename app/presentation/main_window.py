@@ -21,17 +21,23 @@ from PySide6.QtWidgets import (
     QStatusBar,
 )
 
+from app.application.database_service import DatabaseService
 from app.application.errors import ApplicationError
 from app.application.gis_application import GisApplication
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.symbology import RasterSymbology, VectorSymbology
+from app.infrastructure.database.postgis_database_gateway import PostgisDatabaseGateway
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
 from app.infrastructure.project.json_project_store import JsonProjectStore
 from app.presentation.widgets.analysis_history_panel import AnalysisHistoryPanel
 from app.presentation.widgets.attribute_table import AttributeTableDialog
 from app.presentation.widgets.buffer_analysis_dialog import BufferAnalysisDialog
+from app.presentation.widgets.database_dialogs import (
+    DatabaseConnectionDialog,
+    DatabaseLayerDialog,
+)
 from app.presentation.widgets.layer_panel import LayerPanel
 from app.presentation.widgets.map_canvas import MapCanvas
 from app.presentation.widgets.ribbon_bar import RibbonBar
@@ -50,6 +56,7 @@ class MainWindow(QMainWindow):
             self._data_reader,
             AutoDataWriter(),
             project_store=JsonProjectStore(),
+            database_service=DatabaseService(PostgisDatabaseGateway),
         )
         # 顶部功能区：集中呈现文档规划的全部现有及预留功能入口。
         self._ribbon: RibbonBar = RibbonBar()
@@ -156,13 +163,18 @@ class MainWindow(QMainWindow):
             action_id: 功能区按钮发出的稳定操作编号。
 
         说明:
-            当前仅接入文件打开、地图导航、选择清除和已有属性表；其余入口
+            数据库连接、导入和加载通过应用层数据库服务执行；其余未实现入口
             明确保留为界面接口，不伪造业务结果或测试数据。
         """
         # 使用操作编号映射处理函数，避免大量重复的条件分支。
         implemented_actions: dict[str, Callable[[], None]] = {
             "open_data": self._open_data,
             "export_layer": self._export_data,
+            "connect_database": self._connect_database,
+            "disconnect_database": self._disconnect_database,
+            "import_database": self._import_database,
+            "load_database": self._load_database,
+            "database_manager": self._database_manager,
             "new_project": self._new_project,
             "open_project": self._open_project,
             "save_project": self._save_project_action,
@@ -184,6 +196,101 @@ class MainWindow(QMainWindow):
             handler()
             return
         self._show_placeholder(RibbonBar.action_title(action_id) or "该功能")
+
+    def _connect_database(self) -> None:
+        """打开连接参数窗口，并测试 PostgreSQL/PostGIS 服务。"""
+        dialog: DatabaseConnectionDialog = DatabaseConnectionDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            server_info = self._application.connect_database(dialog.config())
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "连接数据库失败", str(error))
+            return
+        self._ready_label.setText(
+            f"已连接  {server_info.database} · PostGIS {server_info.postgis_version}"
+        )
+        QMessageBox.information(
+            self,
+            "数据库连接成功",
+            f"数据库：{server_info.database}\n"
+            f"用户：{server_info.username}\n"
+            f"PostGIS：{server_info.postgis_version}",
+        )
+
+    def _disconnect_database(self) -> None:
+        """断开当前数据库连接并清理连接池资源。"""
+        if not self._application.database_is_connected:
+            self._ready_label.setText("数据库未连接")
+            return
+        try:
+            self._application.disconnect_database()
+        except ApplicationError as error:
+            QMessageBox.warning(self, "断开数据库失败", str(error))
+            return
+        self._ready_label.setText("数据库已断开")
+
+    def _import_database(self) -> None:
+        """将当前活动矢量图层导入数据库。"""
+        if not self._application.database_is_connected:
+            QMessageBox.information(self, "导入图层", "请先连接 PostgreSQL/PostGIS 数据库。")
+            return
+        try:
+            layer_info = self._application.import_active_layer_to_database()
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "导入数据库失败", str(error))
+            return
+        self._ready_label.setText(
+            f"已导入数据库  {layer_info.name} · {layer_info.feature_count} 个要素"
+        )
+        QMessageBox.information(
+            self,
+            "导入数据库成功",
+            f"图层：{layer_info.name}\n"
+            f"数据库图层 ID：{layer_info.layer_id}\n"
+            f"要素数：{layer_info.feature_count}",
+        )
+
+    def _load_database(self) -> None:
+        """从数据库图层目录选择一个图层并加入地图。"""
+        if not self._application.database_is_connected:
+            QMessageBox.information(self, "加载图层", "请先连接 PostgreSQL/PostGIS 数据库。")
+            return
+        try:
+            layers = self._application.list_database_layers()
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "读取数据库图层失败", str(error))
+            return
+        if not layers:
+            QMessageBox.information(self, "加载图层", "当前数据库中没有可加载的图层。")
+            return
+        dialog: DatabaseLayerDialog = DatabaseLayerDialog(layers, "加载数据库图层", parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            result = self._application.load_database_layer(dialog.selected_layer_id())
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "加载数据库图层失败", str(error))
+            return
+        self._refresh_workspace()
+        self._ready_label.setText(f"已加载数据库图层  {result.layer_id}")
+
+    def _database_manager(self) -> None:
+        """展示当前数据库中的图层目录和要素数量。"""
+        if not self._application.database_is_connected:
+            QMessageBox.information(self, "数据管理", "请先连接 PostgreSQL/PostGIS 数据库。")
+            return
+        try:
+            layers = self._application.list_database_layers()
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "读取数据库图层失败", str(error))
+            return
+        DatabaseLayerDialog(
+            layers,
+            title="数据库图层管理",
+            selection_required=False,
+            parent=self,
+        ).exec()
 
     def _open_data(self) -> None:
         """选择一个或多个空间数据文件，并逐个交给应用层读取。"""
@@ -763,6 +870,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         """关闭窗口前避免未保存工程修改被静默丢弃。"""
         if self._confirm_project_switch():
+            if self._application.database_is_connected:
+                self._application.disconnect_database()
             event.accept()
         else:
             event.ignore()

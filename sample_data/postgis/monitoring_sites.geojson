@@ -1,0 +1,91 @@
+{
+  "type": "FeatureCollection",
+  "name": "monitoring_sites",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "site-001",
+      "properties": {
+        "name": "北门空气站",
+        "category": "空气质量",
+        "status": "正常",
+        "value": 36.5,
+        "unit": "μg/m³",
+        "sample_date": "2026-07-01",
+        "remark": null
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [116.3725, 39.9932]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "site-002",
+      "properties": {
+        "name": "湖心水质站",
+        "category": "水质",
+        "status": "正常",
+        "value": 7.2,
+        "unit": "pH",
+        "sample_date": "2026-07-02",
+        "remark": "自动采样"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [116.3812, 39.9894]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "site-003",
+      "properties": {
+        "name": "东侧噪声站",
+        "category": "噪声",
+        "status": "告警",
+        "value": 68.4,
+        "unit": "dB",
+        "sample_date": "2026-07-03",
+        "remark": "晚高峰偏高"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [116.3918, 39.9868]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "site-004",
+      "properties": {
+        "name": "南门气象站",
+        "category": "气象",
+        "status": "维护",
+        "value": 27.8,
+        "unit": "℃",
+        "sample_date": "2026-07-04",
+        "remark": "更换风速仪"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [116.3796, 39.9785]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "site-005",
+      "properties": {
+        "name": "西侧土壤站",
+        "category": "土壤",
+        "status": "正常",
+        "value": 18.6,
+        "unit": "%",
+        "sample_date": "2026-07-05",
+        "remark": null
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [116.3658, 39.9847]
+      }
+    }
+  ]
+}

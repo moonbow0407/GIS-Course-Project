@@ -1,0 +1,68 @@
+{
+  "type": "FeatureCollection",
+  "name": "survey_routes",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "route-01",
+      "properties": {
+        "name": "北区巡查线",
+        "level": 1,
+        "length_km": 2.8,
+        "vehicle": "电动车",
+        "enabled": true
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [116.3638, 39.9901],
+          [116.3725, 39.9932],
+          [116.3827, 39.9951],
+          [116.3922, 39.9916]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "route-02",
+      "properties": {
+        "name": "湖区巡查线",
+        "level": 2,
+        "length_km": 2.1,
+        "vehicle": "步行",
+        "enabled": true
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [116.3711, 39.9862],
+          [116.3765, 39.9902],
+          [116.3812, 39.9894],
+          [116.3858, 39.9856],
+          [116.3814, 39.9822]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "route-03",
+      "properties": {
+        "name": "南区巡查线",
+        "level": 3,
+        "length_km": 3.4,
+        "vehicle": "巡查车",
+        "enabled": false
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [116.3645, 39.9812],
+          [116.3728, 39.9789],
+          [116.3796, 39.9785],
+          [116.3873, 39.9801],
+          [116.3941, 39.9834]
+        ]
+      }
+    }
+  ]
+}
