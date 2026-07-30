@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from affine import Affine
 from pyproj import CRS
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QRectF, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from shapely.geometry import Polygon
@@ -114,8 +114,78 @@ def test_canvas_extent_ignores_hidden_layers() -> None:
 
     assert application is not None
     assert canvas._map_scene_rect is not None
-    assert canvas._map_scene_rect.width() == pytest.approx(22.0)
-    assert canvas._map_scene_rect.height() == pytest.approx(22.0)
+    assert canvas._map_scene_rect.width() == pytest.approx(21.0)
+    assert canvas._map_scene_rect.height() == pytest.approx(21.0)
+
+
+def test_canvas_full_extent_uses_relative_margin_for_small_geographic_bounds() -> None:
+    """小范围经纬度数据全图显示时，应按包络比例留白并充分利用视口。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(1680, 900)
+    canvas.show()
+    minimum_x, minimum_y = 116.3620, 39.9745
+    maximum_x, maximum_y = 116.3941, 39.9970
+    layer = VectorLayer.create(
+        layer_id="small-geographic",
+        name="小范围经纬度图层",
+        features=(
+            Feature(
+                fid=1,
+                geometry=Polygon(
+                    [
+                        (minimum_x, minimum_y),
+                        (maximum_x, minimum_y),
+                        (maximum_x, maximum_y),
+                        (minimum_x, maximum_y),
+                        (minimum_x, minimum_y),
+                    ]
+                ),
+                attributes={},
+            ),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),),
+            active_layer_id=layer.layer_id,
+            display_crs=layer.crs,
+        )
+    )
+    canvas.zoom_to_full_extent()
+    application.processEvents()
+
+    assert canvas._map_scene_rect is not None
+    assert canvas._map_scene_rect.width() == pytest.approx(
+        (maximum_x - minimum_x) * 1.05
+    )
+    assert canvas._map_scene_rect.height() == pytest.approx(
+        (maximum_y - minimum_y) * 1.05
+    )
+    data_scene_rect = QRectF(
+        minimum_x,
+        -maximum_y,
+        maximum_x - minimum_x,
+        maximum_y - minimum_y,
+    )
+    mapped_data_rect = canvas.mapFromScene(data_scene_rect).boundingRect()
+    height_fill_ratio = mapped_data_rect.height() / canvas.viewport().height()
+    assert height_fill_ratio >= 0.9
+
+
+def test_canvas_extent_keeps_degenerate_bounds_navigable() -> None:
+    """单点和单轴范围应使用独立兜底，不能生成无法适配的空矩形。"""
+    origin_rect = MapCanvas._scene_rect_from_bounds((0.0, 0.0, 0.0, 0.0))
+    point_rect = MapCanvas._scene_rect_from_bounds((116.38, 39.98, 116.38, 39.98))
+    horizontal_line_rect = MapCanvas._scene_rect_from_bounds((10.0, 20.0, 30.0, 20.0))
+
+    assert origin_rect.width() == pytest.approx(2.1)
+    assert origin_rect.height() == pytest.approx(2.1)
+    assert point_rect.width() > 0.0
+    assert point_rect.height() > 0.0
+    assert horizontal_line_rect.width() > 0.0
+    assert horizontal_line_rect.height() > 0.0
 
 
 def test_canvas_can_zoom_to_one_layer_extent() -> None:

@@ -291,15 +291,42 @@ class MapCanvas(QGraphicsView):
 
     @staticmethod
     def _scene_rect_from_bounds(bounds: Bounds) -> QRectF:
-        """把地图坐标范围转换为带边距且 Y 轴反向的 Qt 场景范围。"""
-        minimum_x, minimum_y, maximum_x, maximum_y = bounds
-        margin: float = max(maximum_x - minimum_x, maximum_y - minimum_y, 1.0) * 0.05
+        """按 QGIS 式比例扩展，把地图范围转换为 Y 轴反向的 Qt 场景范围。"""
+        minimum_x, minimum_y, maximum_x, maximum_y = MapCanvas._non_empty_bounds(bounds)
+        width: float = maximum_x - minimum_x
+        height: float = maximum_y - minimum_y
+        # QGIS 将完整包络以中心为基准整体放大 1.05 倍，即每边留出 2.5%。
+        extent_scale_factor: float = 1.05
+        horizontal_margin: float = width * (extent_scale_factor - 1.0) / 2.0
+        vertical_margin: float = height * (extent_scale_factor - 1.0) / 2.0
         return QRectF(
-            minimum_x - margin,
-            -(maximum_y + margin),
-            maximum_x - minimum_x + 2 * margin,
-            maximum_y - minimum_y + 2 * margin,
+            minimum_x - horizontal_margin,
+            -(maximum_y + vertical_margin),
+            width + 2 * horizontal_margin,
+            height + 2 * vertical_margin,
         )
+
+    @staticmethod
+    def _non_empty_bounds(bounds: Bounds) -> Bounds:
+        """仅为零宽或零高包络增加极小范围，避免普通数据受固定地图单位影响。"""
+        minimum_x, minimum_y, maximum_x, maximum_y = bounds
+        width: float = maximum_x - minimum_x
+        height: float = maximum_y - minimum_y
+        if width > 0.0 and height > 0.0:
+            return bounds
+        # 与 QGIS 的全零范围策略一致，为原点处单点提供明确的默认视图。
+        if minimum_x == maximum_x == minimum_y == maximum_y == 0.0:
+            return (-1.0, -1.0, 1.0, 1.0)
+        coordinate_padding_factor: float = 1e-8
+        if width <= 0.0:
+            horizontal_padding: float = max(abs(minimum_x), 1.0) * coordinate_padding_factor
+            minimum_x -= horizontal_padding
+            maximum_x += horizontal_padding
+        if height <= 0.0:
+            vertical_padding: float = max(abs(minimum_y), 1.0) * coordinate_padding_factor
+            minimum_y -= vertical_padding
+            maximum_y += vertical_padding
+        return (minimum_x, minimum_y, maximum_x, maximum_y)
 
     def _fit_scale_for_rect(self, rect: QRectF) -> float:
         """估算指定场景范围适配当前视口时使用的缩放比例。"""
