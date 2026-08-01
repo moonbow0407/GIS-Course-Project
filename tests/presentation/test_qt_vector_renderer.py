@@ -44,10 +44,17 @@ def test_renderer_creates_selectable_items_for_point_line_and_polygon() -> None:
     items: list[QGraphicsItem] = renderer.render_layer(scene, snapshot, z_value=3.0)
 
     assert application is not None
-    assert len(items) == 3
+    # 选中要素 extra 一个光晕层，含光晕共 4 个图元。
+    assert len(items) == 4
     assert {item.data(0) for item in items} == {"mixed"}
     assert {item.data(1) for item in items} == {1, 2, 3}
-    assert all(item.flags() & item.GraphicsItemFlag.ItemIsSelectable for item in items)
+    # 光晕层不可选择，其余图元均可选择。
+    selectable: list[QGraphicsItem] = [
+        item
+        for item in items
+        if item.flags() & item.GraphicsItemFlag.ItemIsSelectable
+    ]
+    assert len(selectable) == 3
     polygon_item: QGraphicsPathItem = next(
         item for item in items if isinstance(item, QGraphicsPathItem) and item.data(1) == 3
     )

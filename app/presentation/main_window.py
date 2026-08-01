@@ -32,7 +32,7 @@ from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
 from app.infrastructure.project.json_project_store import JsonProjectStore
 from app.presentation.widgets.analysis_history_panel import AnalysisHistoryPanel
-from app.presentation.widgets.attribute_table import AttributeTableDialog
+from app.presentation.widgets.attribute_table import AttributeTablePanel
 from app.presentation.widgets.buffer_analysis_dialog import BufferAnalysisDialog
 from app.presentation.widgets.database_dialogs import (
     DatabaseConnectionDialog,
@@ -70,6 +70,9 @@ class MainWindow(QMainWindow):
         # 分析历史面板：右侧停靠展示空间分析执行记录。
         self._analysis_history_panel: AnalysisHistoryPanel = AnalysisHistoryPanel()
         self._analysis_history_dock: QDockWidget = QDockWidget("分析记录", self)
+        # 属性表面板：右侧停靠展示矢量要素属性和栅格元数据。
+        self._attribute_table_panel: AttributeTablePanel = AttributeTablePanel()
+        self._attribute_table_dock: QDockWidget = QDockWidget("属性表", self)
         # 状态提示标签：显示就绪状态和最近一次操作反馈。
         self._ready_label: QLabel = QLabel("就绪")
         # 坐标标签：实时显示鼠标对应的地图坐标。
@@ -127,6 +130,15 @@ class MainWindow(QMainWindow):
         )
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._analysis_history_dock)
         self._analysis_history_dock.hide()
+        self._attribute_table_dock.setObjectName("attributeTableDock")
+        self._attribute_table_dock.setWidget(self._attribute_table_panel)
+        self._attribute_table_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+            | Qt.DockWidgetArea.BottomDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._attribute_table_dock)
+        self._attribute_table_dock.hide()
 
         status_bar: QStatusBar = QStatusBar(self)
         status_bar.setObjectName("mainStatusBar")
@@ -165,6 +177,12 @@ class MainWindow(QMainWindow):
         self._map_canvas.coordinate_changed.connect(self._coordinate_label.setText)
         self._map_canvas.view_scale_changed.connect(self._scale_label.setText)
         self._map_canvas.canvas_clicked.connect(self._on_canvas_clicked)
+        self._attribute_table_panel.selection_changed.connect(
+            self._on_table_selection_changed
+        )
+        self._attribute_table_panel.feature_zoom_requested.connect(
+            self._on_table_zoom_requested
+        )
 
     def _handle_action(self, action_id: str) -> None:
         """把稳定功能编号路由到已实现能力或预留接口。
@@ -575,7 +593,7 @@ class MainWindow(QMainWindow):
         self._schedule_workspace_refresh()
 
     def _show_attribute_table(self, layer_id: str) -> None:
-        """打开指定真实图层的只读属性或栅格元数据窗口。
+        """打开指定图层的可停靠属性表面板。
 
         参数:
             layer_id: 需要查看属性或元数据的真实图层编号。
@@ -587,8 +605,15 @@ class MainWindow(QMainWindow):
         )
         if layer_snapshot is None:
             return
-        dialog: AttributeTableDialog = AttributeTableDialog(layer_snapshot, self)
-        dialog.exec()
+        self._attribute_table_panel.set_layer(layer_snapshot)
+        self._attribute_table_dock.show()
+        self._attribute_table_dock.raise_()
+        # 同步当前地图选择到属性表。
+        if layer_snapshot.layer_id in (
+            snapshot.active_layer_id or "",
+        ):
+            selected: set = set(layer_snapshot.selected_feature_ids)
+            self._attribute_table_panel.highlight_features(selected)
 
     def _zoom_to_layer(self, layer_id: str) -> None:
         """将地图画布定位到指定工作区图层的完整范围。
@@ -722,6 +747,48 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("请先打开并选择一个图层。", 3500)
             return
         self._show_attribute_table(active_layer_id)
+
+    def _on_table_selection_changed(
+        self, layer_id: str, feature_ids: tuple
+    ) -> None:
+        """属性表选中行变化时同步更新地图要素选择和画布。
+
+        参数:
+            layer_id: 属性表当前展示的图层编号。
+            feature_ids: 用户在表中选中的要素编号元组。
+        """
+        try:
+            self._application.set_selection(layer_id, feature_ids)
+        except ApplicationError:
+            return
+        self._refresh_workspace()
+
+    def _on_table_zoom_requested(self, layer_id: str, fid: object) -> None:
+        """双击属性表行时缩放到对应要素的几何范围。
+
+        参数:
+            layer_id: 属性表当前展示的图层编号。
+            fid: 被双击要素的唯一编号（可能为 str 或 int）。
+        """
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        for layer in snapshot.layers:
+            if layer.layer_id != layer_id:
+                continue
+            if not isinstance(layer.layer, VectorLayer):
+                return
+            for feature in layer.layer.features:
+                # 使用字符串化比较避免 int/str 类型不匹配。
+                if str(feature.fid) == str(fid):
+                    self._map_canvas.zoom_to_feature(feature.geometry.bounds)
+                    self._ready_label.setText(
+                        f"已缩放至要素  FID {fid} · {layer.name}"
+                    )
+                    return
+            self.statusBar().showMessage(
+                f"未找到要素 FID {fid} · {layer.name}", 4000
+            )
+            return
+        self.statusBar().showMessage("属性表对应图层已不在工作区中", 4000)
 
     def _clear_selection(self) -> None:
         """清除已有矢量要素选择并刷新工作区。"""
@@ -881,6 +948,20 @@ class MainWindow(QMainWindow):
                 None,
             )
             self._symbology_panel.set_layer(active_snapshot)
+        if self._attribute_table_dock.isVisible():
+            table_layer_snapshot: LayerSnapshot | None = next(
+                (
+                    layer
+                    for layer in snapshot.layers
+                    if layer.layer_id == self._attribute_table_panel.layer_id
+                ),
+                None,
+            )
+            if table_layer_snapshot is not None:
+                # 仅同步选择高亮，不重建表格，避免触发表→图→表的反馈循环。
+                self._attribute_table_panel.highlight_features(
+                    set(table_layer_snapshot.selected_feature_ids)
+                )
         self._update_window_title()
 
     def _refresh_analysis_history(self, snapshot: WorkspaceSnapshot | None = None) -> None:

@@ -19,6 +19,7 @@ dependencies = [
     "SciPy>=1.11",
     "Shapely>=2.0",
     "psycopg[binary]>=3.1",
+    "python-docx>=1.2.0",
 ]
 
 [dependency-groups]

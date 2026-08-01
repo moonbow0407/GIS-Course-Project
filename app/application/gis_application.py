@@ -377,6 +377,27 @@ class GisApplication:
         self._modified = True
         return SelectionResult(features=tuple(selected_features), snapshot=self.snapshot())
 
+    def set_selection(
+        self, layer_id: str, feature_ids: tuple[FeatureId, ...]
+    ) -> WorkspaceSnapshot:
+        """直接设置指定图层的要素选择集合。
+
+        参数:
+            layer_id: 需要更新选择状态的图层编号。
+            feature_ids: 待选中的要素编号元组；空元组表示取消选择。
+
+        返回:
+            包含更新后选择状态的工作区快照。
+        """
+        try:
+            self._document.clear_selection()
+            if feature_ids:
+                self._document.set_selection(layer_id, feature_ids)
+        except (KeyError, ValueError) as error:
+            raise ApplicationError(str(error)) from error
+        self._modified = True
+        return self.snapshot()
+
     def clear_selection(self) -> SelectionResult:
         """清除全部图层选择并返回空选择结果。"""
         self._document.clear_selection()

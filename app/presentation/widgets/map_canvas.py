@@ -89,7 +89,11 @@ class MapCanvas(QGraphicsView):
 
         状态变化:
             清空旧图元并重绘快照；空快照只显示操作引导。
+            Qt 视图变换在 scene.clear / setSceneRect 期间保持不变，
+            无需额外恢复，避免了反复 fitInView 导致的持续缩放漂移。
         """
+        is_first_load: bool = self._map_scene_rect is None
+
         self._scene.clear()
         self._empty_overlay.setVisible(not snapshot.layers)
         if not snapshot.layers:
@@ -110,14 +114,6 @@ class MapCanvas(QGraphicsView):
         maximum_y: float = max(layer.bounds[3] for layer in extent_layers)
         map_scene_rect: QRectF = self._scene_rect_from_bounds(
             (minimum_x, minimum_y, maximum_x, maximum_y)
-        )
-        # 捕获当前视图中心：若已有地图数据（非首次加载），重建后恢复原位，
-        # 避免 fitInView 重置全图导致地图偏移闪烁。
-        is_first_load: bool = self._map_scene_rect is None
-        view_center: QPointF | None = (
-            None
-            if is_first_load
-            else self.mapToScene(self.viewport().rect().center())
         )
         self._map_scene_rect = map_scene_rect
         self._scene.setSceneRect(map_scene_rect)
@@ -142,8 +138,6 @@ class MapCanvas(QGraphicsView):
         if is_first_load:
             self.fitInView(map_scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
             self._reset_view_scale()
-        elif view_center is not None:
-            self.centerOn(view_center)
         self._ensure_pan_area()
 
     def capture_view_state(self) -> MapViewState:
@@ -212,6 +206,57 @@ class MapCanvas(QGraphicsView):
         layer_scale: float = self._fit_scale_for_rect(layer_scene_rect)
         self._zoom_percent = (
             layer_scale / full_scale * 100.0 if full_scale > 0.0 else 100.0
+        )
+        self._ensure_pan_area()
+        self._emit_view_scale()
+
+    def zoom_to_feature(self, bounds: Bounds) -> None:
+        """将单个要素放大到视图中，保证有明显的缩放效果。
+
+        根据要素在当前视野中的占比计算放大倍率，确保至少放大 3 倍，
+        最多放大 20 倍，无论当前缩放级别如何都能看到明显的拉近效果。
+
+        参数:
+            bounds: 要素在地图坐标系下的 (minx, miny, maxx, maxy)。
+        """
+        if self._map_scene_rect is None:
+            return
+        visible: QRectF = self._visible_scene_rect()
+        min_x, min_y, max_x, max_y = bounds
+        feature_w: float = max_x - min_x
+        feature_h: float = max_y - min_y
+
+        # 要素在当前视野中的占比。
+        feature_fraction: float = max(
+            feature_w / max(visible.width(), 1e-9),
+            feature_h / max(visible.height(), 1e-9),
+        )
+        # 点要素占比接近 0，赋予一个极小值以防除零。
+        feature_fraction = max(feature_fraction, 0.001)
+        # 目标：要素占视野约 35%，由此计算需要放大的倍率。
+        target_fraction: float = 0.35
+        zoom_factor: float = target_fraction / feature_fraction
+        # 钳制：不缩小（≥1×），最多放大 20 倍。
+        zoom_factor = max(1.0, min(20.0, zoom_factor))
+
+        # 以要素中心为锚点，按倍率缩小视口范围。
+        target_w: float = visible.width() / zoom_factor
+        target_h: float = visible.height() / zoom_factor
+        center_x: float = (min_x + max_x) / 2.0 if feature_w > 0.0 else min_x
+        center_y: float = (min_y + max_y) / 2.0 if feature_h > 0.0 else min_y
+        feature_rect: QRectF = QRectF(
+            center_x - target_w / 2.0,
+            center_y - target_h / 2.0,
+            target_w,
+            target_h,
+        )
+
+        self._scene.setSceneRect(self._scene.sceneRect().united(feature_rect))
+        self.fitInView(feature_rect, Qt.AspectRatioMode.KeepAspectRatio)
+        full_scale: float = self._fit_scale_for_rect(self._map_scene_rect)
+        feature_scale: float = self._fit_scale_for_rect(feature_rect)
+        self._zoom_percent = (
+            feature_scale / full_scale * 100.0 if full_scale > 0.0 else 100.0
         )
         self._ensure_pan_area()
         self._emit_view_scale()

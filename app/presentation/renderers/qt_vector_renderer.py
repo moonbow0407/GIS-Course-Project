@@ -53,12 +53,26 @@ class QtVectorRenderer:
                 continue
             path: QPainterPath = QPainterPath()
             point_size: float = style.point_size * map_units_per_pixel
+            selected: bool = feature.fid in snapshot.selected_feature_ids
+            # 选中点要素时大幅放大符号。
+            if selected:
+                point_size *= 2.5
             self._append_geometry(path, feature.geometry, point_size)
             if path.isEmpty():
                 continue
+            # 选中要素先绘制光晕层（宽半透明描边），再绘制主体。
+            if selected:
+                halo: QGraphicsPathItem = QGraphicsPathItem(path)
+                self._apply_halo(halo, feature.geometry.geom_type)
+                halo.setData(0, snapshot.layer_id)
+                halo.setData(1, feature.fid)
+                halo.setZValue(z_value - 0.1)
+                halo.setVisible(snapshot.visible)
+                halo.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+                scene.addItem(halo)
+                items.append(halo)
             item: QGraphicsPathItem = QGraphicsPathItem(path)
-            selected: bool = feature.fid in snapshot.selected_feature_ids
-            self._apply_style(item, style, selected)
+            self._apply_style(item, style, selected, feature.geometry.geom_type)
             # 自定义数据把 Qt 图元关联回领域图层和要素。
             item.setData(0, snapshot.layer_id)
             item.setData(1, feature.fid)
@@ -120,15 +134,84 @@ class QtVectorRenderer:
             path.closeSubpath()
 
     @staticmethod
-    def _apply_style(item: QGraphicsPathItem, style: LayerStyle, selected: bool) -> None:
-        """把领域样式转换为 Qt 画笔和画刷，并应用选择高亮。"""
-        stroke_color: QColor = QColor("#e63946" if selected else style.stroke_color)
-        line_width: float = style.line_width + (1.5 if selected else 0.0)
-        pen: QPen = QPen(stroke_color, line_width)
-        # 矢量线宽使用屏幕像素，避免经纬度或米制坐标下随地图比例异常放大。
-        pen.setCosmetic(True)
-        fill_color: QColor = QColor(style.fill_color)
-        brush: QBrush = QBrush(fill_color if fill_color.isValid() else Qt.BrushStyle.NoBrush)
-        item.setPen(pen)
-        item.setBrush(brush)
-        item.setOpacity(1.0 if selected else style.opacity)
+    def _apply_halo(item: QGraphicsPathItem, geom_type: str) -> None:
+        """为选中要素绘制半透明宽描边光晕，确保在任何底图上可见。
+
+        参数:
+            item: 光晕层 Qt 图元。
+            geom_type: Shapely 几何类型名称。
+        """
+        # 光晕色：荧光青，自然界中几乎不出现的颜色。
+        halo_color: QColor = QColor(0, 255, 255, 80)  # 半透明 cyan
+        halo_width: float = 8.0
+        halo_pen: QPen = QPen(halo_color, halo_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        halo_pen.setCosmetic(True)
+        item.setPen(halo_pen)
+        # 面要素光晕不填充，线/点同理。
+        if geom_type in ("Polygon", "MultiPolygon"):
+            item.setBrush(Qt.BrushStyle.NoBrush)
+        else:
+            item.setBrush(Qt.BrushStyle.NoBrush)
+
+    @staticmethod
+    def _apply_style(
+        item: QGraphicsPathItem,
+        style: LayerStyle,
+        selected: bool,
+        geom_type: str = "",
+    ) -> None:
+        """把领域样式转换为 Qt 画笔和画刷，选中要素按几何类型高亮。
+
+        参数:
+            item: 待应用样式的 Qt 图元。
+            style: 领域图层样式配置。
+            selected: 是否处于被选中状态。
+            geom_type: Shapely 几何类型名称，用于区分面/线/点高亮策略。
+        """
+        if not selected:
+            stroke_color: QColor = QColor(style.stroke_color)
+            pen: QPen = QPen(stroke_color, style.line_width)
+            pen.setCosmetic(True)
+            fill_color: QColor = QColor(style.fill_color)
+            brush: QBrush = QBrush(
+                fill_color if fill_color.isValid() else Qt.BrushStyle.NoBrush
+            )
+            item.setPen(pen)
+            item.setBrush(brush)
+            item.setOpacity(style.opacity)
+            return
+
+        # ── 选中高亮策略 ──
+        # 主体色：荧光青，与光晕同色系但完全不透明。
+        highlight_color: QColor = QColor("#00E5FF")
+
+        # 面要素：填充大幅加深，配醒目青绿色粗边界线。
+        if geom_type in ("Polygon", "MultiPolygon"):
+            original_fill: QColor = QColor(style.fill_color)
+            if original_fill.isValid():
+                # 降到原色的 25% 亮度，几乎黑，确保与周围未选面拉开差距。
+                darkened: QColor = original_fill.darker(300)
+                brush: QBrush = QBrush(darkened)
+            else:
+                brush = QBrush(Qt.BrushStyle.NoBrush)
+            highlight_pen: QPen = QPen(highlight_color, style.line_width + 4.0)
+            highlight_pen.setCosmetic(True)
+            item.setPen(highlight_pen)
+            item.setBrush(brush)
+            item.setOpacity(1.0)
+
+        # 线要素：亮青粗线，配合光晕在密集线网中突出。
+        elif geom_type in ("LineString", "MultiLineString", "LinearRing"):
+            highlight_pen = QPen(highlight_color, style.line_width + 4.0)
+            highlight_pen.setCosmetic(True)
+            item.setPen(highlight_pen)
+            item.setOpacity(1.0)
+
+        # 点要素：亮青填充 + 深蓝描边，配合 2.5× 放大符号。
+        else:
+            highlight_pen = QPen(QColor("#0055AA"), style.line_width + 2.0)
+            highlight_pen.setCosmetic(True)
+            highlight_brush: QBrush = QBrush(highlight_color)
+            item.setPen(highlight_pen)
+            item.setBrush(highlight_brush)
+            item.setOpacity(1.0)

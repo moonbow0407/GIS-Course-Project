@@ -25,7 +25,7 @@ from shapely.geometry import Point
 from app.application.results import LayerSnapshot
 from app.domain.feature import Feature
 from app.domain.vector_layer import VectorLayer
-from app.presentation.widgets.attribute_table import AttributeTableDialog
+from app.presentation.widgets.attribute_table import AttributeTablePanel
 from main import load_style
 
 
@@ -48,22 +48,23 @@ def test_dialogs_keep_light_readable_background_with_dark_system_palette() -> No
         features=(Feature(fid=1, geometry=Point(0, 0), attributes={"名称": "主路"}),),
         crs=CRS.from_epsg(4326),
     )
-    attribute_dialog: AttributeTableDialog = AttributeTableDialog(
+    attribute_panel: AttributeTablePanel = AttributeTablePanel()
+    attribute_panel.set_layer(
         LayerSnapshot(layer=layer, visible=True, selected_feature_ids=())
     )
     message_box: QMessageBox = QMessageBox(QMessageBox.Icon.Information, "提示", "接口已预留")
-    attribute_dialog.show()
+    attribute_panel.show()
     message_box.show()
     application.processEvents()
 
-    table: QTableWidget = attribute_dialog.findChild(QTableWidget)
+    table: QTableWidget = attribute_panel.findChild(QTableWidget)
     assert table is not None
-    assert _pixel_is_light(attribute_dialog, QPoint(5, 5))
+    assert _pixel_is_light(attribute_panel, QPoint(5, 5))
     assert _pixel_is_light(table, table.rect().center())
     assert _pixel_is_light(message_box, QPoint(8, 8))
 
     message_box.close()
-    attribute_dialog.close()
+    attribute_panel.close()
     application.setPalette(original_palette)
 
 
@@ -170,11 +171,12 @@ def test_attribute_table_keeps_vertical_scrollbar_visible() -> None:
         features=(Feature(fid=1, geometry=Point(0, 0), attributes={"名称": "主路"}),),
         crs=CRS.from_epsg(4326),
     )
-    dialog: AttributeTableDialog = AttributeTableDialog(
+    panel: AttributeTablePanel = AttributeTablePanel()
+    panel.set_layer(
         LayerSnapshot(layer=layer, visible=True, selected_feature_ids=())
     )
-    table: QTableWidget = dialog.findChild(QTableWidget)
-    dialog.show()
+    table: QTableWidget = panel.findChild(QTableWidget)
+    panel.show()
     application.processEvents()
 
     assert application is not None
@@ -183,7 +185,7 @@ def test_attribute_table_keeps_vertical_scrollbar_visible() -> None:
     assert table.verticalScrollMode() == QTableWidget.ScrollMode.ScrollPerPixel
     assert table.verticalScrollBar().isVisible()
 
-    dialog.close()
+    panel.close()
 
 
 def _pixel_is_light(widget: QWidget, point: QPoint) -> bool:
