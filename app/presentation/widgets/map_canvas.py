@@ -1,6 +1,7 @@
 """基于领域图层快照的地图画布。"""
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -10,6 +11,7 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QGraphicsScene,
     QGraphicsView,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QRubberBand,
     QVBoxLayout,
 )
+from shapely.geometry import Point, Polygon
 
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
@@ -35,6 +38,10 @@ class MapCanvas(QGraphicsView):
     view_scale_changed = Signal(str)
     # 画布点击信号：单击地图任意位置时发出，供外部取消图层选中。
     canvas_clicked = Signal()
+    # 点选查询信号：(地图坐标点, 是否追加到已有选择)。
+    point_queried = Signal(Point, bool)
+    # 框选查询信号：(地图坐标矩形, 是否追加到已有选择)。
+    rectangle_queried = Signal(Polygon, bool)
 
     def __init__(self, parent: QGraphicsView | None = None) -> None:
         """创建空地图场景和矢量、栅格渲染器。
@@ -66,8 +73,14 @@ class MapCanvas(QGraphicsView):
         self._zoom_rect_active: bool = False
         # 框选起点：橡皮筋矩形起始位置的视口像素坐标。
         self._zoom_origin: QPoint = QPoint()
-        # 橡皮筋矩形：框选放大时跟随鼠标绘制的临时可视化控件。
+        # 橡皮筋矩形：框选放大/框选查询时跟随鼠标绘制的临时可视化控件。
         self._rubber_band: QRubberBand | None = None
+        # 点选查询激活标记：为 True 时左键单击执行空间点选并切换回平移工具。
+        self._point_query_active: bool = False
+        # 框选查询激活标记：为 True 时左键拖拽矩形执行空间查询并切换回平移工具。
+        self._rectangle_query_active: bool = False
+        # 每屏幕像素对应的地图单位：由 set_snapshot 刷新，供容差计算使用。
+        self._map_units_per_pixel: float = 1.0
         self._scene.setSceneRect(0, 0, 1000, 700)
         self.setScene(self._scene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -80,6 +93,11 @@ class MapCanvas(QGraphicsView):
     def has_map_data(self) -> bool:
         """返回画布当前是否已经建立真实地图范围。"""
         return self._map_scene_rect is not None
+
+    @property
+    def map_units_per_pixel(self) -> float:
+        """返回当前视图每个屏幕像素对应的地图单位，用于容差计算。"""
+        return self._map_units_per_pixel
 
     def set_snapshot(self, snapshot: WorkspaceSnapshot) -> None:
         """原子替换场景中的图层图元并适配真实数据范围。
@@ -124,6 +142,7 @@ class MapCanvas(QGraphicsView):
             self._scene.sceneRect().width() / viewport_width,
             self._scene.sceneRect().height() / viewport_height,
         )
+        self._map_units_per_pixel = map_units_per_pixel
         # 快照按底到顶排列，枚举值可直接作为 Qt 图元的叠放顺序。
         for z_value, current_layer in enumerate(layer_snapshot):
             if isinstance(current_layer.layer, RasterLayer):
@@ -164,8 +183,8 @@ class MapCanvas(QGraphicsView):
         self._emit_view_scale()
 
     def set_pan_tool(self) -> None:
-        """切换到地图平移工具。"""
-        self._zoom_rect_active = False
+        """切换到地图平移工具，同时关闭所有特殊工具模式。"""
+        self._deactivate_all_tools()
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self._update_cursor()
 
@@ -178,6 +197,36 @@ class MapCanvas(QGraphicsView):
         self._zoom_rect_active = True
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def set_point_query_tool(self) -> None:
+        """切换到点选查询模式。
+
+        状态变化:
+            关闭其他工具模式，激活点选标记，切换十字光标。
+        """
+        self._deactivate_all_tools()
+        self._point_query_active = True
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def set_rectangle_query_tool(self) -> None:
+        """切换到框选查询模式。
+
+        状态变化:
+            关闭其他工具模式，激活框选查询标记，切换十字光标。
+        """
+        self._deactivate_all_tools()
+        self._rectangle_query_active = True
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def _deactivate_all_tools(self) -> None:
+        """关闭所有特殊工具模式，恢复默认交互状态。"""
+        self._zoom_rect_active = False
+        self._point_query_active = False
+        self._rectangle_query_active = False
+        self._pan_mode = "none"
+        self._last_middle_pos = None
 
     def zoom_to_full_extent(self) -> None:
         """将当前地图范围完整缩放到视图内。"""
@@ -325,14 +374,15 @@ class MapCanvas(QGraphicsView):
     # ── 平移 ────────────────────────────────────────────────
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        """拦截中键平移和框选放大的按下事件，其余交由父类处理。
+        """拦截中键平移、框选操作和查询工具的按下事件，其余交由父类处理。
 
         参数:
             event: 包含按钮类型和修饰键状态的 Qt 鼠标按下事件。
 
         状态变化:
-            中键按下时进入手动平移模式并切换抓取光标；
-            Shift+左键或框选工具模式下创建橡皮筋矩形起点。
+            中键按下时进入手动平移模式；
+            点选查询模式下左键单击执行查询并切回平移工具；
+            框选查询/框选放大模式下左键拖拽创建橡皮筋矩形。
         """
         # 通知外部（如主窗口）可据此取消图层面板选中。
         self.canvas_clicked.emit()
@@ -341,6 +391,27 @@ class MapCanvas(QGraphicsView):
             self._pan_mode = "middle"
             self._last_middle_pos = event.position().toPoint()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
+        # 点选查询：左键单击执行查询，Shift 按下时追加到已有选择。
+        if self._point_query_active and event.button() == Qt.MouseButton.LeftButton:
+            query_point: Point = self._screen_to_map_point(
+                event.position().toPoint()
+            )
+            add_to_selection: bool = bool(
+                event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            )
+            self.point_queried.emit(query_point, add_to_selection)
+            event.accept()
+            return
+
+        # 框选查询：左键拖拽绘制选择矩形。
+        if self._rectangle_query_active and event.button() == Qt.MouseButton.LeftButton:
+            self._zoom_origin = event.position().toPoint()
+            self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
+            self._rubber_band.setGeometry(QRect(self._zoom_origin, QSize()))
+            self._rubber_band.show()
             event.accept()
             return
 
@@ -388,7 +459,7 @@ class MapCanvas(QGraphicsView):
             event.accept()
             return
 
-        # 框选橡皮筋：跟随鼠标实时更新选择矩形。
+        # 框选橡皮筋（放大或查询）：跟随鼠标实时更新选择矩形。
         if self._rubber_band is not None:
             self._rubber_band.setGeometry(
                 QRect(self._zoom_origin, event.position().toPoint()).normalized()
@@ -404,14 +475,15 @@ class MapCanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        """结束中键平移或执行框选缩放，其余交由父类处理。
+        """结束中键平移、框选查询或框选缩放，其余交由父类处理。
 
         参数:
             event: 包含释放按钮类型的 Qt 鼠标释放事件。
 
         状态变化:
-            中键释放时退出平移模式并恢复光标样式；
-            左键释放时关闭橡皮筋并按框选范围缩放地图。
+            中键释放时退出平移模式；
+            框选查询释放时发射查询多边形并切回平移工具；
+            框选放大释放时缩放到该区域。
         """
         # 中键释放：恢复光标样式。
         if self._pan_mode == "middle" and event.button() == Qt.MouseButton.MiddleButton:
@@ -421,7 +493,7 @@ class MapCanvas(QGraphicsView):
             event.accept()
             return
 
-        # 框选释放：关闭橡皮筋，计算场景范围并缩放到该区域。
+        # 框选释放（查询或缩放）：关闭橡皮筋。
         if self._rubber_band is not None and event.button() == Qt.MouseButton.LeftButton:
             self._rubber_band.close()
             self._rubber_band = None
@@ -429,7 +501,22 @@ class MapCanvas(QGraphicsView):
                 self._zoom_origin, event.position().toPoint()
             ).normalized()
             # 忽略过小的拖拽（可能是误触），阈值设为 8 像素。
-            if screen_rect.width() > 8 and screen_rect.height() > 8:
+            if screen_rect.width() <= 8 or screen_rect.height() <= 8:
+                event.accept()
+                return
+
+            if self._rectangle_query_active:
+                # 框选查询：屏幕矩形 → 地图坐标矩形 → Shapely Polygon。
+                query_polygon: Polygon = self._screen_rect_to_map_polygon(
+                    screen_rect
+                )
+                add_to_selection: bool = bool(
+                    QApplication.instance().keyboardModifiers()
+                    & Qt.KeyboardModifier.ShiftModifier
+                )
+                self.rectangle_queried.emit(query_polygon, add_to_selection)
+            else:
+                # 框选缩放：计算场景范围并缩放到该区域。
                 scene_rect: QRectF = QRectF(
                     self.mapToScene(screen_rect.topLeft()),
                     self.mapToScene(screen_rect.bottomRight()),
@@ -447,6 +534,25 @@ class MapCanvas(QGraphicsView):
             return
 
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Esc 键退出查询/缩放等特殊工具模式，切回平移工具。
+
+        参数:
+            event: Qt 键盘事件。
+        """
+        if (
+            event.key() == Qt.Key.Key_Escape
+            and (
+                self._point_query_active
+                or self._rectangle_query_active
+                or self._zoom_rect_active
+            )
+        ):
+            self.set_pan_tool()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     # ── 光标管理 ─────────────────────────────────────────────
 
@@ -540,6 +646,31 @@ class MapCanvas(QGraphicsView):
         top_left: QPointF = self.mapToScene(self.viewport().rect().topLeft())
         bottom_right: QPointF = self.mapToScene(self.viewport().rect().bottomRight())
         return QRectF(top_left, bottom_right).normalized()
+
+    def _screen_to_map_point(self, screen_pos: QPoint) -> Point:
+        """将视口像素坐标转换为地图坐标系下的 Shapely Point。
+
+        Qt 场景 Y 轴向下，地图 Y 轴向上，需反转纵轴。
+        """
+        scene_pos: QPointF = self.mapToScene(screen_pos)
+        return Point(scene_pos.x(), -scene_pos.y())
+
+    def _screen_rect_to_map_polygon(self, screen_rect: QRect) -> Polygon:
+        """将视口像素矩形转换为地图坐标系下的 Shapely Polygon。
+
+        四个角按逆时针排列，闭合回起点。
+        """
+        top_left: QPointF = self.mapToScene(screen_rect.topLeft())
+        bottom_right: QPointF = self.mapToScene(screen_rect.bottomRight())
+        min_x, max_y = top_left.x(), -top_left.y()
+        max_x, min_y = bottom_right.x(), -bottom_right.y()
+        return Polygon([
+            (min_x, min_y),
+            (max_x, min_y),
+            (max_x, max_y),
+            (min_x, max_y),
+            (min_x, min_y),
+        ])
 
     @staticmethod
     def _scene_rect_from_bounds(bounds: Bounds) -> QRectF:

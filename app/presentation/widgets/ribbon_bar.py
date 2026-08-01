@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QStackedWidget,
     QTabBar,
     QToolButton,
@@ -18,7 +19,11 @@ from PySide6.QtWidgets import (
 
 @dataclass(frozen=True, slots=True)
 class RibbonActionSpec:
-    """描述功能区中的单个操作入口。"""
+    """描述功能区中的单个操作入口。
+
+    children 非空时按钮显示为下拉菜单，点击直接触发父 action_id，
+    下拉项各自触发对应子 action_id。
+    """
 
     # 操作编号：作为界面层与后续业务实现之间的稳定接口标识。
     action_id: str
@@ -31,6 +36,9 @@ class RibbonActionSpec:
 
     # 强调颜色：用于区分文件、编辑、分析等功能类别。
     color: str = "#2563eb"
+
+    # 下拉子项：非空时按钮渲染为带菜单的下拉按钮。
+    children: tuple["RibbonActionSpec", ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +167,7 @@ class RibbonBar(QWidget):
 
         参数:
             spec: 操作编号、显示标题、图标字符和强调颜色。
+                children 非空时渲染为下拉菜单按钮。
 
         返回:
             点击时发出稳定操作编号的功能区按钮。
@@ -172,8 +181,27 @@ class RibbonBar(QWidget):
         button.setAutoRaise(True)
         button.setMinimumWidth(68)
         button.setToolTip(spec.title)
-        # 默认参数在创建按钮时固定编号，避免循环结束后所有按钮指向同一操作。
-        button.clicked.connect(lambda checked=False, action_id=spec.action_id: self.action_triggered.emit(action_id))
+        if spec.children:
+            # 下拉按钮：主点击触发父操作，下拉菜单选择子操作。
+            button.clicked.connect(
+                lambda checked=False, action_id=spec.action_id: self.action_triggered.emit(action_id)
+            )
+            menu: QMenu = QMenu(button)
+            child: RibbonActionSpec
+            for child in spec.children:
+                child_action = menu.addAction(
+                    self._glyph_icon(child.glyph, child.color), child.title
+                )
+                child_action.triggered.connect(
+                    lambda checked=False, action_id=child.action_id: self.action_triggered.emit(action_id)
+                )
+            button.setMenu(menu)
+            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        else:
+            # 默认参数在创建按钮时固定编号，避免循环结束后所有按钮指向同一操作。
+            button.clicked.connect(
+                lambda checked=False, action_id=spec.action_id: self.action_triggered.emit(action_id)
+            )
         return button
 
     @staticmethod
@@ -228,7 +256,16 @@ class RibbonBar(QWidget):
                         RibbonActionSpec("full_extent", "全图显示", "⌗", "#0f766e"),
                     )),
                     RibbonGroupSpec("查询", (
-                        RibbonActionSpec("point_query", "点选查询", "⌖", "#0284c7"),
+                        RibbonActionSpec(
+                            "point_query",
+                            "点选查询",
+                            "⌖",
+                            "#0284c7",
+                            children=(
+                                RibbonActionSpec("point_query_fast", "快速查询", "⌖", "#0284c7"),
+                                RibbonActionSpec("point_query_precise", "精确查询", "⌖", "#0ea5e9"),
+                            ),
+                        ),
                         RibbonActionSpec("rectangle_query", "框选查询", "□", "#0284c7"),
                         RibbonActionSpec("attribute_query", "属性查询", "≣", "#7c3aed"),
                     )),

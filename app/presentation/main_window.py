@@ -32,6 +32,10 @@ from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
 from app.infrastructure.project.json_project_store import JsonProjectStore
 from app.presentation.widgets.analysis_history_panel import AnalysisHistoryPanel
+from app.presentation.widgets.attribute_query_dialog import (
+    AttributeQueryDialog,
+    AttributeQueryRequest,
+)
 from app.presentation.widgets.attribute_table import AttributeTablePanel
 from app.presentation.widgets.buffer_analysis_dialog import BufferAnalysisDialog
 from app.presentation.widgets.database_dialogs import (
@@ -177,6 +181,8 @@ class MainWindow(QMainWindow):
         self._map_canvas.coordinate_changed.connect(self._coordinate_label.setText)
         self._map_canvas.view_scale_changed.connect(self._scale_label.setText)
         self._map_canvas.canvas_clicked.connect(self._on_canvas_clicked)
+        self._map_canvas.point_queried.connect(self._on_point_queried)
+        self._map_canvas.rectangle_queried.connect(self._on_rectangle_queried)
         self._attribute_table_panel.selection_changed.connect(
             self._on_table_selection_changed
         )
@@ -216,6 +222,11 @@ class MainWindow(QMainWindow):
             "buffer_analysis": self._buffer_analysis,
             "analysis_history": self._toggle_analysis_history,
             "toggle_layers": self._toggle_layer_panel,
+            "point_query": self._point_query,
+            "point_query_fast": lambda: self._point_query(fast=True),
+            "point_query_precise": lambda: self._point_query(fast=False),
+            "rectangle_query": self._rectangle_query,
+            "attribute_query": self._attribute_query,
             "show_attributes": self._show_active_attribute_table,
             "set_crs": self._set_display_crs,
             "about": self._show_about,
@@ -789,6 +800,248 @@ class MainWindow(QMainWindow):
             )
             return
         self.statusBar().showMessage("属性表对应图层已不在工作区中", 4000)
+
+    def _point_query(self, fast: bool = False) -> None:
+        """激活地图点选查询工具。
+
+        参数:
+            fast: True 为快速模式（直接取最近要素），False 为精确模式（多候选弹窗）。
+        """
+        if not self._map_canvas.has_map_data:
+            self.statusBar().showMessage("请先打开一个图层。", 3500)
+            return
+        self._point_query_fast = fast
+        self._map_canvas.set_point_query_tool()
+        mode: str = "快速查询" if fast else "精确查询"
+        self._ready_label.setText(
+            f"{mode}：点击要素选择  |  Shift+点击追加/切换  |  Esc 退出"
+        )
+
+    def _rectangle_query(self) -> None:
+        """激活地图框选查询工具。"""
+        if not self._map_canvas.has_map_data:
+            self.statusBar().showMessage("请先打开一个图层。", 3500)
+            return
+        self._map_canvas.set_rectangle_query_tool()
+        self._ready_label.setText(
+            "框选查询：拖拽矩形选择  |  Shift+拖拽追加"
+        )
+
+    def _attribute_query(self) -> None:
+        """打开属性查询对话框，按字段条件筛选要素。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        vector_layers: tuple[LayerSnapshot, ...] = tuple(
+            layer for layer in snapshot.layers if not layer.is_raster
+        )
+        if not vector_layers:
+            self.statusBar().showMessage(
+                "当前工作区没有可查询的矢量图层。", 4000
+            )
+            return
+        dialog: AttributeQueryDialog = AttributeQueryDialog(
+            vector_layers, self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        request: AttributeQueryRequest = dialog.request()
+        before_selections: dict[str, tuple] = self._capture_selections()
+        try:
+            result = self._application.select_by_attribute(
+                request.layer_id,
+                request.field_name,
+                request.operator,
+                request.value,
+            )
+        except ApplicationError as error:
+            QMessageBox.warning(self, "属性查询失败", str(error))
+            return
+        after_selections: dict[str, tuple] = self._capture_selections()
+        self._push_selection_undo(
+            "属性查询", before_selections, after_selections
+        )
+        self._refresh_workspace()
+        self._ready_label.setText(
+            f"属性查询：匹配 {result.count} 个要素"
+        )
+
+    def _on_point_queried(self, point: object, add_to_selection: bool) -> None:
+        """点选查询结果处理。
+
+        快速模式始终取最近要素；精确模式多候选时弹窗选择。
+        选中后保持查询工具激活，支持 Shift 连续点选。
+
+        参数:
+            point: 地图坐标下的 Shapely Point。
+            add_to_selection: Shift 按下时为 True，追加而非替换。
+        """
+        tolerance: float = 5.0 * self._map_canvas.map_units_per_pixel
+        try:
+            candidates = self._application.identify_features(point, tolerance)
+        except (ApplicationError, ValueError):
+            return
+
+        if not candidates:
+            self._ready_label.setText("点选查询：未命中要素")
+            return
+
+        fast: bool = getattr(self, "_point_query_fast", False)
+
+        if fast or len(candidates) == 1:
+            # 快速模式或单个候选：直接选最近要素。
+            self._apply_point_selection(
+                candidates[0], add_to_selection, description="点选查询"
+            )
+            return
+
+        # 精确模式 + 多个候选：弹窗选择。
+        choices: list[str] = [
+            f"{c.layer_name}  ·  FID {c.feature.fid}"
+            for c in candidates
+        ]
+        item, accepted = QInputDialog.getItem(
+            self,
+            "点选查询 — 选择要素",
+            f"容差范围内找到 {len(candidates)} 个要素，请选择：",
+            choices,
+            editable=False,
+        )
+        if not accepted:
+            self._ready_label.setText("点选查询：已取消")
+            # 弹窗取消后重新激活查询工具。
+            self._map_canvas.set_point_query_tool()
+            return
+        index: int = choices.index(item)
+        self._apply_point_selection(
+            candidates[index], add_to_selection, description="点选查询"
+        )
+
+    def _apply_point_selection(
+        self,
+        selected: object,  # SelectedFeature
+        add_to_selection: bool,
+        description: str,
+    ) -> None:
+        """将选定的要素应用为当前选择，之后保持查询工具激活。
+
+        参数:
+            selected: 用户在候选列表中确认的 SelectedFeature。
+            add_to_selection: 追加模式下切换选中状态。
+            description: 撤销操作描述。
+        """
+        before_selections: dict[str, tuple] = self._capture_selections()
+        try:
+            self._application.set_selection(
+                selected.layer_id,
+                self._resolve_point_selection(
+                    selected, add_to_selection
+                ),
+            )
+        except ApplicationError:
+            return
+        after_selections: dict[str, tuple] = self._capture_selections()
+        self._push_selection_undo(description, before_selections, after_selections)
+        self._refresh_workspace()
+        # 保持查询工具激活，支持连续点选。
+        self._map_canvas.set_point_query_tool()
+        action: str = "切换" if add_to_selection else "选中"
+        self._ready_label.setText(
+            f"点选查询：{action} FID {selected.feature.fid} · "
+            f"{selected.layer_name}"
+        )
+
+    def _resolve_point_selection(
+        self, selected: object, add_to_selection: bool
+    ) -> tuple:
+        """根据追加模式决定点选命中要素的最终选中集合。
+
+        参数:
+            selected: 用户选择的 SelectedFeature。
+            add_to_selection: 追加模式标志。
+
+        返回:
+            更新后的要素编号元组。
+        """
+        if not add_to_selection:
+            return (selected.feature.fid,)
+        existing = self._application.snapshot()
+        current: tuple = ()
+        for layer in existing.layers:
+            if layer.layer_id == selected.layer_id:
+                current = layer.selected_feature_ids
+                break
+        if selected.feature.fid in current:
+            return tuple(fid for fid in current if fid != selected.feature.fid)
+        return current + (selected.feature.fid,)
+
+    def _on_rectangle_queried(self, polygon: object, add_to_selection: bool) -> None:
+        """框选查询结果处理：执行空间矩形选择、记录撤销并刷新工作区。
+
+        参数:
+            polygon: 地图坐标下的 Shapely Polygon。
+            add_to_selection: Shift 按下时为 True，追加而非替换。
+        """
+        before_selections: dict[str, tuple] = self._capture_selections()
+        try:
+            result = self._application.select_rectangle(
+                polygon, add_to_selection=add_to_selection
+            )
+        except (ApplicationError, ValueError):
+            self._map_canvas.set_pan_tool()
+            return
+        after_selections: dict[str, tuple] = self._capture_selections()
+        self._push_selection_undo("框选查询", before_selections, after_selections)
+        self._refresh_workspace()
+        self._map_canvas.set_pan_tool()
+        self._ready_label.setText(
+            f"框选查询：选中 {result.count} 个要素"
+        )
+
+    def _capture_selections(self) -> dict[str, tuple]:
+        """捕获当前全部图层的选择状态，用于撤销恢复。
+
+        返回:
+            {layer_id: (feature_id, ...)} 的字典，不含未选中任何要素的图层。
+        """
+        selections: dict[str, tuple] = {}
+        for layer in self._application.snapshot().layers:
+            if layer.selected_feature_ids:
+                selections[layer.layer_id] = layer.selected_feature_ids
+        return selections
+
+    def _push_selection_undo(
+        self,
+        description: str,
+        before: dict[str, tuple],
+        after: dict[str, tuple],
+    ) -> None:
+        """将选择变更推入撤销栈。
+
+        参数:
+            description: 操作描述。
+            before: 操作前的 {layer_id: feature_ids}。
+            after: 操作后的 {layer_id: feature_ids}。
+        """
+        self._push_undo(
+            description,
+            undo_action=lambda: self._restore_selections(before),
+            redo_action=lambda: self._restore_selections(after),
+        )
+
+    def _restore_selections(self, selections: dict[str, tuple]) -> None:
+        """将多图层选择状态恢复到地图文档。
+
+        参数:
+            selections: {layer_id: feature_ids} 映射。
+        """
+        try:
+            self._application.clear_selection()
+        except ApplicationError:
+            return
+        for layer_id, feature_ids in selections.items():
+            try:
+                self._application.set_selection(layer_id, feature_ids)
+            except ApplicationError:
+                continue
 
     def _clear_selection(self) -> None:
         """清除已有矢量要素选择并刷新工作区。"""

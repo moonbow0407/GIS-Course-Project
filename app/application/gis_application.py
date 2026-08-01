@@ -72,6 +72,75 @@ from app.domain.symbology import RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
 
 
+def _geometry_priority(geom_type: str) -> int:
+    """返回几何类型的点选优先级权值：点 0 < 线 1 < 面 2。
+
+    配合容差比例罚分使用，使点选时点/线优先于面要素。
+    """
+    if geom_type in ("Point", "MultiPoint"):
+        return 0
+    if geom_type in ("LineString", "MultiLineString", "LinearRing"):
+        return 1
+    return 2  # Polygon, MultiPolygon, GeometryCollection
+
+
+def _attribute_match(
+    attr_value: object, operator: str, query_value: str
+) -> bool:
+    """判断单个要素的属性值是否满足查询条件。
+
+    参数:
+        attr_value: 要素字段值（可能为 None、str、int、float 等）。
+        operator: 比较运算符。
+        query_value: 查询输入值字符串。
+
+    返回:
+        True 表示匹配。
+    """
+    if operator == "is_null":
+        return attr_value is None or attr_value == ""
+    if operator == "not_null":
+        return attr_value is not None and attr_value != ""
+
+    attr_str: str = str(attr_value) if attr_value is not None else ""
+    if operator == "contains":
+        return query_value.lower() in attr_str.lower()
+
+    # 数值运算符：尝试数字比较，失败则回退到字符串比较。
+    try:
+        attr_num: float = float(attr_str)
+        query_num: float = float(query_value)
+    except (ValueError, TypeError):
+        # 字符串比较。
+        if operator == "=":
+            return attr_str == query_value
+        if operator == "!=":
+            return attr_str != query_value
+        if operator == ">":
+            return attr_str > query_value
+        if operator == "<":
+            return attr_str < query_value
+        if operator == ">=":
+            return attr_str >= query_value
+        if operator == "<=":
+            return attr_str <= query_value
+        return False
+
+    if operator == "=":
+        return attr_num == query_num
+    if operator == "!=":
+        return attr_num != query_num
+    if operator == ">":
+        return attr_num > query_num
+    if operator == "<":
+        return attr_num < query_num
+    if operator == ">=":
+        return attr_num >= query_num
+    if operator == "<=":
+        return attr_num <= query_num
+    return False
+
+
 class GisApplication:
     """通过较小公开接口统一编排图层管理和空间查询流程。"""
 
@@ -317,12 +386,65 @@ class GisApplication:
         self._modified = True
         return self.snapshot()
 
-    def select_point(self, point: Point, tolerance: float) -> SelectionResult:
-        """选择可见图层中容差范围内优先级最高的最近要素。"""
+    def identify_features(self, point: Point, tolerance: float) -> list[SelectedFeature]:
+        """返回容差范围内所有可见图层的命中要素，按加权距离排序。
+
+        点要素优先于线，线优先于面——避免点击面内线时被面抢走。
+        与 select_point 不同，本方法不清除或修改选择状态，
+        仅收集全部候选要素供界面弹出候选项使用。
+        """
         if tolerance < 0:
             raise ValueError("点选容差不能小于零。")
-        self._document.clear_selection()
+        candidates: list[tuple[float, SelectedFeature]] = []
+        # 几何类型罚分系数：点 0、线 1、面 2，每级罚 tolerance/100。
+        type_penalty: float = tolerance * 0.01
+        ordered_layers: tuple[VectorLayer, ...] = self._point_query_order()
+        for layer in ordered_layers:
+            if not self._document.is_visible(layer.layer_id):
+                continue
+            for feature in layer.features:
+                if feature.geometry.is_empty:
+                    continue
+                distance: float = float(feature.geometry.distance(point))
+                if distance <= tolerance:
+                    effective: float = (
+                        distance
+                        + _geometry_priority(feature.geometry.geom_type) * type_penalty
+                    )
+                    candidates.append(
+                        (
+                            effective,
+                            SelectedFeature(
+                                layer_id=layer.layer_id,
+                                layer_name=layer.name,
+                                feature=feature,
+                            ),
+                        )
+                    )
+        candidates.sort(key=lambda item: item[0])
+        return [candidate for _, candidate in candidates]
+
+    def select_point(
+        self, point: Point, tolerance: float, add_to_selection: bool = False
+    ) -> SelectionResult:
+        """选择可见图层中容差范围内优先级最高的最近要素。
+
+        点/线要素优先于面要素：点击面内河流时不会误选行政区。
+
+        参数:
+            point: 查询用的地图坐标点。
+            tolerance: 容差距离（地图单位）。
+            add_to_selection: 为 True 时不先清除已有选择，在最近要素上
+                切换其选中状态（已选中则取消，未选中则加入）。
+        """
+        if tolerance < 0:
+            raise ValueError("点选容差不能小于零。")
+        # 追加模式下保留已有选择，否则先清除。
+        if not add_to_selection:
+            self._document.clear_selection()
         self._modified = True
+        # 几何类型罚分系数。
+        type_penalty: float = tolerance * 0.01
         # 点选先查活动图层，再按视觉上的顶层到下层查找。
         ordered_layers: tuple[VectorLayer, ...] = self._point_query_order()
         layer: VectorLayer
@@ -330,17 +452,36 @@ class GisApplication:
             if not self._document.is_visible(layer.layer_id):
                 continue
             nearest_feature: Feature | None = None
-            nearest_distance: float = float("inf")
+            nearest_effective: float = float("inf")
             feature: Feature
             for feature in layer.features:
                 if feature.geometry.is_empty:
                     continue
                 distance: float = float(feature.geometry.distance(point))
-                if distance <= tolerance and distance < nearest_distance:
+                if distance > tolerance:
+                    continue
+                effective: float = (
+                    distance
+                    + _geometry_priority(feature.geometry.geom_type) * type_penalty
+                )
+                if effective < nearest_effective:
                     nearest_feature = feature
-                    nearest_distance = distance
+                    nearest_effective = effective
             if nearest_feature is not None:
-                self._document.set_selection(layer.layer_id, (nearest_feature.fid,))
+                if add_to_selection:
+                    # 切换：已选中则移除，未选中则加入。
+                    existing: tuple[FeatureId, ...] = (
+                        self._document.selected_feature_ids(layer.layer_id)
+                    )
+                    if nearest_feature.fid in existing:
+                        updated: tuple[FeatureId, ...] = tuple(
+                            fid for fid in existing if fid != nearest_feature.fid
+                        )
+                    else:
+                        updated = existing + (nearest_feature.fid,)
+                    self._document.set_selection(layer.layer_id, updated)
+                else:
+                    self._document.set_selection(layer.layer_id, (nearest_feature.fid,))
                 selected_feature: SelectedFeature = SelectedFeature(
                     layer_id=layer.layer_id,
                     layer_name=layer.name,
@@ -349,9 +490,18 @@ class GisApplication:
                 return SelectionResult(features=(selected_feature,), snapshot=self.snapshot())
         return SelectionResult(features=(), snapshot=self.snapshot())
 
-    def select_rectangle(self, rectangle: Polygon) -> SelectionResult:
-        """选择全部可见图层中与给定矩形相交的有效要素。"""
-        self._document.clear_selection()
+    def select_rectangle(
+        self, rectangle: Polygon, add_to_selection: bool = False
+    ) -> SelectionResult:
+        """选择全部可见图层中与给定矩形相交的有效要素。
+
+        参数:
+            rectangle: 查询用的地图坐标矩形多边形。
+            add_to_selection: 为 True 时不先清除已有选择，将相交要素
+                合并到各图层的当前选择集中。
+        """
+        if not add_to_selection:
+            self._document.clear_selection()
         selected_features: list[SelectedFeature] = []
         spatial_layer: SpatialLayer
         for spatial_layer in self._document.layers:
@@ -373,9 +523,55 @@ class GisApplication:
                             feature=feature,
                         )
                     )
-            self._document.set_selection(layer.layer_id, tuple(feature_ids))
+            if add_to_selection and feature_ids:
+                # 合并：已有选择 + 新命中（去重）。
+                existing: tuple[FeatureId, ...] = (
+                    self._document.selected_feature_ids(layer.layer_id)
+                )
+                merged: dict[FeatureId, None] = dict.fromkeys(existing)
+                for fid in feature_ids:
+                    merged[fid] = None
+                self._document.set_selection(layer.layer_id, tuple(merged))
+            else:
+                self._document.set_selection(layer.layer_id, tuple(feature_ids))
         self._modified = True
         return SelectionResult(features=tuple(selected_features), snapshot=self.snapshot())
+
+    def select_by_attribute(
+        self, layer_id: str, field_name: str, operator: str, value: str
+    ) -> SelectionResult:
+        """按属性条件筛选指定图层的要素并设为选中。
+
+        参数:
+            layer_id: 目标矢量图层编号。
+            field_name: 用于比对的属性字段名。
+            operator: 比较运算符（=, !=, >, <, >=, <=, contains, is_null, not_null）。
+            value: 比较值；is_null/not_null 时忽略。
+
+        返回:
+            包含全部命中要素的 SelectionResult。
+        """
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ApplicationError("属性查询仅支持矢量图层。")
+        matched_fids: list[FeatureId] = []
+        matched_features: list[SelectedFeature] = []
+        for feature in layer.features:
+            attr_value = feature.attributes.get(field_name)
+            if _attribute_match(attr_value, operator, value):
+                matched_fids.append(feature.fid)
+                matched_features.append(
+                    SelectedFeature(
+                        layer_id=layer.layer_id,
+                        layer_name=layer.name,
+                        feature=feature,
+                    )
+                )
+        self._document.set_selection(layer_id, tuple(matched_fids))
+        self._modified = True
+        return SelectionResult(
+            features=tuple(matched_features), snapshot=self.snapshot()
+        )
 
     def set_selection(
         self, layer_id: str, feature_ids: tuple[FeatureId, ...]
