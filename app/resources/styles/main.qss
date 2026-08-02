@@ -266,6 +266,11 @@ QToolButton#ribbonButton:checked {
     color: #0f6cbd;
 }
 
+QToolButton#ribbonButton::menu-button {
+    border: none;
+    background: transparent;
+}
+
 QLabel#ribbonGroupCaption {
     color: #7b8797;
     font-size: 11px;

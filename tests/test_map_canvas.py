@@ -1,6 +1,7 @@
 """地图画布初始状态测试。"""
 
 import os
+from pathlib import Path
 
 # 必须在导入 Qt 前启用无界面平台，测试才能在没有显示器的环境运行。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -12,13 +13,14 @@ from pyproj import CRS
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
-from shapely.geometry import LineString, Polygon
+from PySide6.QtWidgets import QApplication, QGraphicsPathItem
+from shapely.geometry import LineString, Point, Polygon
 
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.feature import Feature
 from app.domain.raster_layer import RasterLayer
 from app.domain.vector_layer import VectorLayer
+from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.presentation.widgets.map_canvas import MapCanvas
 
 
@@ -173,6 +175,88 @@ def test_canvas_full_extent_uses_relative_margin_for_small_geographic_bounds() -
     mapped_data_rect = canvas.mapFromScene(data_scene_rect).boundingRect()
     height_fill_ratio = mapped_data_rect.height() / canvas.viewport().height()
     assert height_fill_ratio >= 0.9
+
+
+def test_first_sample_data_load_keeps_point_symbols_at_screen_size() -> None:
+    """首次加载小范围经纬度示例数据时，点符号不能放大到覆盖整个画布。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(1680, 900)
+    canvas.show()
+    data_directory = Path(__file__).parents[1] / "sample_data" / "postgis"
+    reader = AutoDataReader()
+    layers = tuple(
+        reader.read(data_directory / filename)
+        for filename in (
+            "management_zones.geojson",
+            "monitoring_sites.geojson",
+            "survey_routes.geojson",
+        )
+    )
+    point_layer = layers[1]
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=tuple(
+                LayerSnapshot(layer=layer, visible=True, selected_feature_ids=())
+                for layer in layers
+            ),
+            active_layer_id=point_layer.layer_id,
+            display_crs=point_layer.crs,
+        )
+    )
+    application.processEvents()
+
+    assert canvas._map_scene_rect is not None
+    point_items = [
+        item
+        for item in canvas.scene().items()
+        if isinstance(item, QGraphicsPathItem) and item.data(0) == point_layer.layer_id
+    ]
+    assert point_items
+    assert max(item.path().boundingRect().width() for item in point_items) < (
+        canvas._map_scene_rect.width() * 0.1
+    )
+
+
+def test_first_small_geographic_point_layer_uses_fitted_view_scale() -> None:
+    """全新画布只加载一个小范围点图层时，也应按适配后的视图计算符号尺寸。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(1680, 900)
+    canvas.show()
+    point_layer = VectorLayer.create(
+        layer_id="small-points",
+        name="小范围点图层",
+        features=(
+            Feature(fid=1, geometry=Point(116.36, 39.98), attributes={}),
+            Feature(fid=2, geometry=Point(116.39, 39.99), attributes={}),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(
+                LayerSnapshot(
+                    layer=point_layer,
+                    visible=True,
+                    selected_feature_ids=(),
+                ),
+            ),
+            active_layer_id=point_layer.layer_id,
+            display_crs=point_layer.crs,
+        )
+    )
+    application.processEvents()
+
+    assert canvas._map_scene_rect is not None
+    point_items = [
+        item
+        for item in canvas.scene().items()
+        if isinstance(item, QGraphicsPathItem) and item.data(0) == point_layer.layer_id
+    ]
+    assert max(item.path().boundingRect().width() for item in point_items) < (
+        canvas._map_scene_rect.width() * 0.1
+    )
 
 
 def test_canvas_extent_keeps_degenerate_bounds_navigable() -> None:

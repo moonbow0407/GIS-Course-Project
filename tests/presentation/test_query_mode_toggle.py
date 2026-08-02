@@ -1,12 +1,13 @@
 """查询模式功能区状态回归测试。"""
 
 import os
+from pathlib import Path
 
 # 必须在导入 Qt 前启用无界面平台，测试才能稳定检查功能区按钮状态。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pyproj import CRS
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 from shapely.geometry import Polygon
@@ -63,6 +64,40 @@ def test_query_ribbon_buttons_support_persistent_checked_state() -> None:
         assert not button.isChecked()
 
     assert qt_application is not None
+
+
+def test_unclicked_point_query_menu_area_does_not_look_selected() -> None:
+    """未点击点选查询时，下拉箭头区域不应单独显示成浅蓝激活块。"""
+    qt_application: QApplication = QApplication.instance() or QApplication([])
+    previous_style = qt_application.styleSheet()
+    style_path = Path(__file__).parents[2] / "app" / "resources" / "styles" / "main.qss"
+    try:
+        qt_application.setStyleSheet(style_path.read_text(encoding="utf-8"))
+        ribbon = RibbonBar()
+        ribbon.resize(1000, 180)
+        ribbon.show()
+        qt_application.processEvents()
+        button = ribbon._checkable_buttons["point_query"]
+        assert not button.isChecked()
+
+        QTest.mouseMove(button, QPoint(button.width() - 3, 8))
+        qt_application.processEvents()
+        image = button.grab().toImage()
+        body_color = image.pixelColor(8, 8)
+        menu_color = image.pixelColor(button.width() - 4, 8)
+
+        assert menu_color == body_color
+
+        button.setChecked(True)
+        qt_application.processEvents()
+        checked_image = button.grab().toImage()
+        checked_body_color = checked_image.pixelColor(8, 8)
+        checked_menu_color = checked_image.pixelColor(button.width() - 4, 8)
+
+        assert checked_body_color.name() == "#dcecf9"
+        assert checked_menu_color == checked_body_color
+    finally:
+        qt_application.setStyleSheet(previous_style)
 
 
 def test_spatial_query_buttons_toggle_and_switch_exclusively() -> None:

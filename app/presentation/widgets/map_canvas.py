@@ -177,6 +177,11 @@ class MapCanvas(QGraphicsView):
         )
         self._map_scene_rect = map_scene_rect
         self._scene.setSceneRect(map_scene_rect)
+        if is_first_load:
+            # 点符号使用屏幕像素定义尺寸；首次加载必须先适配真实数据范围，
+            # 否则这里仍沿用空画布的 1000×700 场景变换，导致小范围经纬度点被巨幅放大。
+            self.fitInView(map_scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
+            self._reset_view_scale()
         viewport_width: int = max(self.viewport().width(), 1)
         viewport_height: int = max(self.viewport().height(), 1)
         # 将屏幕像素尺寸换算为地图单位，使点符号保持稳定的视觉大小。
@@ -197,9 +202,6 @@ class MapCanvas(QGraphicsView):
                     float(z_value),
                     map_units_per_pixel,
                 )
-        if is_first_load:
-            self.fitInView(map_scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
-            self._reset_view_scale()
         self._ensure_pan_area()
         self._build_snap_index(snapshot)
         self._last_snapshot = snapshot
