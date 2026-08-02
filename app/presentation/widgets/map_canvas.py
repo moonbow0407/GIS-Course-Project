@@ -1,10 +1,10 @@
 """基于领域图层快照的地图画布。"""
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QKeyEvent
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QKeyEvent,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -52,6 +52,8 @@ class MapCanvas(QGraphicsView):
     feature_digitized = Signal(BaseGeometry)
     # 顶点编辑提交信号：携带修改后的 Shapely 几何。
     geometry_edited = Signal(BaseGeometry)
+    # 地图工具切换信号：供主窗口同步功能区按钮的持续高亮状态。
+    tool_changed = Signal(str)
 
     def __init__(self, parent: QGraphicsView | None = None) -> None:
         """创建空地图场景和矢量、栅格渲染器。
@@ -148,6 +150,11 @@ class MapCanvas(QGraphicsView):
         is_first_load: bool = self._map_scene_rect is None
 
         self._scene.clear()
+        # scene.clear() 会立即销毁全部 C++ 图元；同步清空 Python 侧临时图元引用，
+        # 否则几何编辑提交后的工具切换会再次 removeItem 并中断查询工具激活。
+        self._vertex_items.clear()
+        self._sketch_items.clear()
+        self._snap_marker = None
         self._empty_overlay.setVisible(not snapshot.layers)
         if not snapshot.layers:
             self._map_scene_rect = None
@@ -230,6 +237,7 @@ class MapCanvas(QGraphicsView):
         self._deactivate_all_tools()
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self._update_cursor()
+        self.tool_changed.emit("pan")
 
     def set_zoom_rect_tool(self) -> None:
         """切换到框选放大模式。
@@ -237,9 +245,11 @@ class MapCanvas(QGraphicsView):
         状态变化:
             关闭 ScrollHandDrag，激活框选标记并将光标改为十字准星。
         """
+        self._deactivate_all_tools()
         self._zoom_rect_active = True
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self.tool_changed.emit("zoom_rect")
 
     def set_point_query_tool(self) -> None:
         """切换到点选查询模式。
@@ -251,6 +261,7 @@ class MapCanvas(QGraphicsView):
         self._point_query_active = True
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self.tool_changed.emit("point_query")
 
     def set_rectangle_query_tool(self) -> None:
         """切换到框选查询模式。
@@ -262,6 +273,7 @@ class MapCanvas(QGraphicsView):
         self._rectangle_query_active = True
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self.tool_changed.emit("rectangle_query")
 
     def set_digitize_point_tool(self) -> None:
         """切换到点要素数字化模式。"""
@@ -269,6 +281,7 @@ class MapCanvas(QGraphicsView):
         self._digitize_mode = "point"
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self.tool_changed.emit("digitize_point")
 
     def set_digitize_line_tool(self) -> None:
         """切换到线要素数字化模式。"""
@@ -276,6 +289,7 @@ class MapCanvas(QGraphicsView):
         self._digitize_mode = "line"
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self.tool_changed.emit("digitize_line")
 
     def set_digitize_polygon_tool(self) -> None:
         """切换到面要素数字化模式。"""
@@ -283,6 +297,7 @@ class MapCanvas(QGraphicsView):
         self._digitize_mode = "polygon"
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self.tool_changed.emit("digitize_polygon")
 
     def set_vertex_edit_tool(
         self, geometry: BaseGeometry, layer_id: str = "", fid: object = None
@@ -322,6 +337,7 @@ class MapCanvas(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setCursor(Qt.CursorShape.CrossCursor)
         self._rebuild_vertex_markers(geometry)
+        self.tool_changed.emit("vertex_edit")
 
     def _rebuild_vertex_markers(self, geometry: BaseGeometry) -> None:
         """原地更新顶点标记位置，不删建以避免视觉闪烁。
@@ -972,12 +988,12 @@ class MapCanvas(QGraphicsView):
 
     def zoom_in(self) -> None:
         """以画布中心为基准将地图视图放大一级。"""
-        center: QPointF = self.viewport().rect().center()
+        center: QPoint = self.viewport().rect().center()
         self._zoom_at_screen_point(center, 1.25)
 
     def zoom_out(self) -> None:
         """以画布中心为基准将地图视图缩小一级。"""
-        center: QPointF = self.viewport().rect().center()
+        center: QPoint = self.viewport().rect().center()
         self._zoom_at_screen_point(center, 0.8)
 
     def _zoom_at_screen_point(self, anchor: QPoint | QPointF, factor: float) -> None:
@@ -1078,23 +1094,19 @@ class MapCanvas(QGraphicsView):
 
         # ── 顶点编辑（拖拽式）──
         if self._vertex_edit_active and self._edit_geometry is not None:
-            click_pt: Point = self._screen_to_map_point(
-                event.position().toPoint()
-            )
-            tol: float = self._map_units_per_pixel * 15.0
+            screen_pos: QPoint = event.position().toPoint()
+            scene_pos: QPointF = self.mapToScene(screen_pos)
+            click_pt: Point = self._screen_to_map_point(screen_pos)
+            tolerance: float = self._map_units_per_pixel * 15.0
 
             if event.button() == Qt.MouseButton.LeftButton:
                 ctrl_held: bool = bool(
-                    QApplication.instance().keyboardModifiers()
+                    QApplication.keyboardModifiers()
                     & Qt.KeyboardModifier.ControlModifier
                 )
-                click_pt2: Point = self._screen_to_map_point(
-                    event.position().toPoint()
-                )
-                tol2: float = self._map_units_per_pixel * 15.0
-                hit_idx: int = self._hit_test_vertex(click_pt2, tol2)
+                hit_idx: int = self._hit_test_vertex(click_pt, tolerance)
                 if hit_idx < 0 and len(self._vertex_coords) >= 2:
-                    hit_idx = self._hit_test_preview_path(click_pt2, tol2 * 2.0)
+                    hit_idx = self._hit_test_preview_path(click_pt, tolerance * 2.0)
 
                 if hit_idx >= 0:
                     if ctrl_held:
@@ -1253,9 +1265,7 @@ class MapCanvas(QGraphicsView):
             # 只在高亮目标变化时重建。
             if hovered != getattr(self, "_hovered_vertex", -1):
                 self._hovered_vertex = hovered
-                self._rebuild_vertex_markers(
-                    self._edit_geometry  # type: ignore[arg-type]
-                )
+                self._rebuild_vertex_markers(self._edit_geometry)
 
         # ── 顶点拖拽（多选全部一起移动）──
         if self._vertex_drag_idx >= 0:
@@ -1276,9 +1286,7 @@ class MapCanvas(QGraphicsView):
                     cx, cy = self._vertex_coords[i]
                     self._vertex_coords[i] = (cx + dx, cy + dy)
             # 重建标记和预览。
-            self._rebuild_vertex_markers(
-                self._edit_geometry  # type: ignore[arg-type]
-            )
+            self._rebuild_vertex_markers(self._edit_geometry)
             self._update_feature_item_path()
             event.accept()
             return
@@ -1301,9 +1309,9 @@ class MapCanvas(QGraphicsView):
                 self._clear_snap_marker()
             self._rebuild_sketch_preview(cursor_pos)
             # 仍更新状态栏坐标。
-            scene_pos: QPointF = self.mapToScene(event.position().toPoint())
+            digitize_scene_pos: QPointF = self.mapToScene(event.position().toPoint())
             self.coordinate_changed.emit(
-                f"坐标  {scene_pos.x():.6f}, {-scene_pos.y():.6f}"
+                f"坐标  {digitize_scene_pos.x():.6f}, {-digitize_scene_pos.y():.6f}"
             )
             event.accept()
             return
@@ -1320,9 +1328,9 @@ class MapCanvas(QGraphicsView):
                 self.verticalScrollBar().value() + delta.y()
             )
             # 平移时同样更新状态栏坐标。
-            scene_pos: QPointF = self.mapToScene(current_pos)
+            pan_scene_pos: QPointF = self.mapToScene(current_pos)
             self.coordinate_changed.emit(
-                f"坐标  {scene_pos.x():.6f}, {-scene_pos.y():.6f}"
+                f"坐标  {pan_scene_pos.x():.6f}, {-pan_scene_pos.y():.6f}"
             )
             event.accept()
             return
@@ -1347,9 +1355,7 @@ class MapCanvas(QGraphicsView):
         if self._vertex_drag_idx >= 0 and event.button() == Qt.MouseButton.LeftButton:
             self._vertex_drag_idx = -1
             self.setCursor(Qt.CursorShape.CrossCursor)
-            self._rebuild_vertex_markers(
-                self._edit_geometry  # type: ignore[arg-type]
-            )
+            self._rebuild_vertex_markers(self._edit_geometry)
             event.accept()
             return
 
@@ -1379,7 +1385,7 @@ class MapCanvas(QGraphicsView):
                     screen_rect
                 )
                 add_to_selection: bool = bool(
-                    QApplication.instance().keyboardModifiers()
+                    QApplication.keyboardModifiers()
                     & Qt.KeyboardModifier.ShiftModifier
                 )
                 self.rectangle_queried.emit(query_polygon, add_to_selection)
@@ -1428,7 +1434,7 @@ class MapCanvas(QGraphicsView):
             and self._vertex_edit_active
         ):
             self._selected_vertex_indices = set(range(len(self._vertex_coords)))
-            self._rebuild_vertex_markers(self._edit_geometry)  # type: ignore[arg-type]
+            self._rebuild_vertex_markers(self._edit_geometry)
             event.accept()
             return
 

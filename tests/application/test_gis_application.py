@@ -6,7 +6,7 @@ import pytest
 from pyproj import CRS
 from shapely.geometry import Point, box
 
-from app.application.errors import NoActiveLayer, VectorReadFailed
+from app.application.errors import DataWriteFailed, NoActiveLayer, VectorReadFailed
 from app.application.gis_application import GisApplication
 from app.application.ports import DataWriter, VectorReader
 from app.application.results import OpenVectorResult, SelectionResult, WorkspaceSnapshot
@@ -205,3 +205,17 @@ def test_export_without_active_layer_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(NoActiveLayer, match="活动图层"):
         application.export_active_layer(tmp_path / "empty.geojson")
+
+
+def test_create_feature_layer_without_writer_is_rejected_cleanly(tmp_path: Path) -> None:
+    """未配置写出端口时，创建要素图层应返回应用错误而不是空对象异常。"""
+    application = GisApplication(data_reader=InMemoryVectorReader(make_layer("unused")))
+    feature = Feature(fid=1, geometry=Point(0, 0), attributes={})
+
+    with pytest.raises(DataWriteFailed, match="写出服务"):
+        application.create_feature_layer(
+            "new-layer",
+            (feature,),
+            CRS.from_epsg(4326),
+            tmp_path / "new-layer.geojson",
+        )

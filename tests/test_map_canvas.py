@@ -9,10 +9,11 @@ import numpy as np
 import pytest
 from affine import Affine
 from pyproj import CRS
-from PySide6.QtCore import QPoint, QRectF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.feature import Feature
@@ -236,3 +237,79 @@ def test_canvas_can_zoom_to_one_layer_extent() -> None:
     assert view_state.center_x == pytest.approx(15.0, abs=0.5)
     assert view_state.center_y == pytest.approx(25.0, abs=0.5)
     assert view_state.zoom_percent > 100.0
+
+
+def test_canvas_queries_recover_after_geometry_edit_refresh() -> None:
+    """几何编辑提交并刷新场景后，点选和框选查询仍应接收左键事件。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    feature = Feature(
+        fid=1,
+        geometry=Polygon([(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)]),
+        attributes={},
+    )
+    layer = VectorLayer.create(
+        layer_id="editable-layer",
+        name="可编辑图层",
+        features=(feature,),
+        crs=CRS.from_epsg(4326),
+    )
+    snapshot = WorkspaceSnapshot(
+        layers=(LayerSnapshot(layer=layer, visible=True, selected_feature_ids=(1,)),),
+        active_layer_id=layer.layer_id,
+        display_crs=layer.crs,
+    )
+    canvas.set_snapshot(snapshot)
+    application.processEvents()
+
+    canvas.set_vertex_edit_tool(feature.geometry, layer.layer_id, feature.fid)
+    # 几何提交会先刷新工作区；刷新会清空场景中的旧顶点标记。
+    canvas.set_snapshot(snapshot)
+    canvas.set_pan_tool()
+
+    queried_points: list[object] = []
+    canvas.point_queried.connect(lambda point, _add: queried_points.append(point))
+    canvas.set_point_query_tool()
+    center = canvas.viewport().rect().center()
+    QTest.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=center)
+
+    queried_rectangles: list[object] = []
+    canvas.rectangle_queried.connect(
+        lambda polygon, _add: queried_rectangles.append(polygon)
+    )
+    canvas.set_rectangle_query_tool()
+    drag_start = QPoint(center.x() - 30, center.y() - 30)
+    drag_end = QPoint(center.x() + 30, center.y() + 30)
+    QTest.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=drag_start)
+    QTest.mouseMove(canvas.viewport(), drag_end, delay=10)
+    QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=drag_end)
+
+    assert len(queried_points) == 1
+    assert len(queried_rectangles) == 1
+
+
+def test_line_vertex_edit_accepts_left_click_on_blank_canvas() -> None:
+    """线顶点编辑时左键点击空白处应只清除顶点选择，不应中断鼠标交互。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    canvas.set_vertex_edit_tool(LineString([(0, 0), (10, 0)]), "line-layer", 1)
+    application.processEvents()
+    blank_position = QPoint(700, 500)
+    event = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(blank_position),
+        QPointF(canvas.viewport().mapToGlobal(blank_position)),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+    canvas.mousePressEvent(event)
+
+    assert event.isAccepted()
+    assert canvas._vertex_edit_active is True
+    assert canvas._vertex_drag_idx == -1

@@ -1,7 +1,7 @@
 """生成 2026-07-30 工作记录 Word 文档。"""
 import datetime
+
 from docx import Document
-from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 doc = Document()
@@ -61,7 +61,7 @@ doc.add_paragraph(
 
 doc.add_heading("3.2 越级拖拽修复", 2)
 doc.add_paragraph(
-    "向下拖拽时中间节点会向上移位填补空档，初版"第一个不同位置"算法"
+    "向下拖拽时中间节点会向上移位填补空档，初版‘第一个不同位置’算法"
     "会误判补位节点为被拖节点。改用最大位移算法：被拖节点跨越所有中间节点，"
     "位移绝对值始终最大，可靠识别上下两个方向的任意距离拖拽。"
 )
@@ -107,7 +107,7 @@ doc.add_paragraph(
     "点击地图画布：MapCanvas.mousePressEvent 发出 canvas_clicked 信号，"
     "MainWindow 调用 clear_layer_selection()。"
     "两种路径均最终调用 _application.clear_active_layer()，"
-    "状态栏显示"当前图层 无"。"
+    "状态栏显示‘当前图层 无’。"
     "新增 MapDocument.clear_active_layer() 和 GisApplication.clear_active_layer() 方法。"
 )
 
@@ -116,7 +116,7 @@ doc.add_paragraph(
     "所有新增代码注释遵循合作者 moonbow0407 的既有风格："
     "每个属性单独一行注释说明用途、"
     "方法 docstring 含参数/状态变化分段、"
-    "行内注释解释"为什么"而非重复代码逻辑、"
+    "行内注释解释‘为什么’而非重复代码逻辑、"
     "中文注释统一以句号结尾。"
     "模块和类 docstring 保持简洁，不堆砌具体功能列表。"
 )

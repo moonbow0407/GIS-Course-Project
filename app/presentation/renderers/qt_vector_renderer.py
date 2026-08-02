@@ -190,13 +190,13 @@ class QtVectorRenderer:
             if original_fill.isValid():
                 # 降到原色的 25% 亮度，几乎黑，确保与周围未选面拉开差距。
                 darkened: QColor = original_fill.darker(300)
-                brush: QBrush = QBrush(darkened)
+                selected_brush: QBrush = QBrush(darkened)
             else:
-                brush = QBrush(Qt.BrushStyle.NoBrush)
+                selected_brush = QBrush(Qt.BrushStyle.NoBrush)
             highlight_pen: QPen = QPen(highlight_color, style.line_width + 4.0)
             highlight_pen.setCosmetic(True)
             item.setPen(highlight_pen)
-            item.setBrush(brush)
+            item.setBrush(selected_brush)
             item.setOpacity(1.0)
 
         # 线要素：亮青粗线，配合光晕在密集线网中突出。

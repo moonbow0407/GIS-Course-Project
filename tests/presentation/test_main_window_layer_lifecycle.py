@@ -11,7 +11,7 @@ from affine import Affine
 from pyproj import CRS
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QTreeWidget, QTreeWidgetItem
+from PySide6.QtWidgets import QApplication, QDialog, QTreeWidget, QTreeWidgetItem
 from shapely.geometry import Point, Polygon
 
 from app.application.gis_application import GisApplication
@@ -22,6 +22,7 @@ from app.domain.vector_layer import VectorLayer
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
 from app.presentation.main_window import MainWindow
+from app.presentation.widgets.attribute_query_dialog import AttributeQueryRequest
 
 
 def test_raster_visibility_can_be_toggled_twice_with_real_mouse_events() -> None:
@@ -115,6 +116,66 @@ def test_workspace_refresh_preserves_zoom_after_buffer_layer_is_added() -> None:
     # QGraphicsView 的滚动条使用整数像素，中心点允许最多约一个屏幕像素的舍入差。
     assert after_refresh.center_x == pytest.approx(before_refresh.center_x, abs=5.0)
     assert after_refresh.center_y == pytest.approx(before_refresh.center_y, abs=5.0)
+    window.close()
+
+
+def test_attribute_query_remains_available_after_geometry_edit_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """提交几何编辑后，属性查询仍应打开并更新要素选择。"""
+    qt_application: QApplication = QApplication.instance() or QApplication([])
+    crs: CRS = CRS.from_epsg(4326)
+    layer: VectorLayer = VectorLayer.create(
+        layer_id="zones",
+        name="管理区",
+        features=(
+            Feature(
+                fid=1,
+                geometry=Polygon([(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)]),
+                attributes={"名称": "甲"},
+            ),
+            Feature(
+                fid=2,
+                geometry=Polygon([(20, 0), (30, 0), (30, 10), (20, 10), (20, 0)]),
+                attributes={"名称": "乙"},
+            ),
+        ),
+        crs=crs,
+    )
+    document: MapDocument = MapDocument()
+    document.add_layer(layer)
+    application = GisApplication(AutoDataReader(), AutoDataWriter(), document)
+    application.set_selection(layer.layer_id, (1,))
+    window: MainWindow = MainWindow()
+    window._application = application
+    window.resize(800, 600)
+    window.show()
+    window._refresh_workspace()
+    qt_application.processEvents()
+
+    class AcceptedAttributeQueryDialog:
+        """为属性查询入口提供确定性的已确认请求。"""
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+        def request(self) -> AttributeQueryRequest:
+            return AttributeQueryRequest("zones", "名称", "=", "乙")
+
+    monkeypatch.setattr(
+        "app.presentation.main_window.AttributeQueryDialog",
+        AcceptedAttributeQueryDialog,
+    )
+
+    window._edit_selected_geometry()
+    window._on_geom_edit_commit()
+    window._attribute_query()
+
+    assert window._application.snapshot().layers[0].selected_feature_ids == (2,)
+    assert window._ready_label.text() == "属性查询：匹配 1 个要素"
     window.close()
 
 

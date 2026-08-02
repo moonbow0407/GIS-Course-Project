@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.application.results import LayerSnapshot
-from app.domain.feature import Feature, FeatureId
+from app.domain.feature import FeatureId
+from app.domain.raster_layer import RasterLayer
 from app.domain.vector_layer import VectorLayer
 
 
@@ -143,7 +144,9 @@ class AttributeTablePanel(QWidget):
 
     def _populate_vector(self, layer_snapshot: LayerSnapshot) -> None:
         """根据矢量要素的字段填充表格。"""
-        layer: VectorLayer = layer_snapshot.layer
+        layer = layer_snapshot.layer
+        if not isinstance(layer, VectorLayer):
+            return
         # 合并全部要素的字段名，保留首次出现顺序。
         fields: list[str] = []
         for feature in layer.features:
@@ -175,6 +178,8 @@ class AttributeTablePanel(QWidget):
     def _populate_raster(self, layer_snapshot: LayerSnapshot) -> None:
         """为栅格图层展示基本影像元数据。"""
         raster_layer = layer_snapshot.layer
+        if not isinstance(raster_layer, RasterLayer):
+            return
         self._table.setColumnCount(2)
         self._table.setHorizontalHeaderLabels(["属性", "值"])
         self._table.setRowCount(3)

@@ -181,6 +181,7 @@ class RibbonBar(QWidget):
         button.setIcon(self._glyph_icon(spec.glyph, spec.color))
         button.setIconSize(QPixmap(34, 34).size())
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        button.setCheckable(spec.checkable)
         if spec.checkable:
             button.setAutoRaise(False)
             self._checkable_buttons[spec.action_id] = button
@@ -188,8 +189,7 @@ class RibbonBar(QWidget):
             button.setAutoRaise(True)
         button.setMinimumWidth(68)
         if spec.children:
-            # 下拉按钮：标题末尾加 ▼ 指示箭头（显示在图标下方），
-            # InstantPopup 使点击任意位置弹出菜单。
+            # 主按钮触发默认操作，右侧箭头打开子菜单选择具体模式。
             button.setText(spec.title)
             button.setToolTip(spec.title)
             menu: QMenu = QMenu(button)
@@ -202,7 +202,10 @@ class RibbonBar(QWidget):
                     lambda checked=False, action_id=child.action_id: self.action_triggered.emit(action_id)
                 )
             button.setMenu(menu)
-            button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+            button.clicked.connect(
+                lambda checked=False, action_id=spec.action_id: self.action_triggered.emit(action_id)
+            )
         else:
             button.setText(spec.title)
             button.setToolTip(spec.title)
@@ -273,9 +276,14 @@ class RibbonBar(QWidget):
                                 RibbonActionSpec("point_query_fast", "快速查询", "⌖", "#0284c7"),
                                 RibbonActionSpec("point_query_precise", "精确查询", "⌖", "#0ea5e9"),
                             ),
+                            checkable=True,
                         ),
-                        RibbonActionSpec("rectangle_query", "框选查询", "□", "#0284c7"),
-                        RibbonActionSpec("attribute_query", "属性查询", "≣", "#7c3aed"),
+                        RibbonActionSpec(
+                            "rectangle_query", "框选查询", "□", "#0284c7", checkable=True
+                        ),
+                        RibbonActionSpec(
+                            "attribute_query", "属性查询", "≣", "#7c3aed", checkable=True
+                        ),
                     )),
                     RibbonGroupSpec("地图", (
                         RibbonActionSpec("clear_selection", "清除选择", "×", "#dc2626"),
@@ -366,7 +374,7 @@ class RibbonBar(QWidget):
         """
         btn: QToolButton | None = self._checkable_buttons.get(action_id)
         if btn is not None:
-            btn.setDown(checked)
+            btn.setChecked(checked)
 
     @classmethod
     def action_title(cls, action_id: str) -> str | None:

@@ -1,6 +1,6 @@
 """真实地图文档对应的图层管理控件。"""
 
-from PySide6.QtCore import QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QModelIndex, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QDropEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -14,6 +14,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from app.application.results import WorkspaceSnapshot
+from app.domain.layer_style import LayerStyle
+from app.domain.raster_layer import RasterLayer
+from app.domain.symbology import GraduatedClass, UniqueValueClass, VectorRendererType
+from app.domain.vector_layer import VectorLayer
 
 
 class _LayerTreeWidget(QTreeWidget):
@@ -32,15 +38,16 @@ class _LayerTreeWidget(QTreeWidget):
         super().mousePressEvent(event)
         if self.itemAt(event.position().toPoint()) is None:
             self.clearSelection()
-            self.setCurrentItem(None)
+            self.setCurrentIndex(QModelIndex())
 
     def dropEvent(self, event: QDropEvent) -> None:
         """记录拖拽前顺序，完成 InternalMove 后比对找出移动节点。"""
         # 拖拽前：记录当前顶层图层 ID 的快照顺序。
-        pre_order: list[str] = [
-            str(self.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole))
-            for i in range(self.topLevelItemCount())
-        ]
+        pre_order: list[str] = []
+        for index in range(self.topLevelItemCount()):
+            item: QTreeWidgetItem | None = self.topLevelItem(index)
+            if item is not None:
+                pre_order.append(str(item.data(0, Qt.ItemDataRole.UserRole)))
         super().dropEvent(event)
         # 延迟比对：确保 QTreeWidget 内部状态完全落定。
         QTimer.singleShot(0, lambda: self._detect_reorder(pre_order))
@@ -52,10 +59,11 @@ class _LayerTreeWidget(QTreeWidget):
         向上拖拽时中间节点向下移位。无论方向，被拖拽节点的位移绝对值
         始终最大——它跨越了所有中间节点。
         """
-        post_order: list[str] = [
-            str(self.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole))
-            for i in range(self.topLevelItemCount())
-        ]
+        post_order: list[str] = []
+        for index in range(self.topLevelItemCount()):
+            item: QTreeWidgetItem | None = self.topLevelItem(index)
+            if item is not None:
+                post_order.append(str(item.data(0, Qt.ItemDataRole.UserRole)))
         if post_order == pre_order:
             return  # 拖到原位，无变化。
         best_item: QTreeWidgetItem | None = None
@@ -71,12 +79,6 @@ class _LayerTreeWidget(QTreeWidget):
                 best_item = self.topLevelItem(i)
         if best_item is not None and best_item.parent() is None:
             self.rows_reordered.emit(best_item)
-
-from app.application.results import WorkspaceSnapshot
-from app.domain.layer_style import LayerStyle
-from app.domain.raster_layer import RasterLayer
-from app.domain.symbology import GraduatedClass, UniqueValueClass, VectorRendererType
-from app.domain.vector_layer import VectorLayer
 
 _CATEGORY_ROLE: int = int(Qt.ItemDataRole.UserRole) + 1
 
@@ -124,7 +126,7 @@ class LayerPanel(QWidget):
     def clear_layer_selection(self) -> None:
         """取消图层树中当前选中节点，触发 selection_cleared 信号。"""
         self._tree.clearSelection()
-        self._tree.setCurrentItem(None)
+        self._tree.setCurrentIndex(QModelIndex())
 
     def apply_snapshot(self, snapshot: WorkspaceSnapshot) -> None:
         """按照工作区快照刷新图层名称、顺序、显隐和活动状态。

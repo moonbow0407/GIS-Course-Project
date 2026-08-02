@@ -260,6 +260,12 @@ QToolButton#ribbonButton:pressed {
     background: #dcecf9;
 }
 
+QToolButton#ribbonButton:checked {
+    border-color: #9cc7eb;
+    background: #dcecf9;
+    color: #0f6cbd;
+}
+
 QLabel#ribbonGroupCaption {
     color: #7b8797;
     font-size: 11px;

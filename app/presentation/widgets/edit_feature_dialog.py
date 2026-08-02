@@ -2,14 +2,12 @@
 
 from collections.abc import Mapping
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
-    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -81,9 +79,9 @@ class EditFeatureDialog(QDialog):
         if not attributes:
             self._add_row("", "")
 
-    def attributes(self) -> dict[str, object]:
+    def attributes(self) -> dict[str, AttributeValue]:
         """返回编辑后的属性字典。"""
-        result: dict[str, object] = {}
+        result: dict[str, AttributeValue] = {}
         for row in range(self._table.rowCount()):
             name_item: QTableWidgetItem | None = self._table.item(row, 0)
             value_item: QTableWidgetItem | None = self._table.item(row, 1)

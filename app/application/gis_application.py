@@ -7,7 +7,8 @@ from time import perf_counter
 from uuid import uuid4
 
 from pyproj import CRS
-from shapely.geometry import Point, Polygon
+from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
+from shapely.geometry.base import BaseGeometry
 
 from app.application.analysis_environment import AnalysisEnvironment
 from app.application.buffer_analysis import (
@@ -64,7 +65,7 @@ from app.application.symbology_service import (
     create_graduated_symbology,
     create_unique_value_symbology,
 )
-from app.domain.feature import Feature, FeatureId
+from app.domain.feature import AttributeValue, Feature, FeatureId
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
@@ -72,14 +73,11 @@ from app.domain.symbology import RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
 
 
-def _chaikin_smooth(geometry: object, iterations: int) -> object:
+def _chaikin_smooth(geometry: BaseGeometry, iterations: int) -> BaseGeometry:
     """Chaikin 角切算法：每轮在每条边的 1/4 和 3/4 处插入新顶点。
 
     对 LineString 和 Polygon 外环逐轮平滑，Multi 几何递归处理。
     """
-    from shapely.geometry import LineString, Polygon
-    from shapely.geometry.base import BaseGeometry
-
     if iterations <= 0:
         return geometry
 
@@ -89,12 +87,8 @@ def _chaikin_smooth(geometry: object, iterations: int) -> object:
     return geom
 
 
-def _chaikin_pass(geometry: object) -> object:
+def _chaikin_pass(geometry: BaseGeometry) -> BaseGeometry:
     """执行单轮 Chaikin 角切。"""
-    from shapely.geometry import LineString, MultiLineString
-    from shapely.geometry import MultiPolygon, Point, Polygon
-    from shapely.geometry.base import BaseGeometry
-
     g: BaseGeometry = geometry
     gtype: str = g.geom_type
 
@@ -114,10 +108,8 @@ def _chaikin_pass(geometry: object) -> object:
     return geometry  # Point, etc. 不做平滑。
 
 
-def _chaikin_line(line: object) -> object:
+def _chaikin_line(line: LineString) -> LineString:
     """对单条线的坐标执行一轮 Chaikin 1/4-3/4 角切。"""
-    from shapely.geometry import LineString
-
     coords: list[tuple[float, float]] = list(line.coords)
     if len(coords) < 2:
         return line
@@ -642,7 +634,7 @@ class GisApplication:
         self,
         layer_name: str,
         features: tuple[Feature, ...],
-        crs: object,
+        crs: CRS | None,
         output_path: Path,
     ) -> WorkspaceSnapshot:
         """用给定要素创建新图层，写入磁盘并加入工作区。
@@ -658,6 +650,8 @@ class GisApplication:
         """
         if not features:
             raise ApplicationError("要素集合不能为空。")
+        if self.data_writer is None:
+            raise DataWriteFailed("空间数据写出服务尚未配置。")
         output_layer: VectorLayer = VectorLayer.create(
             name=layer_name,
             features=features,
@@ -700,7 +694,10 @@ class GisApplication:
         return self.snapshot()
 
     def update_feature_attributes(
-        self, layer_id: str, fid: FeatureId, attributes: dict[str, object]
+        self,
+        layer_id: str,
+        fid: FeatureId,
+        attributes: Mapping[str, AttributeValue],
     ) -> WorkspaceSnapshot:
         """修改指定要素的属性字段并写回磁盘。"""
         layer: SpatialLayer = self._find_layer(layer_id)
@@ -825,6 +822,8 @@ class GisApplication:
         """将图层写回其源文件。"""
         if layer.source_path is None:
             return
+        if self.data_writer is None:
+            raise DataWriteFailed("空间数据写出服务尚未配置。")
         self.data_writer.write(
             layer, layer.source_path, (), layer.source_layer_name
         )
