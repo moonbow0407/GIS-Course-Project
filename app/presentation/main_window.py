@@ -137,11 +137,13 @@ class MainWindow(QMainWindow):
         self._geom_edit_toolbar.cancel_requested.connect(
             self._on_geom_edit_cancel
         )
+        self._geom_edit_toolbar.select_all_requested.connect(
+            self._select_all_vertices
+        )
         # 原始几何缓存：key=(layer_id, fid)，用于线简化/平滑"从原始重算"。
         self._original_geoms: dict[tuple[str, object], object] = {}
-        # 要素拖动累计位移与原始几何。
+        # 要素拖动累计位移。
         self._move_accum: tuple[float, float] = (0.0, 0.0)
-        self._move_original_geom: object = None
         self._create_ui()
         self._connect_signals()
         # Ctrl+Z 撤销最近一次地图修改。
@@ -244,12 +246,6 @@ class MainWindow(QMainWindow):
         )
         self._map_canvas.geometry_edited.connect(
             self._on_geometry_edited
-        )
-        self._map_canvas.feature_moved.connect(
-            self._on_feature_moved
-        )
-        self._map_canvas.feature_drag_ended.connect(
-            self._on_feature_drag_ended
         )
         self._attribute_table_panel.selection_changed.connect(
             self._on_table_selection_changed
@@ -1305,14 +1301,19 @@ class MainWindow(QMainWindow):
         ax, ay = self._move_accum
         lid: str = self._map_canvas._drag_layer_id
         fid: object = self._map_canvas._drag_fid
-        original: object = self._move_original_geom
         self._move_accum = (0.0, 0.0)
-        self._move_original_geom = None
-        if not lid or fid is None or original is None:
+        if not lid or fid is None:
             return
         if ax == 0.0 and ay == 0.0:
             return
-        moved = affinity.translate(original, ax, ay)
+        # 从当前顶点坐标构建有效几何，再施加拖动位移。
+        effective: object | None = self._map_canvas._commit_vertex_edit()
+        if effective is None:
+            return
+        try:
+            moved = affinity.translate(effective, ax, ay)
+        except Exception:
+            return
         before_features = self._get_layer_features(lid)
         try:
             self._application.update_feature_geometry(lid, fid, moved)
@@ -1333,29 +1334,15 @@ class MainWindow(QMainWindow):
                 self._application.replace_layer_features(l, feats)
             ),
         )
+        # 刷新场景并退出编辑（不重入，避免工具栏焦点问题）。
+        self._geom_edit_toolbar.hide()
         self._map_canvas.setUpdatesEnabled(False)
         try:
             self._refresh_workspace()
         finally:
             self._map_canvas.setUpdatesEnabled(True)
-        # 重新进入顶点编辑（工具栏在 _reenter_vertex_edit 中显示）。
-        self._reenter_vertex_edit(lid, fid)
-
-    def _reenter_vertex_edit(self, layer_id: str, fid: object) -> None:
-        """刷新后重新激活顶点编辑并显示工具栏。"""
-        snapshot = self._application.snapshot()
-        for layer in snapshot.layers:
-            if layer.layer_id == layer_id and isinstance(layer.layer, VectorLayer):
-                for f in layer.layer.features:
-                    if f.fid == fid:
-                        self._map_canvas.set_vertex_edit_tool(
-                            f.geometry, layer_id, fid
-                        )
-                        global_pos = self.mapToGlobal(QPointF(10, 10))
-                        self._geom_edit_toolbar.show_at(
-                            int(global_pos.x()), int(global_pos.y())
-                        )
-                        return
+        self._map_canvas.set_pan_tool()
+        self._ready_label.setText(f"要素已平移  FID {fid}")
 
     def _apply_move_translation(self, dx: float, dy: float) -> None:
         """实时平移要素渲染图元（不重建场景，避免卡顿）。"""
@@ -1384,11 +1371,25 @@ class MainWindow(QMainWindow):
                 return layer.layer.features
         return ()
 
+    def _select_all_vertices(self) -> None:
+        """全选所有顶点（Ctrl+A 的工具栏按钮版）。"""
+        canvas = self._map_canvas
+        if canvas._vertex_edit_active:
+            canvas._selected_vertex_indices = set(range(len(canvas._vertex_coords)))
+            canvas._rebuild_vertex_markers(canvas._edit_geometry)
+
     def _on_geom_edit_mode(self, mode: str) -> None:
         """编辑几何模式切换。"""
         self._map_canvas._edit_mode = mode
+        self._geom_edit_toolbar.set_mode(mode)
         if mode == "delete_vertex":
-            self._ready_label.setText("编辑几何：右键点击顶点删除  |  工具栏切换模式")
+            self._ready_label.setText(
+                "编辑几何：点击顶点删除  |  Ctrl+A 全选"
+            )
+        elif mode == "drag_vertex":
+            self._ready_label.setText(
+                "编辑几何：Ctrl+点击多选  |  Ctrl+A 全选  |  拖拽移动"
+            )
 
     def _on_geom_edit_commit(self) -> None:
         """提交几何编辑。"""
@@ -1397,8 +1398,8 @@ class MainWindow(QMainWindow):
             new_geom = self._map_canvas._commit_vertex_edit()
             if new_geom is not None:
                 self._on_geometry_edited(new_geom)
-            else:
-                self._map_canvas.set_pan_tool()
+            # 无论成功失败都退出顶点编辑，避免状态残留。
+            self._map_canvas.set_pan_tool()
 
     def _on_geom_edit_cancel(self) -> None:
         """取消几何编辑。"""

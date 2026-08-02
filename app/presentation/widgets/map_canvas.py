@@ -52,10 +52,6 @@ class MapCanvas(QGraphicsView):
     feature_digitized = Signal(BaseGeometry)
     # 顶点编辑提交信号：携带修改后的 Shapely 几何。
     geometry_edited = Signal(BaseGeometry)
-    # 要素拖动信号：携带位移量 (dx, dy)（地图单位）。
-    feature_moved = Signal(float, float)
-    # 要素拖动结束信号。
-    feature_drag_ended = Signal()
 
     def __init__(self, parent: QGraphicsView | None = None) -> None:
         """创建空地图场景和矢量、栅格渲染器。
@@ -116,12 +112,9 @@ class MapCanvas(QGraphicsView):
         self._hovered_vertex: int = -1
         self._edit_mode: str = "drag_vertex"
         self._vertex_items: list[QGraphicsItem] = []
-        # 要素拖动状态。
-        self._feature_drag_active: bool = False
-        self._feature_drag_start: QPointF | None = None
-        self._drag_layer_id: str = ""
-        self._drag_fid: object = None
-        # 选中要素集合：{(layer_id, fid), ...}，供拖动检测。
+        # 多选顶点：Ctrl+点击切换，Ctrl+A 全选，拖拽时全部一起移动。
+        self._selected_vertex_indices: set[int] = set()
+        # 选中要素集合：{(layer_id, fid), ...}。
         self._selected_fids: set[tuple[str, object]] = set()
         self._scene.setSceneRect(0, 0, 1000, 700)
         self.setScene(self._scene)
@@ -351,8 +344,10 @@ class MapCanvas(QGraphicsView):
                 self._scene.removeItem(item)
         self._vertex_items.clear()
 
-        # 原地更新或创建顶点标记。
+        # 原地更新或创建顶点标记。选中顶点用金色(#FFD700)，未选中用品红。
+        selected_set: set[int] = self._selected_vertex_indices
         for i, (mx, my) in enumerate(coords):
+            color: str = "#FFD700" if i in selected_set else "#FF1493"
             if i < len(items_to_keep):
                 item = items_to_keep[i]
                 if isinstance(item, QGraphicsEllipseItem):
@@ -361,11 +356,11 @@ class MapCanvas(QGraphicsView):
                         mx - marker_size, -my - marker_size,
                         marker_size * 2, marker_size * 2,
                     )
+                    item.setPen(QPen(QColor(color), 2))
+                    item.setBrush(QBrush(QColor(color)))
                     item.update()
             else:
-                item = self._make_marker(
-                    mx, my, "#FF1493", "#FF1493", marker_size
-                )
+                item = self._make_marker(mx, my, color, color, marker_size)
                 item.setData(0, "vertex")
                 item.setData(1, i)
                 item.setZValue(3000)
@@ -513,6 +508,38 @@ class MapCanvas(QGraphicsView):
                 best = i
         return best
 
+    def _hit_test_preview_path(self, point: Point, tolerance: float) -> int:
+        """检测点击是否靠近预览连线，返回最近顶点的索引；无命中返回 -1。"""
+        coords = self._vertex_coords
+        n = len(coords)
+        if n < 2:
+            return -1
+        min_dist: float = tolerance
+        best_idx: int = -1
+        for i in range(n - 1):
+            d = self._point_to_segment_dist(
+                point.x, point.y,
+                coords[i][0], coords[i][1],
+                coords[i + 1][0], coords[i + 1][1],
+            )
+            if d < min_dist:
+                min_dist = d
+                d1 = ((point.x - coords[i][0]) ** 2 + (point.y - coords[i][1]) ** 2) ** 0.5
+                d2 = ((point.x - coords[i + 1][0]) ** 2 + (point.y - coords[i + 1][1]) ** 2) ** 0.5
+                best_idx = i if d1 <= d2 else i + 1
+        return best_idx
+
+    @staticmethod
+    def _point_to_segment_dist(px, py, ax, ay, bx, by) -> float:
+        """计算点到线段 AB 的最短距离。"""
+        dx, dy = bx - ax, by - ay
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq < 1e-20:
+            return ((px - ax) ** 2 + (py - ay) ** 2) ** 0.5
+        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / seg_len_sq))
+        proj_x, proj_y = ax + t * dx, ay + t * dy
+        return ((px - proj_x) ** 2 + (py - proj_y) ** 2) ** 0.5
+
     def _hit_test_extension(self, point: Point, tolerance: float) -> str | None:
         """检测是否点击了线端点延伸标记。返回 'extend_start'/'extend_end'/None。"""
         coords: list[tuple[float, float]] = self._vertex_coords
@@ -601,8 +628,8 @@ class MapCanvas(QGraphicsView):
         self._vertex_drag_idx = -1
         self._vertex_coords.clear()
         self._hovered_vertex = -1
-        self._vertex_coords.clear()
         self._midpoint_coords.clear()
+        self._selected_vertex_indices.clear()
         for item in self._vertex_items:
             self._scene.removeItem(item)
         self._vertex_items.clear()
@@ -1057,72 +1084,63 @@ class MapCanvas(QGraphicsView):
             tol: float = self._map_units_per_pixel * 15.0
 
             if event.button() == Qt.MouseButton.LeftButton:
-                if self._edit_mode != "move_feature":
-                    # 拖拽/删除模式：优先检测顶点。
-                    click_pt2: Point = self._screen_to_map_point(
-                        event.position().toPoint()
-                    )
-                    tol2: float = self._map_units_per_pixel * 15.0
-                    hit_idx: int = self._hit_test_vertex(click_pt2, tol2)
-                    if hit_idx >= 0:
-                        if self._edit_mode == "delete_vertex":
-                            if self._can_delete_vertex(
-                                self._edit_geometry.geom_type,
-                                len(self._vertex_coords),
-                            ):
-                                del self._vertex_coords[hit_idx]
-                                self._hovered_vertex = -1
-                                self._rebuild_vertex_markers(
-                                    self._edit_geometry
-                                )
-                                self._update_feature_item_path()
-                            event.accept()
-                            return
+                ctrl_held: bool = bool(
+                    QApplication.instance().keyboardModifiers()
+                    & Qt.KeyboardModifier.ControlModifier
+                )
+                click_pt2: Point = self._screen_to_map_point(
+                    event.position().toPoint()
+                )
+                tol2: float = self._map_units_per_pixel * 15.0
+                hit_idx: int = self._hit_test_vertex(click_pt2, tol2)
+                if hit_idx < 0 and len(self._vertex_coords) >= 2:
+                    hit_idx = self._hit_test_preview_path(click_pt2, tol2 * 2.0)
+
+                if hit_idx >= 0:
+                    if ctrl_held:
+                        # Ctrl+点击：切换顶点选中状态。
+                        sel: set[int] = self._selected_vertex_indices
+                        if hit_idx in sel:
+                            sel.discard(hit_idx)
                         else:
-                            self._vertex_drag_idx = hit_idx
-                            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-                            event.accept()
-                            return
-                # 未命中顶点（或平移模式）：检查是否点击了要素身体。
-                lid: str = getattr(self, "_edit_layer_id", "")
-                fid: object = getattr(self, "_edit_fid", None)
-                if lid and fid is not None:
-                    body_hit: bool = False
-                    scene_pos3: QPointF = self.mapToScene(
-                        event.position().toPoint()
-                    )
-                    for item in self._scene.items():
-                        if (
-                            isinstance(item, QGraphicsPathItem)
-                            and item.data(0) == lid
-                            and item.data(1) == fid
-                            and item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
-                            and item.contains(scene_pos3)
+                            sel.add(hit_idx)
+                        self._rebuild_vertex_markers(self._edit_geometry)
+                    elif self._edit_mode == "delete_vertex":
+                        if self._can_delete_vertex(
+                            self._edit_geometry.geom_type,
+                            len(self._vertex_coords),
                         ):
-                            body_hit = True
-                            self._feature_drag_active = True
-                            self._feature_drag_start = scene_pos3
-                            self._drag_layer_id = lid
-                            self._drag_fid = fid
-                            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-                            break
-                    if body_hit:
-                        event.accept()
-                        return
-                # 检查延伸标记碰撞。
+                            del self._vertex_coords[hit_idx]
+                            self._selected_vertex_indices.discard(hit_idx)
+                            self._hovered_vertex = -1
+                            self._rebuild_vertex_markers(self._edit_geometry)
+                            self._update_feature_item_path()
+                    else:
+                        # 拖拽模式：命中顶点已在选中集中→保持多选拖拽；
+                        # 否则单选该顶点。
+                        if hit_idx not in self._selected_vertex_indices:
+                            self._selected_vertex_indices.clear()
+                            self._selected_vertex_indices.add(hit_idx)
+                            self._rebuild_vertex_markers(self._edit_geometry)
+                        self._vertex_drag_idx = hit_idx
+                        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                    event.accept()
+                    return
+
+                # 点击空白处清除选中。
+                if not ctrl_held:
+                    self._selected_vertex_indices.clear()
+                    self._rebuild_vertex_markers(self._edit_geometry)
+                # 检查延伸标记。
                 for item in self._vertex_items:
                     tag: str | None = item.data(0)
                     if tag in ("extend_start", "extend_end") and item.contains(
                         scene_pos
                     ):
                         if tag == "extend_start":
-                            self._vertex_coords.insert(
-                                0, (click_pt.x, click_pt.y)
-                            )
+                            self._vertex_coords.insert(0, (click_pt.x, click_pt.y))
                         else:
-                            self._vertex_coords.append(
-                                (click_pt.x, click_pt.y)
-                            )
+                            self._vertex_coords.append((click_pt.x, click_pt.y))
                         self._rebuild_vertex_markers(self._edit_geometry)
                         event.accept()
                         return
@@ -1131,9 +1149,7 @@ class MapCanvas(QGraphicsView):
 
             if event.button() == Qt.MouseButton.RightButton:
                 # 右键删除顶点。
-                scene_pos2: QPointF = self.mapToScene(
-                    event.position().toPoint()
-                )
+                scene_pos2: QPointF = self.mapToScene(event.position().toPoint())
                 for item in self._vertex_items:
                     if item.data(0) == "vertex" and item.contains(scene_pos2):
                         idx: int = item.data(1)
@@ -1142,10 +1158,9 @@ class MapCanvas(QGraphicsView):
                             len(self._vertex_coords),
                         ):
                             del self._vertex_coords[idx]
+                            self._selected_vertex_indices.discard(idx)
                             self._hovered_vertex = -1
-                            self._rebuild_vertex_markers(
-                                self._edit_geometry
-                            )
+                            self._rebuild_vertex_markers(self._edit_geometry)
                         break
                 event.accept()
                 return
@@ -1242,61 +1257,29 @@ class MapCanvas(QGraphicsView):
                     self._edit_geometry  # type: ignore[arg-type]
                 )
 
-        # ── 要素拖动 ──
-        if self._feature_drag_active and self._feature_drag_start is not None:
-            current_pt: QPointF = self.mapToScene(
-                event.position().toPoint()
-            )
-            dx: float = current_pt.x() - self._feature_drag_start.x()
-            dy: float = -(current_pt.y() - self._feature_drag_start.y())
-            self._feature_drag_start = current_pt
-            self.feature_moved.emit(dx, dy)
-            event.accept()
-            return
-
-        # ── 顶点拖拽 ──
+        # ── 顶点拖拽（多选全部一起移动）──
         if self._vertex_drag_idx >= 0:
-            pt: Point = self._screen_to_map_point(
-                event.position().toPoint()
+            pt: Point = self._screen_to_map_point(event.position().toPoint())
+            drag_idx: int = self._vertex_drag_idx
+            old_x: float = self._vertex_coords[drag_idx][0]
+            old_y: float = self._vertex_coords[drag_idx][1]
+            dx: float = pt.x - old_x
+            dy: float = pt.y - old_y
+            # 移动所有选中顶点。
+            move_indices: set[int] = (
+                self._selected_vertex_indices
+                if self._selected_vertex_indices
+                else {drag_idx}
             )
-            idx: int = self._vertex_drag_idx
-            if idx < len(self._vertex_coords):
-                self._vertex_coords[idx] = (pt.x, pt.y)
-            # 直接移动拖拽中的顶点圆和预览连线。
-            ms: float = max(self._map_units_per_pixel * 7.0, 1e-6)
-            moved_vertex: bool = False
-            for item in self._vertex_items:
-                if (
-                    item.data(0) == "vertex"
-                    and item.data(1) == idx
-                    and isinstance(item, QGraphicsEllipseItem)
-                ):
-                    item.prepareGeometryChange()
-                    item.setRect(
-                        pt.x - ms, -pt.y - ms, ms * 2, ms * 2
-                    )
-                    item.update()
-                    moved_vertex = True
-                elif item.data(0) == "hover" and self._hovered_vertex == idx:
-                    item.prepareGeometryChange()
-                    hs = ms * 1.15
-                    item.setRect(
-                        pt.x - hs, -pt.y - hs, hs * 2, hs * 2
-                    )
-                    item.update()
-                elif item.data(0) == "preview" and isinstance(
-                    item, QGraphicsPathItem
-                ):
-                    item.prepareGeometryChange()
-                    item.setPath(self._build_preview_path())
-                    item.update()
-            # 同步更新要素的渲染图元路径。
+            for i in move_indices:
+                if i < len(self._vertex_coords):
+                    cx, cy = self._vertex_coords[i]
+                    self._vertex_coords[i] = (cx + dx, cy + dy)
+            # 重建标记和预览。
+            self._rebuild_vertex_markers(
+                self._edit_geometry  # type: ignore[arg-type]
+            )
             self._update_feature_item_path()
-            # 如果顶点圆不在 items 中，重建全部。
-            if not moved_vertex:
-                self._rebuild_vertex_markers(
-                    self._edit_geometry  # type: ignore[arg-type]
-                )
             event.accept()
             return
 
@@ -1360,15 +1343,6 @@ class MapCanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        # ── 要素拖动释放 ──
-        if self._feature_drag_active and event.button() == Qt.MouseButton.LeftButton:
-            self._feature_drag_active = False
-            self._feature_drag_start = None
-            self._update_cursor()
-            self.feature_drag_ended.emit()
-            event.accept()
-            return
-
         # ── 顶点拖拽释放 ──
         if self._vertex_drag_idx >= 0 and event.button() == Qt.MouseButton.LeftButton:
             self._vertex_drag_idx = -1
@@ -1444,6 +1418,17 @@ class MapCanvas(QGraphicsView):
             if new_geom is not None:
                 self.geometry_edited.emit(new_geom)
             self.set_pan_tool()
+            event.accept()
+            return
+
+        # Ctrl+A：全选所有顶点。
+        if (
+            event.key() == Qt.Key.Key_A
+            and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            and self._vertex_edit_active
+        ):
+            self._selected_vertex_indices = set(range(len(self._vertex_coords)))
+            self._rebuild_vertex_markers(self._edit_geometry)  # type: ignore[arg-type]
             event.accept()
             return
 

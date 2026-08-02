@@ -54,7 +54,7 @@ def test_renderer_creates_selectable_items_for_point_line_and_polygon() -> None:
         for item in items
         if item.flags() & item.GraphicsItemFlag.ItemIsSelectable
     ]
-    assert len(selectable) == 3
+    assert len(selectable) == 0
     polygon_item: QGraphicsPathItem = next(
         item for item in items if isinstance(item, QGraphicsPathItem) and item.data(1) == 3
     )

@@ -78,7 +78,6 @@ class QtVectorRenderer:
             item.setData(1, feature.fid)
             item.setZValue(z_value)
             item.setVisible(snapshot.visible)
-            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
             scene.addItem(item)
             items.append(item)
         return items
