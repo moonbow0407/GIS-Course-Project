@@ -6,6 +6,10 @@ from pathlib import Path
 from PySide6.QtWidgets import QApplication
 
 from app.presentation.main_window import MainWindow
+from app.presentation.widgets.startup_dialog import (
+    StartupDialog,
+    save_recent_project,
+)
 
 
 def load_style(app: QApplication) -> None:
@@ -16,16 +20,26 @@ def load_style(app: QApplication) -> None:
 
 
 def main() -> int:
-    """创建主窗口并进入 Qt 事件循环。"""
-    # QApplication 统一接收系统事件，整个进程只能创建一个实例。
+    """显示启动对话框，然后创建主窗口并进入 Qt 事件循环。"""
     app = QApplication(sys.argv)
     app.setApplicationName("GIS桌面通用平台")
     load_style(app)
 
-    window = MainWindow()
-    window.show()
+    # 启动对话框：可选择历史工程 / 浏览 / 新建空白工程。
+    startup = StartupDialog()
+    if startup.exec() != StartupDialog.DialogCode.Accepted:
+        return 0
 
-    # exec() 会持续处理鼠标、键盘和窗口事件，直到应用退出。
+    if startup.action == "new":
+        window = MainWindow()
+    elif startup.action == "open" and startup.selected_path is not None:
+        if startup.selected_path.exists():
+            save_recent_project(startup.selected_path)
+        window = MainWindow(project_path=startup.selected_path)
+    else:
+        return 0
+
+    window.show()
     return app.exec()
 
 

@@ -83,6 +83,13 @@ class GeoPandasVectorWriter:
                 raise DataWriteFailed(
                     f"图层无法转换为 GeoJSON 所需的 WGS84 坐标：{layer.name}"
                 ) from error
+        # 对于 .shp 覆写，先删除旧文件防止 fiona 写入失败。
+        if suffix == ".shp" and write_mode == "w" and resolved_path.exists():
+            for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
+                companion = resolved_path.with_suffix(ext)
+                if companion.exists():
+                    companion.unlink()
+
         try:
             dataframe.to_file(
                 resolved_path,

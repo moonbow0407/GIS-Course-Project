@@ -54,9 +54,9 @@ class QtVectorRenderer:
             path: QPainterPath = QPainterPath()
             point_size: float = style.point_size * map_units_per_pixel
             selected: bool = feature.fid in snapshot.selected_feature_ids
-            # 选中点要素时大幅放大符号。
+            # 选中点要素时适度放大符号。
             if selected:
-                point_size *= 2.5
+                point_size *= 1.6
             self._append_geometry(path, feature.geometry, point_size)
             if path.isEmpty():
                 continue

@@ -2,19 +2,26 @@
 
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 from pyproj import CRS
 from pyproj.exceptions import CRSError
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QPointF, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
+    QDialogButtonBox,
     QDockWidget,
     QFileDialog,
+    QFormLayout,
+    QGraphicsEllipseItem,
+    QGraphicsPathItem,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QSplitter,
@@ -23,21 +30,32 @@ from PySide6.QtWidgets import (
 
 from app.application.database_service import DatabaseService
 from app.application.errors import ApplicationError
-from app.application.gis_application import GisApplication
+from app.application.gis_application import GisApplication, _chaikin_smooth
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
+from app.domain.feature import Feature
+from app.domain.spatial_layer import SpatialLayer
 from app.domain.symbology import RasterSymbology, VectorSymbology
+from app.domain.vector_layer import VectorLayer
 from app.infrastructure.database.postgis_database_gateway import PostgisDatabaseGateway
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
 from app.infrastructure.project.json_project_store import JsonProjectStore
 from app.presentation.widgets.analysis_history_panel import AnalysisHistoryPanel
+from shapely import affinity
+
 from app.presentation.widgets.attribute_query_dialog import (
     AttributeQueryDialog,
     AttributeQueryRequest,
 )
+from app.presentation.widgets.geometry_edit_toolbar import GeometryEditToolbar
 from app.presentation.widgets.attribute_table import AttributeTablePanel
 from app.presentation.widgets.buffer_analysis_dialog import BufferAnalysisDialog
+from app.presentation.widgets.edit_feature_dialog import EditFeatureDialog
+from app.presentation.widgets.new_feature_dialog import (
+    NewFeatureDialog,
+    NewFeatureRequest,
+)
 from app.presentation.widgets.database_dialogs import (
     DatabaseConnectionDialog,
     DatabaseLayerDialog,
@@ -45,14 +63,22 @@ from app.presentation.widgets.database_dialogs import (
 from app.presentation.widgets.layer_panel import LayerPanel
 from app.presentation.widgets.map_canvas import MapCanvas
 from app.presentation.widgets.ribbon_bar import RibbonBar
+from app.presentation.widgets.startup_dialog import (
+    StartupDialog,
+    save_recent_project,
+)
 from app.presentation.widgets.symbology_panel import SymbologyPanel
 
 
 class MainWindow(QMainWindow):
     """组装功能区、图层面板、地图画布和状态栏的 GIS 工作台。"""
 
-    def __init__(self) -> None:
-        """创建不含任何演示数据的空白 GIS 工作区。"""
+    def __init__(self, project_path: Path | None = None) -> None:
+        """创建 GIS 工作区，可选自动加载指定工程。
+
+        参数:
+            project_path: 启动时自动打开的工程路径；为空则新建空白工程。
+        """
         super().__init__()
         # 应用服务：统一编排空间数据读取和地图文档操作。
         self._data_reader: AutoDataReader = AutoDataReader()
@@ -95,13 +121,43 @@ class MainWindow(QMainWindow):
         self._undo_stack: list[tuple[str, Callable[[], None], Callable[[], None]]] = []
         # 重做栈：撤销后暂存被撤销的操作，新操作执行时清空。
         self._redo_stack: list[tuple[str, Callable[[], None], Callable[[], None]]] = []
+        # 正在编辑几何的要素标识，供顶点编辑回调使用。
+        self._editing_layer_id: str | None = None
+        self._editing_fid: object | None = None
+        # 当前数字化模式：供连续创建后重新激活工具。
+        self._digitize_mode: str = "point"
+        # 捕捉开关：默认关闭。
+        self._snapping_enabled: bool = False
+        # 编辑几何悬浮工具栏。
+        self._geom_edit_toolbar: GeometryEditToolbar = GeometryEditToolbar()
+        self._geom_edit_toolbar.mode_changed.connect(self._on_geom_edit_mode)
+        self._geom_edit_toolbar.commit_requested.connect(
+            self._on_geom_edit_commit
+        )
+        self._geom_edit_toolbar.cancel_requested.connect(
+            self._on_geom_edit_cancel
+        )
+        # 原始几何缓存：key=(layer_id, fid)，用于线简化/平滑"从原始重算"。
+        self._original_geoms: dict[tuple[str, object], object] = {}
+        # 要素拖动累计位移与原始几何。
+        self._move_accum: tuple[float, float] = (0.0, 0.0)
+        self._move_original_geom: object = None
         self._create_ui()
         self._connect_signals()
         # Ctrl+Z 撤销最近一次地图修改。
         QShortcut(QKeySequence.StandardKey.Undo, self, activated=self._undo)
         # Ctrl+Shift+Z 重做最近一次撤销。
         QShortcut(QKeySequence.StandardKey.Redo, self, activated=self._redo)
-        self._refresh_workspace(preserve_view=False)
+        # Delete 删除选中要素（ApplicationShortcut 确保即使在属性表焦点下也生效）。
+        delete_shortcut: QShortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Delete), self, activated=self._delete_selected_features
+        )
+        delete_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+
+        if project_path is not None and project_path.exists():
+            self._open_project_path(project_path)
+        else:
+            self._refresh_workspace(preserve_view=False)
 
     def _create_ui(self) -> None:
         """创建功能区、双栏工作区和多信息状态栏。"""
@@ -183,6 +239,18 @@ class MainWindow(QMainWindow):
         self._map_canvas.canvas_clicked.connect(self._on_canvas_clicked)
         self._map_canvas.point_queried.connect(self._on_point_queried)
         self._map_canvas.rectangle_queried.connect(self._on_rectangle_queried)
+        self._map_canvas.feature_digitized.connect(
+            self._on_feature_digitized
+        )
+        self._map_canvas.geometry_edited.connect(
+            self._on_geometry_edited
+        )
+        self._map_canvas.feature_moved.connect(
+            self._on_feature_moved
+        )
+        self._map_canvas.feature_drag_ended.connect(
+            self._on_feature_drag_ended
+        )
         self._attribute_table_panel.selection_changed.connect(
             self._on_table_selection_changed
         )
@@ -222,6 +290,16 @@ class MainWindow(QMainWindow):
             "buffer_analysis": self._buffer_analysis,
             "analysis_history": self._toggle_analysis_history,
             "toggle_layers": self._toggle_layer_panel,
+            "add_feature": self._add_point_feature,
+            "add_point_feature": self._add_point_feature,
+            "add_line_feature": self._add_line_feature,
+            "add_polygon_feature": self._add_polygon_feature,
+            "delete_feature": self._delete_selected_features,
+            "edit_feature": self._edit_selected_feature,
+            "edit_geometry": self._edit_selected_geometry,
+            "simplify_line": self._simplify_selected,
+            "smooth_line": self._smooth_selected,
+            "toggle_snapping": self._toggle_snapping,
             "point_query": self._point_query,
             "point_query_fast": lambda: self._point_query(fast=True),
             "point_query_precise": lambda: self._point_query(fast=False),
@@ -457,6 +535,26 @@ class MainWindow(QMainWindow):
         self._refresh_workspace(preserve_view=False)
         self._ready_label.setText("已新建空白工程")
 
+    def _open_project_path(self, path: Path) -> None:
+        """直接打开指定工程文件（用于启动对话框）。
+
+        参数:
+            path: 工程文件路径。
+        """
+        try:
+            result = self._application.open_project(path)
+        except ApplicationError as error:
+            QMessageBox.warning(self, "打开工程失败", str(error))
+            self._refresh_workspace(preserve_view=False)
+            return
+        save_recent_project(path)
+        self._refresh_workspace(
+            view_state=result.view_state, preserve_view=False
+        )
+        for warning in result.warnings:
+            self.statusBar().showMessage(warning, 5000)
+        self._ready_label.setText(f"已打开工程  {path.name}")
+
     def _open_project(self) -> None:
         """选择工程文件并恢复其中的图层、结果和分析历史。"""
         path_string: str = QFileDialog.getOpenFileName(
@@ -476,6 +574,7 @@ class MainWindow(QMainWindow):
             return
         self._refresh_workspace(result.view_state)
         self._ready_label.setText(f"已打开工程  {result.path.name}")
+        save_recent_project(Path(path_string))
         if result.warnings:
             self.statusBar().showMessage("；".join(result.warnings), 8000)
 
@@ -503,6 +602,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "保存工程失败", str(error))
             return False
         self._ready_label.setText(f"工程已保存  {result.path.name}")
+        save_recent_project(result.path)
         return True
 
     def _save_project_action(self) -> None:
@@ -864,6 +964,699 @@ class MainWindow(QMainWindow):
             f"属性查询：匹配 {result.count} 个要素"
         )
 
+    def _add_point_feature(self) -> None:
+        """激活点要素数字化工具。"""
+        self._start_digitize("point", "点")
+
+    def _add_line_feature(self) -> None:
+        """激活线要素数字化工具。"""
+        self._start_digitize("line", "线")
+
+    def _add_polygon_feature(self) -> None:
+        """激活面要素数字化工具。"""
+        self._start_digitize("polygon", "面")
+
+    def _start_digitize(self, mode: str, label: str) -> None:
+        """激活数字化工具并更新状态栏。
+
+        参数:
+            mode: "point"/"line"/"polygon"。
+            label: 中文几何类型名。
+        """
+        # 检查当前是否有 CRS。
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        if snapshot.display_crs is None:
+            QMessageBox.information(
+                self,
+                "新增要素",
+                "请先打开一个具有坐标系的图层以确定地图坐标系。",
+            )
+            return
+        self._digitize_mode = mode
+        if mode == "point":
+            self._map_canvas.set_digitize_point_tool()
+        elif mode == "line":
+            self._map_canvas.set_digitize_line_tool()
+        else:
+            self._map_canvas.set_digitize_polygon_tool()
+        self._ready_label.setText(
+            f"数字化{label}：左键放置  |  右键完成  |  Esc 取消"
+        )
+
+    def _on_feature_digitized(self, geometry: object) -> None:
+        """数字化完成回调：弹出属性对话框，创建图层。
+
+        参数:
+            geometry: 用户绘制的 Shapely 几何对象。
+        """
+        geom_type: str = geometry.geom_type
+        if geom_type == "Point":
+            label: str = "点"
+        elif geom_type == "LineString":
+            label = "线"
+        elif geom_type == "Polygon":
+            label = "面"
+        else:
+            label = "要素"
+
+        # 构造要素（空属性，后续可通过修改属性填充）。
+        fid: int = 0
+        feature: Feature = Feature(
+            fid=fid, geometry=geometry, attributes={}
+        )
+        # 自动生成图层名称和输出路径。
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        ts: str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        layer_name: str = f"新建{label}_{ts}"
+        output_path: Path = Path.home() / f"{layer_name}.geojson"
+        try:
+            result_snap = self._application.create_feature_layer(
+                layer_name=layer_name,
+                features=(feature,),
+                crs=snapshot.display_crs,
+                output_path=output_path,
+            )
+        except ApplicationError as error:
+            QMessageBox.warning(self, "创建要素失败", str(error))
+            return
+        # 记录新建图层的 ID，用于撤销。
+        new_layer_id: str | None = None
+        for layer in result_snap.layers:
+            if layer.name == layer_name:
+                new_layer_id = layer.layer_id
+                break
+        if new_layer_id is not None:
+            self._push_undo(
+                f"新建{label}要素",
+                undo_action=lambda lid=new_layer_id: (
+                    self._application.remove_layer(lid)
+                ),
+                redo_action=lambda lid=new_layer_id, ln=layer_name, fp=output_path, feats=(feature,), crs=snapshot.display_crs: (
+                    self._application.create_feature_layer(ln, feats, crs, fp)
+                ),
+            )
+        self._refresh_workspace()
+        # 保持数字化工具激活，支持连续创建。
+        if self._digitize_mode == "point":
+            self._map_canvas.set_digitize_point_tool()
+        elif self._digitize_mode == "line":
+            self._map_canvas.set_digitize_line_tool()
+        else:
+            self._map_canvas.set_digitize_polygon_tool()
+        self._ready_label.setText(
+            f"已创建{label}要素 → {layer_name}"
+        )
+
+    def _delete_selected_features(self) -> None:
+        """删除当前所有选中的要素，删除前弹出确认。
+
+        撤销操作会完整恢复被删要素的几何和属性。
+        """
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        # 收集待删要素的完整信息，用于撤销恢复。
+        to_delete: list[tuple[str, object, Feature]] = []
+        for layer in snapshot.layers:
+            if not isinstance(layer.layer, VectorLayer):
+                continue
+            for feature in layer.layer.features:
+                if feature.fid in layer.selected_feature_ids:
+                    to_delete.append(
+                        (layer.layer_id, feature.fid, feature)
+                    )
+        if not to_delete:
+            QMessageBox.information(
+                self, "删除要素",
+                "当前没有选中的要素。\n请先使用点选/框选查询选中一个要素。",
+            )
+            return
+        count: int = len(to_delete)
+        answer = QMessageBox.question(
+            self,
+            "删除要素",
+            f"确定删除选中的 {count} 个要素吗？\n此操作可撤销（Ctrl+Z）。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        # 记录每个被影响图层删前/删后的完整要素列表用于撤销。
+        affected: dict[str, tuple[tuple[Feature, ...], tuple[Feature, ...]]] = {}
+        for layer_id, fid, _feature in to_delete:
+            if layer_id in affected:
+                continue
+            for layer in snapshot.layers:
+                if layer.layer_id == layer_id and isinstance(
+                    layer.layer, VectorLayer
+                ):
+                    before: tuple[Feature, ...] = layer.layer.features
+                    after: tuple[Feature, ...] = tuple(
+                        f for f in before if f.fid != fid
+                    )
+                    affected[layer_id] = (before, after)
+                    break
+
+        try:
+            for layer_id, fid, _feature in to_delete:
+                self._application.delete_feature(layer_id, fid)
+        except ApplicationError as error:
+            QMessageBox.warning(self, "删除失败", str(error))
+            return
+
+        self._push_undo(
+            "删除要素",
+            undo_action=lambda aff=dict(affected): self._restore_layer_features(aff, undo=True),
+            redo_action=lambda aff=dict(affected): self._restore_layer_features(aff, undo=False),
+        )
+        self._refresh_workspace()
+        self._ready_label.setText(f"已删除 {count} 个要素")
+
+    def _restore_layer_features(
+        self,
+        affected: dict[str, tuple[tuple[Feature, ...], tuple[Feature, ...]]],
+        undo: bool,
+    ) -> None:
+        """撤销/重做时恢复图层要素。
+
+        参数:
+            affected: {layer_id: (before_features, after_features)}。
+            undo: True 时恢复删除前状态，False 时恢复删除后状态。
+        """
+        for layer_id, (before_features, after_features) in affected.items():
+            features: tuple[Feature, ...] = (
+                before_features if undo else after_features
+            )
+            try:
+                self._application.replace_layer_features(layer_id, features)
+            except ApplicationError:
+                continue
+
+    def _edit_selected_feature(self) -> None:
+        """编辑当前选中要素的属性（仅支持单选）。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        if snapshot.selection_count == 0:
+            self.statusBar().showMessage("请先选中一个要素。", 3500)
+            return
+        if snapshot.selection_count > 1:
+            QMessageBox.information(
+                self, "修改要素", "请只选中一个要素进行属性修改。"
+            )
+            return
+        # 找到选中的要素。
+        selected_layer_id: str | None = None
+        selected_fid: object | None = None
+        selected_attrs = None
+        for layer in snapshot.layers:
+            if layer.selected_feature_ids:
+                selected_layer_id = layer.layer_id
+                selected_fid = layer.selected_feature_ids[0]
+                if isinstance(layer.layer, VectorLayer):
+                    for f in layer.layer.features:
+                        if f.fid == selected_fid:
+                            selected_attrs = f.attributes
+                            break
+                break
+        if selected_layer_id is None or selected_fid is None or selected_attrs is None:
+            return
+        label: str = f"FID {selected_fid}"
+        dialog: EditFeatureDialog = EditFeatureDialog(selected_attrs, label, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_attrs: dict[str, object] = dialog.attributes()
+        # 捕获修前/修后完整要素集合用于撤销。
+        before_features: tuple[Feature, ...] = ()
+        for layer in snapshot.layers:
+            if layer.layer_id == selected_layer_id and isinstance(
+                layer.layer, VectorLayer
+            ):
+                before_features = layer.layer.features
+                break
+        try:
+            self._application.update_feature_attributes(
+                selected_layer_id, selected_fid, new_attrs
+            )
+        except ApplicationError as error:
+            QMessageBox.warning(self, "修改属性失败", str(error))
+            return
+        after_snapshot = self._application.snapshot()
+        after_features: tuple[Feature, ...] = ()
+        for layer in after_snapshot.layers:
+            if layer.layer_id == selected_layer_id and isinstance(
+                layer.layer, VectorLayer
+            ):
+                after_features = layer.layer.features
+                break
+        self._push_undo(
+            "修改要素属性",
+            undo_action=lambda lid=selected_layer_id, feats=before_features: (
+                self._application.replace_layer_features(lid, feats)
+            ),
+            redo_action=lambda lid=selected_layer_id, feats=after_features: (
+                self._application.replace_layer_features(lid, feats)
+            ),
+        )
+        self._refresh_workspace()
+        self._ready_label.setText(
+            f"已修改要素属性  FID {selected_fid}"
+        )
+
+    def _edit_selected_geometry(self) -> None:
+        """激活顶点编辑工具，修改选中要素的几何。
+
+        先使用点选查询选中一个要素，再点击本按钮进入顶点编辑模式。
+        """
+        self._ready_label.setText("编辑几何：检查选中状态…")
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        if snapshot.selection_count == 0:
+            QMessageBox.information(
+                self, "编辑几何",
+                "当前没有选中的要素。\n\n请先点击功能区 地图→点选查询，"
+                "在地图上点击一个要素将其选中（高亮），\n"
+                "然后再点击 编辑→编辑几何。",
+            )
+            self._ready_label.setText("就绪")
+            return
+        if snapshot.selection_count > 1:
+            QMessageBox.information(
+                self, "编辑几何", "请只选中一个要素进行几何编辑。\n"
+                "当前选中了多个要素，请先清除选择后重新选取。"
+            )
+            self._ready_label.setText("就绪")
+            return
+        for layer in snapshot.layers:
+            if not layer.selected_feature_ids:
+                continue
+            if not isinstance(layer.layer, VectorLayer):
+                continue
+            fid = layer.selected_feature_ids[0]
+            for f in layer.layer.features:
+                if f.fid == fid:
+                    self._editing_layer_id = layer.layer_id
+                    self._editing_fid = fid
+                    self._editing_before_features: tuple[Feature, ...] = (
+                        layer.layer.features
+                    )
+                    self._map_canvas.set_vertex_edit_tool(
+                        f.geometry, layer.layer_id, fid
+                    )
+                    # 显示编辑工具栏（主窗口左上角）。
+                    global_pos = self.mapToGlobal(QPointF(10, 10))
+                    self._geom_edit_toolbar.show_at(
+                        int(global_pos.x()), int(global_pos.y())
+                    )
+                    geom_type: str = f.geometry.geom_type
+                    coords_count: int = 0
+                    try:
+                        if geom_type == "Point":
+                            coords_count = 1
+                        elif geom_type == "LineString":
+                            coords_count = len(f.geometry.coords)
+                        elif geom_type == "Polygon":
+                            coords_count = len(f.geometry.exterior.coords) - 1
+                        elif hasattr(f.geometry, "geoms") and f.geometry.geoms:
+                            # Multi 类型显示首个部件顶点数。
+                            first = f.geometry.geoms[0]
+                            coords_count = (
+                                1 if first.geom_type == "Point"
+                                else len(first.coords) if first.geom_type == "LineString"
+                                else len(first.exterior.coords) - 1
+                            )
+                    except Exception:
+                        pass
+                    self._ready_label.setText(
+                        f"顶点编辑：{geom_type} · {coords_count} 个顶点  "
+                        "|  拖拽移动  |  右键删除  |  点中点插入  "
+                        "|  Enter 提交  |  Esc 取消"
+                    )
+                    return
+        self.statusBar().showMessage("未找到选中要素。", 3500)
+
+    def _on_feature_moved(self, dx: float, dy: float) -> None:
+        """要素拖动中：累加总位移，每次只移动增量。"""
+        ax, ay = self._move_accum
+        ax += dx
+        ay += dy
+        self._move_accum = (ax, ay)
+        # 只移动增量，不是总量，避免累加飞跑。
+        self._apply_move_translation(dx, dy)
+
+    def _on_feature_drag_ended(self) -> None:
+        """要素拖动结束：写入最终几何并记录撤销。"""
+        ax, ay = self._move_accum
+        lid: str = self._map_canvas._drag_layer_id
+        fid: object = self._map_canvas._drag_fid
+        original: object = self._move_original_geom
+        self._move_accum = (0.0, 0.0)
+        self._move_original_geom = None
+        if not lid or fid is None or original is None:
+            return
+        if ax == 0.0 and ay == 0.0:
+            return
+        moved = affinity.translate(original, ax, ay)
+        before_features = self._get_layer_features(lid)
+        try:
+            self._application.update_feature_geometry(lid, fid, moved)
+        except ApplicationError:
+            return
+        after_snapshot = self._application.snapshot()
+        after_features: tuple[Feature, ...] = ()
+        for layer in after_snapshot.layers:
+            if layer.layer_id == lid and isinstance(layer.layer, VectorLayer):
+                after_features = layer.layer.features
+                break
+        self._push_undo(
+            "移动要素",
+            undo_action=lambda l=lid, feats=before_features: (
+                self._application.replace_layer_features(l, feats)
+            ),
+            redo_action=lambda l=lid, feats=after_features: (
+                self._application.replace_layer_features(l, feats)
+            ),
+        )
+        self._map_canvas.setUpdatesEnabled(False)
+        try:
+            self._refresh_workspace()
+        finally:
+            self._map_canvas.setUpdatesEnabled(True)
+        # 重新进入顶点编辑（工具栏在 _reenter_vertex_edit 中显示）。
+        self._reenter_vertex_edit(lid, fid)
+
+    def _reenter_vertex_edit(self, layer_id: str, fid: object) -> None:
+        """刷新后重新激活顶点编辑并显示工具栏。"""
+        snapshot = self._application.snapshot()
+        for layer in snapshot.layers:
+            if layer.layer_id == layer_id and isinstance(layer.layer, VectorLayer):
+                for f in layer.layer.features:
+                    if f.fid == fid:
+                        self._map_canvas.set_vertex_edit_tool(
+                            f.geometry, layer_id, fid
+                        )
+                        global_pos = self.mapToGlobal(QPointF(10, 10))
+                        self._geom_edit_toolbar.show_at(
+                            int(global_pos.x()), int(global_pos.y())
+                        )
+                        return
+
+    def _apply_move_translation(self, dx: float, dy: float) -> None:
+        """实时平移要素渲染图元（不重建场景，避免卡顿）。"""
+        lid: str = self._map_canvas._drag_layer_id
+        fid: object = self._map_canvas._drag_fid
+        if not lid or fid is None:
+            return
+        # 直接移动场景中的图元，极快。
+        scene_dx: float = dx
+        scene_dy: float = -dy  # 场景 Y 轴反向。
+        for item in self._map_canvas.scene().items():
+            if (
+                isinstance(item, QGraphicsPathItem)
+                and item.data(0) == lid
+                and item.data(1) == fid
+            ):
+                item.moveBy(scene_dx, scene_dy)
+        # 同步移动顶点标记。
+        for item in self._map_canvas._vertex_items:
+            item.moveBy(scene_dx, scene_dy)
+
+    def _get_layer_features(self, layer_id: str) -> tuple[Feature, ...]:
+        """获取指定图层的当前要素集合。"""
+        for layer in self._application.snapshot().layers:
+            if layer.layer_id == layer_id and isinstance(layer.layer, VectorLayer):
+                return layer.layer.features
+        return ()
+
+    def _on_geom_edit_mode(self, mode: str) -> None:
+        """编辑几何模式切换。"""
+        self._map_canvas._edit_mode = mode
+        if mode == "delete_vertex":
+            self._ready_label.setText("编辑几何：右键点击顶点删除  |  工具栏切换模式")
+
+    def _on_geom_edit_commit(self) -> None:
+        """提交几何编辑。"""
+        self._geom_edit_toolbar.hide()
+        if self._map_canvas._vertex_edit_active:
+            new_geom = self._map_canvas._commit_vertex_edit()
+            if new_geom is not None:
+                self._on_geometry_edited(new_geom)
+            else:
+                self._map_canvas.set_pan_tool()
+
+    def _on_geom_edit_cancel(self) -> None:
+        """取消几何编辑。"""
+        self._geom_edit_toolbar.hide()
+        self._map_canvas.set_pan_tool()
+        self._ready_label.setText("编辑几何：已取消")
+
+    def _toggle_snapping(self) -> None:
+        """切换顶点捕捉开关。"""
+        self._snapping_enabled = not self._snapping_enabled
+        self._map_canvas.set_snapping(self._snapping_enabled)
+        self._ribbon.set_action_checked(
+            "toggle_snapping", self._snapping_enabled
+        )
+        state: str = "开" if self._snapping_enabled else "关"
+        self._ready_label.setText(f"顶点捕捉：{state}")
+
+    def _get_single_selected(self) -> tuple[str | None, object | None, tuple[Feature, ...]]:
+        """获取当前单选要素的图层ID、FID和所在图层的完整要素快照。
+
+        返回:
+            (layer_id, fid, before_features)；未选中或多选时返回 (None, None, ())。
+        """
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        if snapshot.selection_count != 1:
+            return None, None, ()
+        for layer in snapshot.layers:
+            if not layer.selected_feature_ids or not isinstance(
+                layer.layer, VectorLayer
+            ):
+                continue
+            fid = layer.selected_feature_ids[0]
+            return layer.layer_id, fid, layer.layer.features
+        return None, None, ()
+
+    def _simplify_selected(self) -> None:
+        """对选中线要素执行 Douglas-Peucker 简化。"""
+        layer_id, fid, before_features = self._get_single_selected()
+        if layer_id is None or fid is None:
+            QMessageBox.information(
+                self, "线简化", "请先选中一个线或面要素。"
+            )
+            return
+        # 缓存真原始几何（首次操作时从图层读取）。
+        cache_key: tuple[str, object] = (layer_id, fid)
+        if cache_key not in self._original_geoms:
+            for f in before_features:
+                if f.fid == fid:
+                    self._original_geoms[cache_key] = f.geometry
+                    break
+
+        # 自动推荐容差：5 像素宽度对应的地图单位。
+        mpp: float = self._map_canvas.map_units_per_pixel
+        auto_tol: float = mpp * 5.0
+        # 获取地图单位名称。
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        unit: str = self._crs_unit_name(snapshot.display_crs)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("线简化")
+        layout: QFormLayout = QFormLayout(dialog)
+        tol_edit: QLineEdit = QLineEdit(f"{auto_tol:.6f}")
+        layout.addRow(f"容差（{unit}，越大顶点越少）：", tol_edit)
+        from_original_cb: QCheckBox = QCheckBox("从原始几何重算")
+        layout.addRow(from_original_cb)
+        buttons: QDialogButtonBox = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            tolerance: float = float(tol_edit.text().strip())
+        except ValueError:
+            QMessageBox.warning(self, "线简化", "请输入有效的数值。")
+            return
+
+        try:
+            if from_original_cb.isChecked():
+                true_orig = self._original_geoms.get(cache_key)
+                if true_orig is not None:
+                    simplified = true_orig.simplify(
+                        tolerance, preserve_topology=True
+                    )
+                    self._application.update_feature_geometry(
+                        layer_id, fid, simplified
+                    )
+            else:
+                self._application.simplify_feature_geometry(
+                    layer_id, fid, tolerance
+                )
+        except ApplicationError as error:
+            QMessageBox.warning(self, "线简化失败", str(error))
+            return
+        after_snapshot = self._application.snapshot()
+        after_features: tuple[Feature, ...] = ()
+        for layer in after_snapshot.layers:
+            if layer.layer_id == layer_id and isinstance(layer.layer, VectorLayer):
+                after_features = layer.layer.features
+                break
+        simp_before: int = sum(
+            len(f.geometry.coords) for f in before_features if f.fid == fid
+        )
+        simp_after: int = sum(
+            len(f.geometry.coords) for f in after_features if f.fid == fid
+        )
+        self._push_undo(
+            "线简化",
+            undo_action=lambda lid=layer_id, feats=before_features: (
+                self._application.replace_layer_features(lid, feats)
+            ),
+            redo_action=lambda lid=layer_id, feats=after_features: (
+                self._application.replace_layer_features(lid, feats)
+            ),
+        )
+        self._map_canvas.setUpdatesEnabled(False)
+        try:
+            self._refresh_workspace()
+        finally:
+            self._map_canvas.setUpdatesEnabled(True)
+        self._ready_label.setText(
+            f"线简化完成  顶点 {simp_before} → {simp_after}"
+            f"（容差 {tolerance}）"
+        )
+
+    def _smooth_selected(self) -> None:
+        """对选中线要素执行 Chaikin 平滑。"""
+        layer_id, fid, before_features = self._get_single_selected()
+        if layer_id is None or fid is None:
+            QMessageBox.information(
+                self, "线平滑", "请先选中一个线或面要素。"
+            )
+            return
+        # 缓存真原始几何。
+        cache_key: tuple[str, object] = (layer_id, fid)
+        if cache_key not in self._original_geoms:
+            for f in before_features:
+                if f.fid == fid:
+                    self._original_geoms[cache_key] = f.geometry
+                    break
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("线平滑")
+        layout: QFormLayout = QFormLayout(dialog)
+        iter_edit: QLineEdit = QLineEdit("2")
+        layout.addRow("迭代次数（1-5）：", iter_edit)
+        from_original_cb: QCheckBox = QCheckBox("从原始几何重算（忽略之前平滑结果）")
+        layout.addRow(from_original_cb)
+        buttons: QDialogButtonBox = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            iterations: int = int(iter_edit.text().strip())
+            if not 1 <= iterations <= 5:
+                raise ValueError
+        except ValueError:
+            QMessageBox.warning(self, "线平滑", "请输入 1-5 之间的整数。")
+            return
+
+        try:
+            if from_original_cb.isChecked():
+                true_orig = self._original_geoms.get(cache_key)
+                if true_orig is not None:
+                    self._application.update_feature_geometry(
+                        layer_id, fid,
+                        _chaikin_smooth(true_orig, iterations),
+                    )
+            else:
+                self._application.smooth_feature_geometry(
+                    layer_id, fid, iterations
+                )
+        except ApplicationError as error:
+            QMessageBox.warning(self, "线平滑失败", str(error))
+            return
+        after_snapshot = self._application.snapshot()
+        after_features: tuple[Feature, ...] = ()
+        for layer in after_snapshot.layers:
+            if layer.layer_id == layer_id and isinstance(layer.layer, VectorLayer):
+                after_features = layer.layer.features
+                break
+        before_count: int = sum(
+            len(f.geometry.coords) for f in before_features if f.fid == fid
+        )
+        after_count: int = sum(
+            len(f.geometry.coords) for f in after_features if f.fid == fid
+        )
+        self._push_undo(
+            "线平滑",
+            undo_action=lambda lid=layer_id, feats=before_features: (
+                self._application.replace_layer_features(lid, feats)
+            ),
+            redo_action=lambda lid=layer_id, feats=after_features: (
+                self._application.replace_layer_features(lid, feats)
+            ),
+        )
+        self._map_canvas.setUpdatesEnabled(False)
+        try:
+            self._refresh_workspace()
+        finally:
+            self._map_canvas.setUpdatesEnabled(True)
+        self._ready_label.setText(
+            f"线平滑完成  顶点 {before_count} → {after_count}"
+            f"（{iterations} 轮）"
+        )
+
+    def _on_geometry_edited(self, geometry: object) -> None:
+        """顶点编辑提交回调：更新要素几何并记录可撤销状态。"""
+        layer_id: str | None = self._editing_layer_id
+        fid: object | None = self._editing_fid
+        before_features: tuple[Feature, ...] = getattr(
+            self, "_editing_before_features", ()
+        )
+        self._editing_layer_id = None
+        self._editing_fid = None
+        if layer_id is None or fid is None:
+            return
+        try:
+            self._application.update_feature_geometry(
+                layer_id, fid, geometry
+            )
+        except ApplicationError as error:
+            QMessageBox.warning(self, "修改几何失败", str(error))
+            return
+        after_snapshot = self._application.snapshot()
+        after_features: tuple[Feature, ...] = ()
+        for layer in after_snapshot.layers:
+            if layer.layer_id == layer_id and isinstance(
+                layer.layer, VectorLayer
+            ):
+                after_features = layer.layer.features
+                break
+        self._push_undo(
+            "修改要素几何",
+            undo_action=lambda lid=layer_id, feats=before_features: (
+                self._application.replace_layer_features(lid, feats)
+            ),
+            redo_action=lambda lid=layer_id, feats=after_features: (
+                self._application.replace_layer_features(lid, feats)
+            ),
+        )
+        self._map_canvas.setUpdatesEnabled(False)
+        try:
+            self._refresh_workspace()
+        finally:
+            self._map_canvas.setUpdatesEnabled(True)
+        self._ready_label.setText(
+            f"已修改要素几何  FID {fid}"
+        )
+
     def _on_point_queried(self, point: object, add_to_selection: bool) -> None:
         """点选查询结果处理。
 
@@ -940,7 +1733,12 @@ class MainWindow(QMainWindow):
             return
         after_selections: dict[str, tuple] = self._capture_selections()
         self._push_selection_undo(description, before_selections, after_selections)
-        self._refresh_workspace()
+        # 关掉刷新避免场景清空→重建的闪烁。
+        self._map_canvas.setUpdatesEnabled(False)
+        try:
+            self._refresh_workspace()
+        finally:
+            self._map_canvas.setUpdatesEnabled(True)
         # 保持查询工具激活，支持连续点选。
         self._map_canvas.set_point_query_tool()
         action: str = "切换" if add_to_selection else "选中"
@@ -990,8 +1788,13 @@ class MainWindow(QMainWindow):
             return
         after_selections: dict[str, tuple] = self._capture_selections()
         self._push_selection_undo("框选查询", before_selections, after_selections)
-        self._refresh_workspace()
-        self._map_canvas.set_pan_tool()
+        self._map_canvas.setUpdatesEnabled(False)
+        try:
+            self._refresh_workspace()
+        finally:
+            self._map_canvas.setUpdatesEnabled(True)
+        # 保持框选查询工具激活，支持连续框选。
+        self._map_canvas.set_rectangle_query_tool()
         self._ready_label.setText(
             f"框选查询：选中 {result.count} 个要素"
         )
@@ -1318,6 +2121,20 @@ class MainWindow(QMainWindow):
             event.accept()
         else:
             event.ignore()
+
+    @staticmethod
+    def _crs_unit_name(crs: CRS | None) -> str:
+        """获取 CRS 的单位名称。"""
+        if crs is None:
+            return "地图单位"
+        if crs.is_geographic:
+            return "度"
+        unit_name: str = crs.axis_info[0].unit_name if crs.axis_info else ""
+        if unit_name == "metre":
+            return "米"
+        if unit_name:
+            return unit_name
+        return "地图单位"
 
     @staticmethod
     def _format_crs(crs: CRS | None) -> str:

@@ -39,6 +39,8 @@ class RibbonActionSpec:
 
     # 下拉子项：非空时按钮渲染为带菜单的下拉按钮。
     children: tuple["RibbonActionSpec", ...] = ()
+    # 可切换状态：为 True 时按钮表现为可按下/弹起的开关。
+    checkable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +75,8 @@ class RibbonBar(QWidget):
         self._tabs: QTabBar = QTabBar()
         # 页面容器：保存当前标签页对应的操作分组。
         self._pages: QStackedWidget = QStackedWidget()
+        # 可切换按钮引用：按 action_id 索引，供外部设置勾选状态。
+        self._checkable_buttons: dict[str, QToolButton] = {}
         self._create_ui()
 
     def _create_ui(self) -> None:
@@ -174,18 +178,20 @@ class RibbonBar(QWidget):
         """
         button: QToolButton = QToolButton()
         button.setObjectName("ribbonButton")
-        button.setText(spec.title)
         button.setIcon(self._glyph_icon(spec.glyph, spec.color))
         button.setIconSize(QPixmap(34, 34).size())
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        button.setAutoRaise(True)
+        if spec.checkable:
+            button.setAutoRaise(False)
+            self._checkable_buttons[spec.action_id] = button
+        else:
+            button.setAutoRaise(True)
         button.setMinimumWidth(68)
-        button.setToolTip(spec.title)
         if spec.children:
-            # 下拉按钮：主点击触发父操作，下拉菜单选择子操作。
-            button.clicked.connect(
-                lambda checked=False, action_id=spec.action_id: self.action_triggered.emit(action_id)
-            )
+            # 下拉按钮：标题末尾加 ▼ 指示箭头（显示在图标下方），
+            # InstantPopup 使点击任意位置弹出菜单。
+            button.setText(spec.title)
+            button.setToolTip(spec.title)
             menu: QMenu = QMenu(button)
             child: RibbonActionSpec
             for child in spec.children:
@@ -196,8 +202,10 @@ class RibbonBar(QWidget):
                     lambda checked=False, action_id=child.action_id: self.action_triggered.emit(action_id)
                 )
             button.setMenu(menu)
-            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+            button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         else:
+            button.setText(spec.title)
+            button.setToolTip(spec.title)
             # 默认参数在创建按钮时固定编号，避免循环结束后所有按钮指向同一操作。
             button.clicked.connect(
                 lambda checked=False, action_id=spec.action_id: self.action_triggered.emit(action_id)
@@ -279,8 +287,19 @@ class RibbonBar(QWidget):
                 "编辑",
                 (
                     RibbonGroupSpec("要素编辑", (
-                        RibbonActionSpec("add_feature", "新增要素", "＋"),
-                        RibbonActionSpec("edit_feature", "修改要素", "✎", "#d97706"),
+                        RibbonActionSpec(
+                            "add_feature",
+                            "新增要素",
+                            "＋",
+                            children=(
+                                RibbonActionSpec("add_point_feature", "点", "⋅"),
+                                RibbonActionSpec("add_line_feature", "线", "╱"),
+                                RibbonActionSpec("add_polygon_feature", "面", "▣"),
+                            ),
+                        ),
+                        RibbonActionSpec("toggle_snapping", "捕捉", "⊙", checkable=True),
+                        RibbonActionSpec("edit_feature", "修改属性", "✎", "#d97706"),
+                        RibbonActionSpec("edit_geometry", "编辑几何", "⬡", "#d97706"),
                         RibbonActionSpec("delete_feature", "删除要素", "×", "#dc2626"),
                     )),
                     RibbonGroupSpec("线处理", (
@@ -337,6 +356,17 @@ class RibbonBar(QWidget):
                 ),
             ),
         )
+
+    def set_action_checked(self, action_id: str, checked: bool) -> None:
+        """设置可切换按钮的按下/弹起状态。
+
+        参数:
+            action_id: 按钮操作编号（须在定义时设置 checkable=True）。
+            checked: True 为按下加深状态。
+        """
+        btn: QToolButton | None = self._checkable_buttons.get(action_id)
+        if btn is not None:
+            btn.setDown(checked)
 
     @classmethod
     def action_title(cls, action_id: str) -> str | None:

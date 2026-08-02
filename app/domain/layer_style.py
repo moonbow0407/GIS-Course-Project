@@ -40,7 +40,7 @@ class LayerStyle:
                 stroke_color="#1769d2",
                 fill_color="#2f7de1",
                 line_width=1.2,
-                point_size=8.0,
+                point_size=5.0,
                 opacity=0.9,
             )
         if family is GeometryFamily.LINE:

@@ -72,6 +72,71 @@ from app.domain.symbology import RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
 
 
+def _chaikin_smooth(geometry: object, iterations: int) -> object:
+    """Chaikin 角切算法：每轮在每条边的 1/4 和 3/4 处插入新顶点。
+
+    对 LineString 和 Polygon 外环逐轮平滑，Multi 几何递归处理。
+    """
+    from shapely.geometry import LineString, Polygon
+    from shapely.geometry.base import BaseGeometry
+
+    if iterations <= 0:
+        return geometry
+
+    geom: BaseGeometry = geometry
+    for _ in range(iterations):
+        geom = _chaikin_pass(geom)
+    return geom
+
+
+def _chaikin_pass(geometry: object) -> object:
+    """执行单轮 Chaikin 角切。"""
+    from shapely.geometry import LineString, MultiLineString
+    from shapely.geometry import MultiPolygon, Point, Polygon
+    from shapely.geometry.base import BaseGeometry
+
+    g: BaseGeometry = geometry
+    gtype: str = g.geom_type
+
+    if gtype == "LineString":
+        return _chaikin_line(g)
+    if gtype == "Polygon":
+        return Polygon(
+            _chaikin_line(LineString(g.exterior.coords)),
+            [_chaikin_line(LineString(r.coords)) for r in g.interiors],
+        )
+    if gtype == "MultiLineString":
+        return MultiLineString(
+            [_chaikin_line(LineString(m.coords)) for m in g.geoms]
+        )
+    if gtype == "MultiPolygon":
+        return MultiPolygon([_chaikin_pass(p) for p in g.geoms])
+    return geometry  # Point, etc. 不做平滑。
+
+
+def _chaikin_line(line: object) -> object:
+    """对单条线的坐标执行一轮 Chaikin 1/4-3/4 角切。"""
+    from shapely.geometry import LineString
+
+    coords: list[tuple[float, float]] = list(line.coords)
+    if len(coords) < 2:
+        return line
+    smoothed: list[tuple[float, float]] = [coords[0]]
+    for i in range(len(coords) - 1):
+        x1, y1 = coords[i]
+        x2, y2 = coords[i + 1]
+        q1: tuple[float, float] = (
+            0.75 * x1 + 0.25 * x2, 0.75 * y1 + 0.25 * y2
+        )
+        q2: tuple[float, float] = (
+            0.25 * x1 + 0.75 * x2, 0.25 * y1 + 0.75 * y2
+        )
+        smoothed.append(q1)
+        smoothed.append(q2)
+    smoothed.append(coords[-1])
+    return LineString(smoothed)
+
+
 def _geometry_priority(geom_type: str) -> int:
     """返回几何类型的点选优先级权值：点 0 < 线 1 < 面 2。
 
@@ -571,6 +636,197 @@ class GisApplication:
         self._modified = True
         return SelectionResult(
             features=tuple(matched_features), snapshot=self.snapshot()
+        )
+
+    def create_feature_layer(
+        self,
+        layer_name: str,
+        features: tuple[Feature, ...],
+        crs: object,
+        output_path: Path,
+    ) -> WorkspaceSnapshot:
+        """用给定要素创建新图层，写入磁盘并加入工作区。
+
+        参数:
+            layer_name: 图层显示名称。
+            features: 要写入的要素元组。
+            crs: 坐标系（pyproj CRS 或 None）。
+            output_path: 输出文件路径。
+
+        返回:
+            新图层加入后的完整工作区快照。
+        """
+        if not features:
+            raise ApplicationError("要素集合不能为空。")
+        output_layer: VectorLayer = VectorLayer.create(
+            name=layer_name,
+            features=features,
+            crs=crs,
+            source_path=output_path,
+        )
+        self.data_writer.write(output_layer, output_path, ())
+        self._document.add_layer(output_layer)
+        self._document.set_active_layer(output_layer.layer_id)
+        self._modified = True
+        return self.snapshot()
+
+    def delete_feature(self, layer_id: str, fid: FeatureId) -> WorkspaceSnapshot:
+        """从图层中删除指定要素并写回磁盘。
+
+        若删除后图层无要素，则移除整个图层。
+        """
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ApplicationError("只能删除矢量图层中的要素。")
+        remaining: tuple[Feature, ...] = tuple(
+            f for f in layer.features if f.fid != fid
+        )
+        if not remaining:
+            return self.remove_layer(layer_id)
+        updated: VectorLayer = VectorLayer.create(
+            layer_id=layer.layer_id,
+            name=layer.name,
+            features=remaining,
+            crs=layer.crs,
+            source_path=layer.source_path,
+            source_layer_name=layer.source_layer_name,
+            database_layer_id=layer.database_layer_id,
+            symbology=layer.symbology,
+        )
+        self._document.replace_layer(updated)
+        self._document.clear_selection()
+        self._write_layer_to_source(updated)
+        self._modified = True
+        return self.snapshot()
+
+    def update_feature_attributes(
+        self, layer_id: str, fid: FeatureId, attributes: dict[str, object]
+    ) -> WorkspaceSnapshot:
+        """修改指定要素的属性字段并写回磁盘。"""
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ApplicationError("只能修改矢量图层中的要素属性。")
+        updated_features: tuple[Feature, ...] = tuple(
+            Feature(fid=f.fid, geometry=f.geometry, attributes=attributes)
+            if f.fid == fid
+            else f
+            for f in layer.features
+        )
+        updated_layer: VectorLayer = VectorLayer.create(
+            layer_id=layer.layer_id,
+            name=layer.name,
+            features=updated_features,
+            crs=layer.crs,
+            source_path=layer.source_path,
+            source_layer_name=layer.source_layer_name,
+            database_layer_id=layer.database_layer_id,
+            symbology=layer.symbology,
+        )
+        self._document.replace_layer(updated_layer)
+        self._write_layer_to_source(updated_layer)
+        self._modified = True
+        return self.snapshot()
+
+    def update_feature_geometry(
+        self, layer_id: str, fid: FeatureId, geometry: object
+    ) -> WorkspaceSnapshot:
+        """修改指定要素的几何形状并写回磁盘。"""
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ApplicationError("只能修改矢量图层中的要素几何。")
+        updated_features: tuple[Feature, ...] = tuple(
+            Feature(fid=f.fid, geometry=geometry, attributes=f.attributes)
+            if f.fid == fid
+            else f
+            for f in layer.features
+        )
+        updated_layer: VectorLayer = VectorLayer.create(
+            layer_id=layer.layer_id,
+            name=layer.name,
+            features=updated_features,
+            crs=layer.crs,
+            source_path=layer.source_path,
+            source_layer_name=layer.source_layer_name,
+            database_layer_id=layer.database_layer_id,
+            symbology=layer.symbology,
+        )
+        self._document.replace_layer(updated_layer)
+        self._write_layer_to_source(updated_layer)
+        self._modified = True
+        return self.snapshot()
+
+    def simplify_feature_geometry(
+        self, layer_id: str, fid: FeatureId, tolerance: float
+    ) -> WorkspaceSnapshot:
+        """对选中要素执行 Douglas-Peucker 线简化。
+
+        参数:
+            tolerance: 简化容差（地图单位），越大顶点越少。
+        """
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ApplicationError("只能简化矢量图层中的要素。")
+        target: Feature | None = next(
+            (f for f in layer.features if f.fid == fid), None
+        )
+        if target is None:
+            raise ApplicationError("未找到目标要素。")
+        simplified = target.geometry.simplify(tolerance, preserve_topology=True)
+        return self.update_feature_geometry(layer_id, fid, simplified)
+
+    def smooth_feature_geometry(
+        self, layer_id: str, fid: FeatureId, iterations: int = 2
+    ) -> WorkspaceSnapshot:
+        """对选中要素执行 Chaikin 角切平滑。
+
+        参数:
+            iterations: 平滑迭代次数，1-5，越大越平滑。
+        """
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ApplicationError("只能平滑矢量图层中的要素。")
+        target: Feature | None = next(
+            (f for f in layer.features if f.fid == fid), None
+        )
+        if target is None:
+            raise ApplicationError("未找到目标要素。")
+        smoothed = _chaikin_smooth(target.geometry, iterations)
+        return self.update_feature_geometry(layer_id, fid, smoothed)
+
+    def replace_layer_features(
+        self, layer_id: str, features: tuple[Feature, ...]
+    ) -> WorkspaceSnapshot:
+        """用新要素集合替换图层内容并写回磁盘。
+
+        用于撤销/重做等需要批量恢复要素的场景。
+        若 features 为空则移除整个图层。
+        """
+        if not features:
+            return self.remove_layer(layer_id)
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ApplicationError("只能替换矢量图层的要素。")
+        updated: VectorLayer = VectorLayer.create(
+            layer_id=layer.layer_id,
+            name=layer.name,
+            features=features,
+            crs=layer.crs,
+            source_path=layer.source_path,
+            source_layer_name=layer.source_layer_name,
+            database_layer_id=layer.database_layer_id,
+            symbology=layer.symbology,
+        )
+        self._document.replace_layer(updated)
+        self._write_layer_to_source(updated)
+        self._modified = True
+        return self.snapshot()
+
+    def _write_layer_to_source(self, layer: VectorLayer) -> None:
+        """将图层写回其源文件。"""
+        if layer.source_path is None:
+            return
+        self.data_writer.write(
+            layer, layer.source_path, (), layer.source_layer_name
         )
 
     def set_selection(

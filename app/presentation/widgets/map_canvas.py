@@ -7,24 +7,30 @@ from PySide6.QtGui import (
     QColor,
     QMouseEvent,
     QPainter,
+    QPainterPath,
+    QPen,
     QResizeEvent,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QGraphicsEllipseItem,
+    QGraphicsItem,
+    QGraphicsPathItem,
     QGraphicsScene,
     QGraphicsView,
     QLabel,
     QRubberBand,
     QVBoxLayout,
 )
-from shapely.geometry import Point, Polygon
+from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry.base import BaseGeometry
 
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.raster_layer import RasterLayer
-from app.domain.vector_layer import Bounds
+from app.domain.vector_layer import Bounds, VectorLayer
 from app.presentation.renderers.qt_raster_renderer import QtRasterRenderer
 from app.presentation.renderers.qt_vector_renderer import QtVectorRenderer
 
@@ -42,6 +48,14 @@ class MapCanvas(QGraphicsView):
     point_queried = Signal(Point, bool)
     # 框选查询信号：(地图坐标矩形, 是否追加到已有选择)。
     rectangle_queried = Signal(Polygon, bool)
+    # 数字化完成信号：携带用户绘制的 Shapely 几何（Point/LineString/Polygon）。
+    feature_digitized = Signal(BaseGeometry)
+    # 顶点编辑提交信号：携带修改后的 Shapely 几何。
+    geometry_edited = Signal(BaseGeometry)
+    # 要素拖动信号：携带位移量 (dx, dy)（地图单位）。
+    feature_moved = Signal(float, float)
+    # 要素拖动结束信号。
+    feature_drag_ended = Signal()
 
     def __init__(self, parent: QGraphicsView | None = None) -> None:
         """创建空地图场景和矢量、栅格渲染器。
@@ -81,6 +95,34 @@ class MapCanvas(QGraphicsView):
         self._rectangle_query_active: bool = False
         # 每屏幕像素对应的地图单位：由 set_snapshot 刷新，供容差计算使用。
         self._map_units_per_pixel: float = 1.0
+        # 数字化模式："none"/"point"/"line"/"polygon"。
+        self._digitize_mode: str = "none"
+        # 数字化顶点栈：屏幕像素坐标列表。
+        self._digitize_vertices: list[QPoint] = []
+        # 数字化预览图元：临时场景项，完成或取消后一并移除。
+        self._sketch_items: list[QGraphicsItem] = []
+        # 捕捉状态。
+        self._snapping_enabled: bool = False
+        self._snap_coords: list[tuple[float, float]] = []
+        self._snap_marker: QGraphicsPathItem | None = None
+        # 缓存最近一次快照，供缩放后重新渲染使用。
+        self._last_snapshot: WorkspaceSnapshot | None = None
+        # 顶点编辑状态。
+        self._vertex_edit_active: bool = False
+        self._edit_geometry: BaseGeometry | None = None
+        self._vertex_coords: list[tuple[float, float]] = []
+        self._midpoint_coords: list[tuple[float, float]] = []
+        self._vertex_drag_idx: int = -1
+        self._hovered_vertex: int = -1
+        self._edit_mode: str = "drag_vertex"
+        self._vertex_items: list[QGraphicsItem] = []
+        # 要素拖动状态。
+        self._feature_drag_active: bool = False
+        self._feature_drag_start: QPointF | None = None
+        self._drag_layer_id: str = ""
+        self._drag_fid: object = None
+        # 选中要素集合：{(layer_id, fid), ...}，供拖动检测。
+        self._selected_fids: set[tuple[str, object]] = set()
         self._scene.setSceneRect(0, 0, 1000, 700)
         self.setScene(self._scene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -138,9 +180,10 @@ class MapCanvas(QGraphicsView):
         viewport_width: int = max(self.viewport().width(), 1)
         viewport_height: int = max(self.viewport().height(), 1)
         # 将屏幕像素尺寸换算为地图单位，使点符号保持稳定的视觉大小。
+        visible_rect: QRectF = self._visible_scene_rect()
         map_units_per_pixel: float = max(
-            self._scene.sceneRect().width() / viewport_width,
-            self._scene.sceneRect().height() / viewport_height,
+            visible_rect.width() / viewport_width,
+            visible_rect.height() / viewport_height,
         )
         self._map_units_per_pixel = map_units_per_pixel
         # 快照按底到顶排列，枚举值可直接作为 Qt 图元的叠放顺序。
@@ -158,6 +201,13 @@ class MapCanvas(QGraphicsView):
             self.fitInView(map_scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
             self._reset_view_scale()
         self._ensure_pan_area()
+        self._build_snap_index(snapshot)
+        self._last_snapshot = snapshot
+        # 更新选中要素集合。
+        self._selected_fids.clear()
+        for layer in snapshot.layers:
+            for fid in layer.selected_feature_ids:
+                self._selected_fids.add((layer.layer_id, fid))
 
     def capture_view_state(self) -> MapViewState:
         """捕获当前地图中心和相对于全图的缩放比例。"""
@@ -220,6 +270,317 @@ class MapCanvas(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
+    def set_digitize_point_tool(self) -> None:
+        """切换到点要素数字化模式。"""
+        self._deactivate_all_tools()
+        self._digitize_mode = "point"
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def set_digitize_line_tool(self) -> None:
+        """切换到线要素数字化模式。"""
+        self._deactivate_all_tools()
+        self._digitize_mode = "line"
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def set_digitize_polygon_tool(self) -> None:
+        """切换到面要素数字化模式。"""
+        self._deactivate_all_tools()
+        self._digitize_mode = "polygon"
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def set_vertex_edit_tool(
+        self, geometry: BaseGeometry, layer_id: str = "", fid: object = None
+    ) -> None:
+        """进入顶点编辑模式，为指定几何显示可交互顶点标记。
+
+        参数:
+            geometry: 待编辑的 Shapely 几何对象。
+            layer_id: 要素所属图层 ID（用于实时更新渲染图元）。
+            fid: 要素编号。
+        """
+        self._deactivate_all_tools()
+        self._vertex_edit_active = True
+        self._edit_geometry = geometry
+        self._edit_layer_id: str = layer_id
+        self._edit_fid: object = fid
+        self._vertex_drag_idx = -1
+        self._hovered_vertex = -1
+        self._edit_mode = "drag_vertex"
+        self._vertex_coords.clear()
+        # 彻底清理上一次编辑留在场景中的所有标记。
+        for item in self._vertex_items:
+            try:
+                self._scene.removeItem(item)
+            except RuntimeError:
+                pass
+        self._vertex_items.clear()
+        # 重新计算当前的地图单位，确保标记尺寸适配当前缩放级别。
+        viewport_w: int = max(self.viewport().width(), 1)
+        viewport_h: int = max(self.viewport().height(), 1)
+        visible: QRectF = self._visible_scene_rect()
+        if visible.width() > 0:
+            self._map_units_per_pixel = max(
+                visible.width() / viewport_w,
+                visible.height() / viewport_h,
+            )
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self._rebuild_vertex_markers(geometry)
+
+    def _rebuild_vertex_markers(self, geometry: BaseGeometry) -> None:
+        """原地更新顶点标记位置，不删建以避免视觉闪烁。
+
+        仅在首次调用时从几何提取坐标；后续调用使用已有 _vertex_coords
+        （可能已被拖拽修改）。
+        """
+        if not self._vertex_coords:
+            self._vertex_coords = self._extract_editable_coords(geometry)
+        coords: list[tuple[float, float]] = self._vertex_coords
+        marker_size: float = max(self._map_units_per_pixel * 7.0, 1e-6)
+
+        # 移除旧的延伸标记和悬停高亮（顶点标记本身保留并更新）。
+        items_to_keep: list[QGraphicsItem] = []
+        for item in self._vertex_items:
+            tag = item.data(0)
+            if tag in ("vertex", "preview"):
+                items_to_keep.append(item)
+            else:
+                self._scene.removeItem(item)
+        self._vertex_items.clear()
+
+        # 原地更新或创建顶点标记。
+        for i, (mx, my) in enumerate(coords):
+            if i < len(items_to_keep):
+                item = items_to_keep[i]
+                if isinstance(item, QGraphicsEllipseItem):
+                    item.prepareGeometryChange()
+                    item.setRect(
+                        mx - marker_size, -my - marker_size,
+                        marker_size * 2, marker_size * 2,
+                    )
+                    item.update()
+            else:
+                item = self._make_marker(
+                    mx, my, "#FF1493", "#FF1493", marker_size
+                )
+                item.setData(0, "vertex")
+                item.setData(1, i)
+                item.setZValue(3000)
+                self._scene.addItem(item)
+            item.setData(1, i)
+            self._vertex_items.append(item)
+
+        # 更新预览连线。
+        for item in self._vertex_items:
+            if item.data(0) == "preview" and isinstance(item, QGraphicsPathItem):
+                item.prepareGeometryChange()
+                item.setPath(self._build_preview_path())
+                item.update()
+                break
+
+        # 移除不再需要的多余标记（顶点减少了）。
+        for extra in items_to_keep[len(coords):]:
+            self._scene.removeItem(extra)
+
+        # 端点延伸标记（仅线要素）。
+        if geometry.geom_type in ("LineString", "MultiLineString") and len(coords) >= 2:
+            ext_size: float = marker_size * 1.3
+            for tag, idx, target in [
+                ("extend_start", 0, 1), ("extend_end", -1, -2)
+            ]:
+                dx = coords[idx][0] - coords[target][0]
+                dy = coords[idx][1] - coords[target][1]
+                d = (dx**2 + dy**2)**0.5 or 1.0
+                ex = coords[idx][0] + dx / d * marker_size * 3
+                ey = coords[idx][1] + dy / d * marker_size * 3
+                ext_item = self._make_marker(
+                    ex, ey, "#00FF88", "#00FF88", ext_size
+                )
+                ext_item.setData(0, tag)
+                ext_item.setZValue(3000)
+                self._scene.addItem(ext_item)
+                self._vertex_items.append(ext_item)
+
+        # 预览连线：品红虚线连接所有顶点。
+        if len(coords) >= 2:
+            preview_path: QPainterPath = self._build_preview_path()
+            if not preview_path.isEmpty():
+                preview_item: QGraphicsPathItem = QGraphicsPathItem(preview_path)
+                preview_item.setData(0, "preview")
+                prev_pen2: QPen = QPen(QColor("#FF1493"), 1.5, Qt.PenStyle.DashLine)
+                prev_pen2.setCosmetic(True)
+                preview_item.setPen(prev_pen2)
+                preview_item.setBrush(Qt.BrushStyle.NoBrush)
+                preview_item.setZValue(2998)
+                self._scene.addItem(preview_item)
+                self._vertex_items.append(preview_item)
+
+        # 悬停高亮：绿色虚线框。
+        if self._hovered_vertex >= 0 and self._hovered_vertex < len(coords):
+            hx, hy = coords[self._hovered_vertex]
+            hover_size: float = marker_size * 1.15
+            hover_item: QGraphicsEllipseItem = QGraphicsEllipseItem(
+                hx - hover_size, -hy - hover_size,
+                hover_size * 2, hover_size * 2,
+            )
+            hover_pen: QPen = QPen(QColor("#00FF88"), 2, Qt.PenStyle.DashLine)
+            hover_pen.setCosmetic(True)
+            hover_item.setData(0, "hover")
+            hover_item.setPen(hover_pen)
+            hover_item.setBrush(Qt.BrushStyle.NoBrush)
+            hover_item.setZValue(2999)
+            self._scene.addItem(hover_item)
+            self._vertex_items.append(hover_item)
+
+        # 确保场景立即刷新。
+        self._scene.update()
+
+    def _extract_editable_coords(
+        self, geometry: BaseGeometry
+    ) -> list[tuple[float, float]]:
+        """从几何中提取可编辑的顶点坐标列表。
+
+        对 Multi 几何取其首个部件的坐标。
+        """
+        geom_type: str = geometry.geom_type
+        # 单部件几何。
+        if geom_type == "Point":
+            return [(geometry.x, geometry.y)]
+        if geom_type == "LineString":
+            return [(c[0], c[1]) for c in geometry.coords]
+        if geom_type == "Polygon":
+            return [(c[0], c[1]) for c in geometry.exterior.coords[:-1]]
+        # Multi 几何：递归提取首个部件。
+        if geom_type in (
+            "MultiPoint", "MultiLineString", "MultiPolygon",
+            "GeometryCollection",
+        ):
+            if hasattr(geometry, "geoms") and geometry.geoms:
+                return self._extract_editable_coords(geometry.geoms[0])
+        return []
+
+    @staticmethod
+    def _is_polygon_type(geom_type: str) -> bool:
+        """判断几何类型是否属于面类（需要闭合环）。"""
+        return geom_type in ("Polygon", "MultiPolygon")
+
+    def _compute_midpoints(
+        self,
+        coords: list[tuple[float, float]],
+        geometry: BaseGeometry,
+    ) -> list[tuple[float, float]]:
+        """计算各边中点坐标，用于插入顶点。"""
+        geom_type: str = geometry.geom_type
+        if geom_type in ("Point", "MultiPoint"):
+            return []
+        midpoints: list[tuple[float, float]] = []
+        n: int = len(coords)
+        # 面要素需闭合回路的边中点；线要素无需闭合。
+        pairs: int = n if self._is_polygon_type(geom_type) else n - 1
+        for i in range(pairs):
+            j: int = (i + 1) % n
+            midpoints.append(
+                ((coords[i][0] + coords[j][0]) / 2.0,
+                 (coords[i][1] + coords[j][1]) / 2.0)
+            )
+        return midpoints
+
+    @staticmethod
+    def _make_marker(
+        x: float, y: float, stroke: str, fill: str, size: float
+    ) -> QGraphicsEllipseItem:
+        """创建圆形顶点标记。"""
+        item: QGraphicsEllipseItem = QGraphicsEllipseItem(
+            x - size, -y - size, size * 2, size * 2
+        )
+        pen: QPen = QPen(QColor(stroke), 2)
+        pen.setCosmetic(True)
+        item.setPen(pen)
+        item.setBrush(QBrush(QColor(fill)))
+        return item
+
+    def _hit_test_vertex(self, point: Point, tolerance: float) -> int:
+        """返回容差内最近顶点的索引；无命中返回 -1。"""
+        best: int = -1
+        best_dist: float = tolerance
+        for i, (vx, vy) in enumerate(self._vertex_coords):
+            d: float = ((point.x - vx) ** 2 + (point.y - vy) ** 2) ** 0.5
+            if d < best_dist:
+                best_dist = d
+                best = i
+        return best
+
+    def _hit_test_extension(self, point: Point, tolerance: float) -> str | None:
+        """检测是否点击了线端点延伸标记。返回 'extend_start'/'extend_end'/None。"""
+        coords: list[tuple[float, float]] = self._vertex_coords
+        if len(coords) < 2:
+            return None
+        marker_dist: float = self._map_units_per_pixel * 24.0
+        # 首端延伸标记位置。
+        dx0: float = coords[0][0] - coords[1][0]
+        dy0: float = coords[0][1] - coords[1][1]
+        d0: float = (dx0**2 + dy0**2)**0.5 or 1.0
+        ex0: float = coords[0][0] + dx0 / d0 * marker_dist
+        ey0: float = coords[0][1] + dy0 / d0 * marker_dist
+        if ((point.x - ex0)**2 + (point.y - ey0)**2)**0.5 < tolerance:
+            return "extend_start"
+        # 尾端延伸标记位置。
+        dx1: float = coords[-1][0] - coords[-2][0]
+        dy1: float = coords[-1][1] - coords[-2][1]
+        d1: float = (dx1**2 + dy1**2)**0.5 or 1.0
+        ex1: float = coords[-1][0] + dx1 / d1 * marker_dist
+        ey1: float = coords[-1][1] + dy1 / d1 * marker_dist
+        if ((point.x - ex1)**2 + (point.y - ey1)**2)**0.5 < tolerance:
+            return "extend_end"
+        return None
+
+    def _hit_test_midpoint(self, point: Point, tolerance: float) -> int:
+        """返回容差内最近中点的索引；无命中返回 -1。"""
+        best: int = -1
+        best_dist: float = tolerance
+        for i, (mx, my) in enumerate(self._midpoint_coords):
+            d: float = ((point.x - mx) ** 2 + (point.y - my) ** 2) ** 0.5
+            if d < best_dist:
+                best_dist = d
+                best = i
+        return best
+
+    @staticmethod
+    def _can_delete_vertex(geom_type: str, vertex_count: int) -> bool:
+        """判断是否允许删除一个顶点（保留最少顶点数）。"""
+        if geom_type in ("Point", "MultiPoint"):
+            return False
+        if geom_type in ("LineString", "MultiLineString"):
+            return vertex_count > 2
+        return vertex_count > 3  # Polygon, MultiPolygon
+
+    def _commit_vertex_edit(self) -> BaseGeometry | None:
+        """从当前顶点坐标构建新几何（单部件）。"""
+        geom_type: str = self._edit_geometry.geom_type if self._edit_geometry else ""
+        coords: list[tuple[float, float]] = self._vertex_coords
+        # 将 Multi 类型映射到单部件输出。
+        if geom_type in ("MultiPoint",):
+            geom_type = "Point"
+        elif geom_type in ("MultiLineString",):
+            geom_type = "LineString"
+        elif geom_type in ("MultiPolygon",):
+            geom_type = "Polygon"
+        if geom_type == "Point":
+            return Point(coords[0]) if coords else None
+        if geom_type == "LineString":
+            return LineString(coords) if len(coords) >= 2 else None
+        if geom_type == "Polygon":
+            if len(coords) < 3:
+                return None
+            closed: list[tuple[float, float]] = list(coords)
+            if closed[0] != closed[-1]:
+                closed.append(closed[0])
+            return Polygon(closed)
+        return None
+
     def _deactivate_all_tools(self) -> None:
         """关闭所有特殊工具模式，恢复默认交互状态。"""
         self._zoom_rect_active = False
@@ -227,6 +588,276 @@ class MapCanvas(QGraphicsView):
         self._rectangle_query_active = False
         self._pan_mode = "none"
         self._last_middle_pos = None
+        self._digitize_mode = "none"
+        self._clear_sketch()
+        # 清理可能残留的橡皮筋。
+        if self._rubber_band is not None:
+            self._rubber_band.close()
+            self._rubber_band = None
+        self._vertex_edit_active = False
+        self._edit_geometry = None
+        self._edit_layer_id = ""
+        self._edit_fid = None
+        self._vertex_drag_idx = -1
+        self._vertex_coords.clear()
+        self._hovered_vertex = -1
+        self._vertex_coords.clear()
+        self._midpoint_coords.clear()
+        for item in self._vertex_items:
+            self._scene.removeItem(item)
+        self._vertex_items.clear()
+
+    def set_snapping(self, enabled: bool) -> None:
+        """启用或禁用顶点捕捉。
+
+        参数:
+            enabled: True 时数字化光标自动吸附到附近已有顶点。
+        """
+        self._snapping_enabled = enabled
+        if not enabled:
+            self._clear_snap_marker()
+
+    def _build_snap_index(self, snapshot: WorkspaceSnapshot) -> None:
+        """从工作区快照构建捕捉顶点索引。"""
+        coords: list[tuple[float, float]] = []
+        for layer in snapshot.layers:
+            if not layer.visible:
+                continue
+            if not isinstance(layer.layer, VectorLayer):
+                continue
+            for feature in layer.layer.features:
+                if feature.geometry.is_empty:
+                    continue
+                self._collect_coords(feature.geometry, coords)
+        self._snap_coords = coords
+
+    @staticmethod
+    def _collect_coords(
+        geometry: BaseGeometry, coords: list[tuple[float, float]]
+    ) -> None:
+        """递归收集几何中所有顶点。"""
+        gtype: str = geometry.geom_type
+        if gtype == "Point":
+            coords.append((geometry.x, geometry.y))
+        elif gtype in ("LineString", "LinearRing"):
+            coords.extend((c[0], c[1]) for c in geometry.coords)
+        elif gtype == "Polygon":
+            coords.extend((c[0], c[1]) for c in geometry.exterior.coords)
+            for ring in geometry.interiors:
+                coords.extend((c[0], c[1]) for c in ring.coords)
+        elif gtype in (
+            "MultiPoint", "MultiLineString", "MultiPolygon",
+            "GeometryCollection",
+        ):
+            for member in geometry.geoms:
+                MapCanvas._collect_coords(member, coords)
+
+    def _find_snap_target(self, cursor_point: Point) -> Point | None:
+        """在容差内查找最近的捕捉顶点。
+
+        参数:
+            cursor_point: 当前光标在地图坐标系下的位置。
+
+        返回:
+            最近的捕捉点；无命中返回 None。
+        """
+        if not self._snapping_enabled or not self._snap_coords:
+            return None
+        tol: float = self._map_units_per_pixel * 10.0
+        best_dist: float = tol
+        best: tuple[float, float] | None = None
+        px, py = cursor_point.x, cursor_point.y
+        for sx, sy in self._snap_coords:
+            d: float = ((px - sx) ** 2 + (py - sy) ** 2) ** 0.5
+            if d < best_dist:
+                best_dist = d
+                best = (sx, sy)
+        return Point(best[0], best[1]) if best else None
+
+    def _show_snap_marker(self, point: Point) -> None:
+        """在捕捉位置显示品红十字标记。"""
+        self._clear_snap_marker()
+        item: QGraphicsPathItem = QGraphicsPathItem()
+        path: QPainterPath = QPainterPath()
+        s: float = self._map_units_per_pixel * 5.0
+        px, py = point.x, point.y
+        path.moveTo(px - s, -py - s)
+        path.lineTo(px + s, -py + s)
+        path.moveTo(px + s, -py - s)
+        path.lineTo(px - s, -py + s)
+        pen: QPen = QPen(QColor("#FF1493"), 2)
+        pen.setCosmetic(True)
+        item.setPen(pen)
+        item.setZValue(3000)
+        self._scene.addItem(item)
+        self._snap_marker = item
+
+    def _snapped_position(self, screen_pos: QPoint) -> QPoint:
+        """返回捕捉后的屏幕坐标；未启用或无命中时返回原坐标。"""
+        if not self._snapping_enabled:
+            return screen_pos
+        snap_pt: Point | None = self._find_snap_target(
+            self._screen_to_map_point(screen_pos)
+        )
+        if snap_pt is None:
+            return screen_pos
+        snap_scene: QPointF = QPointF(snap_pt.x, -snap_pt.y)
+        return self.mapFromScene(snap_scene)
+
+    def _update_feature_item_path(self) -> None:
+        """拖拽时同步更新要素渲染图元，使面填充实时跟随。"""
+        lid: str = getattr(self, "_edit_layer_id", "")
+        fid: object = getattr(self, "_edit_fid", None)
+        if not lid or fid is None:
+            return
+        new_path: QPainterPath = self._build_preview_path()
+        if new_path.isEmpty():
+            return
+        for item in self._scene.items():
+            if (
+                isinstance(item, QGraphicsPathItem)
+                and item.data(0) == lid
+                and item.data(1) == fid
+            ):
+                item.prepareGeometryChange()
+                item.setPath(new_path)
+                item.update()
+
+    def _build_preview_path(self) -> QPainterPath:
+        """从当前顶点坐标构建预览折线/多边形路径。"""
+        coords: list[tuple[float, float]] = self._vertex_coords
+        if len(coords) < 2:
+            return QPainterPath()
+        path: QPainterPath = QPainterPath()
+        path.moveTo(coords[0][0], -coords[0][1])
+        for mx, my in coords[1:]:
+            path.lineTo(mx, -my)
+        if self._edit_geometry is not None and self._edit_geometry.geom_type in (
+            "Polygon", "MultiPolygon"
+        ):
+            path.closeSubpath()
+        return path
+
+    def _clear_snap_marker(self) -> None:
+        """清除捕捉标记。"""
+        if self._snap_marker is not None:
+            self._scene.removeItem(self._snap_marker)
+            self._snap_marker = None
+
+    def _clear_sketch(self) -> None:
+        """清除数字化顶点和全部预览图元。"""
+        self._digitize_vertices.clear()
+        for item in self._sketch_items:
+            self._scene.removeItem(item)
+        self._sketch_items.clear()
+
+    def _add_sketch_vertex(self, screen_pos: QPoint) -> None:
+        """添加一个数字化顶点并重建预览。
+
+        参数:
+            screen_pos: 视口像素坐标。
+        """
+        self._digitize_vertices.append(screen_pos)
+        self._rebuild_sketch_preview()
+
+    def _finish_sketch(self) -> BaseGeometry | None:
+        """根据已收集顶点构造 Shapely 几何并清理草图。
+
+        返回:
+            完成的 Point/LineString/Polygon；顶点不足时返回 None。
+        """
+        mode: str = self._digitize_mode
+        vertices: list[QPoint] = self._digitize_vertices
+        if mode == "point":
+            if not vertices:
+                return None
+            return self._screen_to_map_point(vertices[0])
+        map_pts: list[Point] = [self._screen_to_map_point(v) for v in vertices]
+        coords: list[tuple[float, float]] = [(p.x, p.y) for p in map_pts]
+        if mode == "line":
+            if len(coords) < 2:
+                return None
+            return LineString(coords)
+        if mode == "polygon":
+            if len(coords) < 3:
+                return None
+            # 确保闭合。
+            if coords[0] != coords[-1]:
+                coords.append(coords[0])
+            return Polygon(coords)
+        return None
+
+    def _rebuild_sketch_preview(
+        self, cursor_pos: QPoint | None = None
+    ) -> None:
+        """重建数字化草图的场景预览图元。
+
+        参数:
+            cursor_pos: 当前鼠标视口位置；为空时不绘制到光标的虚线。
+        """
+        for item in self._sketch_items:
+            self._scene.removeItem(item)
+        self._sketch_items.clear()
+
+        vertices: list[QPoint] = self._digitize_vertices
+        if not vertices and cursor_pos is None:
+            return
+
+        # 顶点标记：亮黄小方块（地图坐标）。
+        for v in vertices:
+            mp: Point = self._screen_to_map_point(v)
+            dot_item: QGraphicsPathItem = QGraphicsPathItem()
+            dpath: QPainterPath = QPainterPath()
+            # 用地图单位的小尺寸标记顶点。
+            dot_size: float = self._map_units_per_pixel * 5.0
+            dpath.addEllipse(
+                QPointF(mp.x, -mp.y),
+                dot_size,
+                dot_size,
+            )
+            dot_item.setPath(dpath)
+            dot_pen: QPen = QPen(QColor("#FF1493"), 1)
+            dot_pen.setCosmetic(True)
+            dot_item.setPen(dot_pen)
+            dot_item.setBrush(QBrush(QColor("#FF1493")))
+            dot_item.setZValue(1000)
+            self._scene.addItem(dot_item)
+            self._sketch_items.append(dot_item)
+
+        if not vertices:
+            return
+
+        # 预览路径：已放置顶点 + 到光标的虚线。
+        map_pts: list[tuple[float, float]] = []
+        for v in vertices:
+            mp = self._screen_to_map_point(v)
+            map_pts.append((mp.x, mp.y))
+
+        all_pts: list[tuple[float, float]] = list(map_pts)
+        if cursor_pos is not None:
+            cp: Point = self._screen_to_map_point(cursor_pos)
+            all_pts.append((cp.x, cp.y))
+
+        preview_path: QPainterPath = QPainterPath()
+        is_polygon: bool = self._digitize_mode == "polygon" and len(all_pts) >= 3
+
+        preview_path.moveTo(all_pts[0][0], -all_pts[0][1])
+        for mx, my in all_pts[1:]:
+            preview_path.lineTo(mx, -my)
+        if is_polygon:
+            preview_path.closeSubpath()
+
+        preview_item: QGraphicsPathItem = QGraphicsPathItem(preview_path)
+        prev_pen: QPen = QPen(QColor("#FF1493"), 1.5, Qt.PenStyle.DashLine)
+        prev_pen.setCosmetic(True)
+        preview_item.setPen(prev_pen)
+        if is_polygon:
+            preview_item.setBrush(QBrush(QColor(255, 20, 147, 40)))
+        else:
+            preview_item.setBrush(Qt.BrushStyle.NoBrush)
+        preview_item.setZValue(1000)
+        self._scene.addItem(preview_item)
+        self._sketch_items.append(preview_item)
 
     def zoom_to_full_extent(self) -> None:
         """将当前地图范围完整缩放到视图内。"""
@@ -354,6 +985,24 @@ class MapCanvas(QGraphicsView):
             )
         self._ensure_pan_area()
         self._emit_view_scale()
+        # 更新地图单位并重建顶点标记（如果正在顶点编辑模式）。
+        vw: int = max(self.viewport().width(), 1)
+        vh: int = max(self.viewport().height(), 1)
+        vis: QRectF = self._visible_scene_rect()
+        if vis.width() > 0:
+            self._map_units_per_pixel = max(
+                vis.width() / vw,
+                vis.height() / vh,
+            )
+        if self._vertex_edit_active and self._edit_geometry is not None:
+            self._rebuild_vertex_markers(self._edit_geometry)
+        # 缩放后立即重建场景（关闭刷新避免闪烁），更新点大小。
+        if self._last_snapshot is not None and not self._vertex_edit_active:
+            self.setUpdatesEnabled(False)
+            try:
+                self.set_snapshot(self._last_snapshot)
+            finally:
+                self.setUpdatesEnabled(True)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         """把鼠标滚轮动作转换为以光标为锚点的连续地图缩放。
@@ -386,11 +1035,152 @@ class MapCanvas(QGraphicsView):
         """
         # 通知外部（如主窗口）可据此取消图层面板选中。
         self.canvas_clicked.emit()
-        # 中键平移：手动跟踪位移，不依赖 ScrollHandDrag。
+
+        # 关闭残留的橡皮筋。
+        if self._rubber_band is not None:
+            self._rubber_band.close()
+            self._rubber_band = None
+
+        # 中键平移：在所有工具模式下常驻生效。
         if event.button() == Qt.MouseButton.MiddleButton:
             self._pan_mode = "middle"
             self._last_middle_pos = event.position().toPoint()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
+        # ── 顶点编辑（拖拽式）──
+        if self._vertex_edit_active and self._edit_geometry is not None:
+            click_pt: Point = self._screen_to_map_point(
+                event.position().toPoint()
+            )
+            tol: float = self._map_units_per_pixel * 15.0
+
+            if event.button() == Qt.MouseButton.LeftButton:
+                if self._edit_mode != "move_feature":
+                    # 拖拽/删除模式：优先检测顶点。
+                    click_pt2: Point = self._screen_to_map_point(
+                        event.position().toPoint()
+                    )
+                    tol2: float = self._map_units_per_pixel * 15.0
+                    hit_idx: int = self._hit_test_vertex(click_pt2, tol2)
+                    if hit_idx >= 0:
+                        if self._edit_mode == "delete_vertex":
+                            if self._can_delete_vertex(
+                                self._edit_geometry.geom_type,
+                                len(self._vertex_coords),
+                            ):
+                                del self._vertex_coords[hit_idx]
+                                self._hovered_vertex = -1
+                                self._rebuild_vertex_markers(
+                                    self._edit_geometry
+                                )
+                                self._update_feature_item_path()
+                            event.accept()
+                            return
+                        else:
+                            self._vertex_drag_idx = hit_idx
+                            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                            event.accept()
+                            return
+                # 未命中顶点（或平移模式）：检查是否点击了要素身体。
+                lid: str = getattr(self, "_edit_layer_id", "")
+                fid: object = getattr(self, "_edit_fid", None)
+                if lid and fid is not None:
+                    body_hit: bool = False
+                    scene_pos3: QPointF = self.mapToScene(
+                        event.position().toPoint()
+                    )
+                    for item in self._scene.items():
+                        if (
+                            isinstance(item, QGraphicsPathItem)
+                            and item.data(0) == lid
+                            and item.data(1) == fid
+                            and item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+                            and item.contains(scene_pos3)
+                        ):
+                            body_hit = True
+                            self._feature_drag_active = True
+                            self._feature_drag_start = scene_pos3
+                            self._drag_layer_id = lid
+                            self._drag_fid = fid
+                            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                            break
+                    if body_hit:
+                        event.accept()
+                        return
+                # 检查延伸标记碰撞。
+                for item in self._vertex_items:
+                    tag: str | None = item.data(0)
+                    if tag in ("extend_start", "extend_end") and item.contains(
+                        scene_pos
+                    ):
+                        if tag == "extend_start":
+                            self._vertex_coords.insert(
+                                0, (click_pt.x, click_pt.y)
+                            )
+                        else:
+                            self._vertex_coords.append(
+                                (click_pt.x, click_pt.y)
+                            )
+                        self._rebuild_vertex_markers(self._edit_geometry)
+                        event.accept()
+                        return
+                event.accept()
+                return
+
+            if event.button() == Qt.MouseButton.RightButton:
+                # 右键删除顶点。
+                scene_pos2: QPointF = self.mapToScene(
+                    event.position().toPoint()
+                )
+                for item in self._vertex_items:
+                    if item.data(0) == "vertex" and item.contains(scene_pos2):
+                        idx: int = item.data(1)
+                        if self._can_delete_vertex(
+                            self._edit_geometry.geom_type,
+                            len(self._vertex_coords),
+                        ):
+                            del self._vertex_coords[idx]
+                            self._hovered_vertex = -1
+                            self._rebuild_vertex_markers(
+                                self._edit_geometry
+                            )
+                        break
+                event.accept()
+                return
+
+            event.accept()
+            return
+
+        # ── 数字化工具 ──
+        digitizing: bool = self._digitize_mode != "none"
+        if digitizing:
+            if event.button() == Qt.MouseButton.LeftButton:
+                if self._digitize_mode == "point":
+                    snapped: QPoint = self._snapped_position(
+                        event.position().toPoint()
+                    )
+                    self._add_sketch_vertex(snapped)
+                    self._clear_snap_marker()
+                    geometry: BaseGeometry | None = self._finish_sketch()
+                    if geometry is not None:
+                        self.feature_digitized.emit(geometry)
+                else:
+                    self._add_sketch_vertex(
+                        self._snapped_position(event.position().toPoint())
+                    )
+                event.accept()
+                return
+            if event.button() == Qt.MouseButton.RightButton:
+                geometry = self._finish_sketch()
+                if geometry is not None:
+                    self.feature_digitized.emit(geometry)
+                else:
+                    self.set_pan_tool()
+                event.accept()
+                return
+            # 其他按钮在数字化模式下不处理。
             event.accept()
             return
 
@@ -430,16 +1220,111 @@ class MapCanvas(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        """驱动中键平移、更新框选橡皮筋或发出状态栏坐标。
+        """驱动数字化预览、中键平移或更新框选橡皮筋。
 
         参数:
             event: 包含当前视口位置的 Qt 鼠标移动事件。
-
-        状态变化:
-            中键拖拽时通过滚动条平移视图并发出坐标信号；
-            框选拖拽时实时更新橡皮筋矩形；
-            其余情况发出地图坐标文本后交由父类继续处理。
         """
+        # ── 顶点编辑悬停高亮 ──
+        if self._vertex_edit_active and self._vertex_drag_idx < 0:
+            scene_pos: QPointF = self.mapToScene(
+                event.position().toPoint()
+            )
+            hovered: int = -1
+            for item in self._vertex_items:
+                if item.data(0) == "vertex" and item.contains(scene_pos):
+                    hovered = item.data(1)
+                    break
+            # 只在高亮目标变化时重建。
+            if hovered != getattr(self, "_hovered_vertex", -1):
+                self._hovered_vertex = hovered
+                self._rebuild_vertex_markers(
+                    self._edit_geometry  # type: ignore[arg-type]
+                )
+
+        # ── 要素拖动 ──
+        if self._feature_drag_active and self._feature_drag_start is not None:
+            current_pt: QPointF = self.mapToScene(
+                event.position().toPoint()
+            )
+            dx: float = current_pt.x() - self._feature_drag_start.x()
+            dy: float = -(current_pt.y() - self._feature_drag_start.y())
+            self._feature_drag_start = current_pt
+            self.feature_moved.emit(dx, dy)
+            event.accept()
+            return
+
+        # ── 顶点拖拽 ──
+        if self._vertex_drag_idx >= 0:
+            pt: Point = self._screen_to_map_point(
+                event.position().toPoint()
+            )
+            idx: int = self._vertex_drag_idx
+            if idx < len(self._vertex_coords):
+                self._vertex_coords[idx] = (pt.x, pt.y)
+            # 直接移动拖拽中的顶点圆和预览连线。
+            ms: float = max(self._map_units_per_pixel * 7.0, 1e-6)
+            moved_vertex: bool = False
+            for item in self._vertex_items:
+                if (
+                    item.data(0) == "vertex"
+                    and item.data(1) == idx
+                    and isinstance(item, QGraphicsEllipseItem)
+                ):
+                    item.prepareGeometryChange()
+                    item.setRect(
+                        pt.x - ms, -pt.y - ms, ms * 2, ms * 2
+                    )
+                    item.update()
+                    moved_vertex = True
+                elif item.data(0) == "hover" and self._hovered_vertex == idx:
+                    item.prepareGeometryChange()
+                    hs = ms * 1.15
+                    item.setRect(
+                        pt.x - hs, -pt.y - hs, hs * 2, hs * 2
+                    )
+                    item.update()
+                elif item.data(0) == "preview" and isinstance(
+                    item, QGraphicsPathItem
+                ):
+                    item.prepareGeometryChange()
+                    item.setPath(self._build_preview_path())
+                    item.update()
+            # 同步更新要素的渲染图元路径。
+            self._update_feature_item_path()
+            # 如果顶点圆不在 items 中，重建全部。
+            if not moved_vertex:
+                self._rebuild_vertex_markers(
+                    self._edit_geometry  # type: ignore[arg-type]
+                )
+            event.accept()
+            return
+
+        # ── 数字化预览（含捕捉）──
+        if self._digitize_mode in ("line", "polygon"):
+            cursor_pos: QPoint = event.position().toPoint()
+            if self._snapping_enabled:
+                snap_pt: Point | None = self._find_snap_target(
+                    self._screen_to_map_point(cursor_pos)
+                )
+                if snap_pt is not None:
+                    self._show_snap_marker(snap_pt)
+                    # 把捕捉点反算回屏幕坐标用于预览。
+                    snap_scene: QPointF = QPointF(snap_pt.x, -snap_pt.y)
+                    cursor_pos = self.mapFromScene(snap_scene)
+                else:
+                    self._clear_snap_marker()
+            else:
+                self._clear_snap_marker()
+            self._rebuild_sketch_preview(cursor_pos)
+            # 仍更新状态栏坐标。
+            scene_pos: QPointF = self.mapToScene(event.position().toPoint())
+            self.coordinate_changed.emit(
+                f"坐标  {scene_pos.x():.6f}, {-scene_pos.y():.6f}"
+            )
+            event.accept()
+            return
+
         # 中键平移：计算位移并通过滚动条移动视图。
         if self._pan_mode == "middle" and self._last_middle_pos is not None:
             current_pos: QPoint = event.position().toPoint()
@@ -475,16 +1360,25 @@ class MapCanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        """结束中键平移、框选查询或框选缩放，其余交由父类处理。
+        # ── 要素拖动释放 ──
+        if self._feature_drag_active and event.button() == Qt.MouseButton.LeftButton:
+            self._feature_drag_active = False
+            self._feature_drag_start = None
+            self._update_cursor()
+            self.feature_drag_ended.emit()
+            event.accept()
+            return
 
-        参数:
-            event: 包含释放按钮类型的 Qt 鼠标释放事件。
+        # ── 顶点拖拽释放 ──
+        if self._vertex_drag_idx >= 0 and event.button() == Qt.MouseButton.LeftButton:
+            self._vertex_drag_idx = -1
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            self._rebuild_vertex_markers(
+                self._edit_geometry  # type: ignore[arg-type]
+            )
+            event.accept()
+            return
 
-        状态变化:
-            中键释放时退出平移模式；
-            框选查询释放时发射查询多边形并切回平移工具；
-            框选放大释放时缩放到该区域。
-        """
         # 中键释放：恢复光标样式。
         if self._pan_mode == "middle" and event.button() == Qt.MouseButton.MiddleButton:
             self._pan_mode = "none"
@@ -536,22 +1430,49 @@ class MapCanvas(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        """Esc 键退出查询/缩放等特殊工具模式，切回平移工具。
+        """Esc 退出工具模式；Backspace 撤销数字化最后顶点。
 
         参数:
             event: Qt 键盘事件。
         """
+        # Enter：提交顶点编辑。
         if (
-            event.key() == Qt.Key.Key_Escape
-            and (
-                self._point_query_active
-                or self._rectangle_query_active
-                or self._zoom_rect_active
-            )
+            event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+            and self._vertex_edit_active
         ):
+            new_geom: BaseGeometry | None = self._commit_vertex_edit()
+            if new_geom is not None:
+                self.geometry_edited.emit(new_geom)
             self.set_pan_tool()
             event.accept()
             return
+
+        # Esc：退出所有特殊模式。
+        if event.key() == Qt.Key.Key_Escape:
+            if (
+                self._point_query_active
+                or self._rectangle_query_active
+                or self._zoom_rect_active
+                or self._digitize_mode != "none"
+                or self._vertex_edit_active
+            ):
+                self.set_pan_tool()
+                event.accept()
+                return
+
+        # 数字化模式下的顶点撤销。
+        if self._digitize_mode in ("line", "polygon"):
+            is_ctrl_z: bool = (
+                event.key() == Qt.Key.Key_Z
+                and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            )
+            if event.key() == Qt.Key.Key_Backspace or is_ctrl_z:
+                if self._digitize_vertices:
+                    self._digitize_vertices.pop()
+                    self._rebuild_sketch_preview()
+                event.accept()
+                return
+
         super().keyPressEvent(event)
 
     # ── 光标管理 ─────────────────────────────────────────────
