@@ -94,6 +94,8 @@ class LayerPanel(QWidget):
     layer_attribute_requested = Signal(str)
     # 图层删除信号：请求从地图文档移除指定图层。
     layer_removed = Signal(str)
+    # 图层文件夹请求信号：请求打开指定图层数据文件所在文件夹。
+    layer_folder_requested = Signal(str)
     # 图层移动信号：携带图层编号及其在地图文档中的目标位置。
     layer_move_requested = Signal(str, int)
     # 图层定位信号：请求画布缩放至指定图层的完整范围。
@@ -267,6 +269,7 @@ class LayerPanel(QWidget):
         zoom_action = menu.addAction("缩放至图层")
         symbology_action = menu.addAction("符号系统")
         attribute_action = menu.addAction("打开属性表")
+        open_folder_action = menu.addAction("打开文件夹")
         remove_action = menu.addAction("删除图层")
         selected_action: object | None = self._execute_context_menu(menu, position)
         layer_id: str = str(item.data(0, Qt.ItemDataRole.UserRole))
@@ -276,6 +279,8 @@ class LayerPanel(QWidget):
             self.layer_symbology_requested.emit(layer_id)
         elif selected_action is attribute_action:
             self.layer_attribute_requested.emit(layer_id)
+        elif selected_action is open_folder_action:
+            self.layer_folder_requested.emit(layer_id)
         elif selected_action is remove_action:
             self.layer_removed.emit(layer_id)
 
