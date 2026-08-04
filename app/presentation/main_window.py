@@ -8,8 +8,8 @@ from pathlib import Path
 
 from pyproj import CRS
 from pyproj.exceptions import CRSError
-from PySide6.QtCore import QPointF, Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
+from PySide6.QtCore import QPointF, Qt, QTimer, QUrl
+from PySide6.QtGui import QCloseEvent, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -139,6 +139,8 @@ class MainWindow(QMainWindow):
         self._original_geoms: dict[tuple[str, FeatureId], BaseGeometry] = {}
         self._create_ui()
         self._connect_signals()
+        # 初始空栈时功能区撤销/重做按钮禁用。
+        self._update_undo_buttons()
         # Ctrl+Z 撤销最近一次地图修改。
         QShortcut(QKeySequence.StandardKey.Undo, self, self._undo)
         # Ctrl+Shift+Z 重做最近一次撤销。
@@ -217,6 +219,7 @@ class MainWindow(QMainWindow):
         self._layer_panel.layer_activated.connect(self._activate_layer)
         self._layer_panel.layer_visibility_changed.connect(self._change_visibility)
         self._layer_panel.layer_removed.connect(self._remove_layer)
+        self._layer_panel.layer_folder_requested.connect(self._open_layer_folder)
         self._layer_panel.layer_attribute_requested.connect(self._show_attribute_table)
         self._layer_panel.layer_zoom_requested.connect(self._zoom_to_layer)
         self._layer_panel.layer_symbology_requested.connect(self._show_symbology)
@@ -298,6 +301,8 @@ class MainWindow(QMainWindow):
             "show_attributes": self._show_active_attribute_table,
             "set_crs": self._set_display_crs,
             "about": self._show_about,
+            "undo": self._undo,
+            "redo": self._redo,
         }
         handler: Callable[[], None] | None = implemented_actions.get(action_id)
         if handler is not None:
@@ -375,11 +380,23 @@ class MainWindow(QMainWindow):
         dialog: DatabaseLayerDialog = DatabaseLayerDialog(layers, "加载数据库图层", parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        db_layer_id: int = dialog.selected_layer_id()
         try:
-            result = self._application.load_database_layer(dialog.selected_layer_id())
+            result = self._application.load_database_layer(db_layer_id)
         except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "加载数据库图层失败", str(error))
             return
+        # 可变单元：重做重新加载会产生新图层编号，撤销始终移除当前编号。
+        current_layer_id: list[str] = [result.layer_id]
+        self._push_undo(
+            f"加载数据库图层  {result.layer_id}",
+            undo_action=partial(self._remove_layer_record, current_layer_id),
+            redo_action=partial(
+                self._reload_database_layer,
+                db_layer_id,
+                current_layer_id,
+            ),
+        )
         self._refresh_workspace()
         self._ready_label.setText(f"已加载数据库图层  {result.layer_id}")
 
@@ -428,6 +445,18 @@ class MainWindow(QMainWindow):
             loaded_paths.append(data_path)
             if result.warning:
                 warnings.append(f"{data_path.name}：{result.warning}")
+            # 可变单元：重做重新打开文件会生成新图层编号，撤销始终移除当前编号。
+            current_layer_id: list[str] = [result.layer_id]
+            self._push_undo(
+                f"打开数据  {data_path.name}",
+                undo_action=partial(self._remove_layer_record, current_layer_id),
+                redo_action=partial(
+                    self._reopen_data,
+                    data_path,
+                    layer_name,
+                    current_layer_id,
+                ),
+            )
 
         if loaded_paths:
             # 全部文件处理完后只刷新一次，避免大批量导入时反复重绘地图。
@@ -522,6 +551,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_project_switch():
             return
         self._application.new_project()
+        self._clear_undo_history()
         self._refresh_workspace(preserve_view=False)
         self._ready_label.setText("已新建空白工程")
 
@@ -537,6 +567,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "打开工程失败", str(error))
             self._refresh_workspace(preserve_view=False)
             return
+        self._clear_undo_history()
         save_recent_project(path)
         self._refresh_workspace(
             view_state=result.view_state, preserve_view=False
@@ -562,6 +593,7 @@ class MainWindow(QMainWindow):
         except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "打开工程失败", str(error))
             return
+        self._clear_undo_history()
         self._refresh_workspace(result.view_state)
         self._ready_label.setText(f"已打开工程  {result.path.name}")
         save_recent_project(Path(path_string))
@@ -663,13 +695,151 @@ class MainWindow(QMainWindow):
         self._schedule_workspace_refresh()
 
     def _remove_layer(self, layer_id: str) -> None:
-        """删除指定图层并刷新工作区。
+        """删除指定图层并刷新工作区；删除可撤销恢复原图层。
 
         参数:
             layer_id: 需要从地图文档移除的真实图层编号。
         """
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        old_index: int | None = None
+        layer_snapshot: LayerSnapshot | None = None
+        for i, layer in enumerate(snapshot.layers):
+            if layer.layer_id == layer_id:
+                old_index = i
+                layer_snapshot = layer
+                break
+        if layer_snapshot is None or old_index is None:
+            return
+        was_active: bool = snapshot.active_layer_id == layer_id
         self._application.remove_layer(layer_id)
+        self._push_undo(
+            f"删除图层  {layer_snapshot.name}",
+            undo_action=partial(
+                self._restore_deleted_layer,
+                layer_snapshot,
+                old_index,
+                was_active,
+            ),
+            redo_action=partial(self._application.remove_layer, layer_id),
+        )
         self._schedule_workspace_refresh()
+
+    def _open_layer_folder(self, layer_id: str) -> None:
+        """在操作系统中打开图层数据文件所在文件夹。
+
+        参数:
+            layer_id: 待定位数据文件的图层编号。
+
+        说明:
+            数据库图层和未导出的数字化临时图层没有本地数据文件，
+            此时在状态栏提示而不是打开任何文件夹。
+        """
+        for layer in self._application.snapshot().layers:
+            if layer.layer_id != layer_id:
+                continue
+            source_path: Path | None = layer.layer.source_path
+            if source_path is None:
+                self.statusBar().showMessage(f"图层“{layer.name}”没有本地数据文件。")
+                return
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(source_path.parent)))
+            return
+
+    def _restore_deleted_layer(
+        self,
+        layer_snapshot: LayerSnapshot,
+        old_index: int,
+        was_active: bool,
+    ) -> None:
+        """撤销删除：按原位置、显隐与选择状态恢复已删除图层。
+
+        add_layer 只把图层加到顶层且默认可见，需要 move_layer 归位、
+        set_layer_visibility 恢复显隐；隐藏状态下文档不保留选择，
+        故仅在原图层可见且存在选择时恢复选择。
+        """
+        self._application.add_layer(layer_snapshot.layer)
+        self._application.move_layer(layer_snapshot.layer_id, old_index)
+        if not layer_snapshot.visible:
+            self._application.set_layer_visibility(layer_snapshot.layer_id, False)
+        # 合并当前各图层选择与待恢复图层的原选择，避免单层 set_selection 互相覆盖。
+        selections: dict[str, tuple[FeatureId, ...]] = self._capture_selections()
+        if layer_snapshot.selected_feature_ids and layer_snapshot.visible:
+            selections[layer_snapshot.layer_id] = layer_snapshot.selected_feature_ids
+        if selections:
+            try:
+                self._application.restore_selections(selections)
+            except ApplicationError:
+                pass
+        if was_active:
+            try:
+                self._application.set_active_layer(layer_snapshot.layer_id)
+            except ApplicationError:
+                pass
+
+    def _remove_layer_record(self, current_layer_id: list[str]) -> None:
+        """撤销打开数据：移除该条记录当前对应的图层。
+
+        参数:
+            current_layer_id: 可变单元，保存该记录当前实际存在的图层编号。
+        """
+        self._application.remove_layer(current_layer_id[0])
+
+    def _reopen_data(
+        self,
+        data_path: Path,
+        layer_name: str | None,
+        current_layer_id: list[str],
+    ) -> None:
+        """重做打开数据：重新读取文件并刷新当前图层编号。
+
+        重新打开会产生新的图层编号，因此撤销时只能移除当前编号的图层。
+
+        参数:
+            data_path: 待重新读取的空间数据文件路径。
+            layer_name: 首次加载时解析的容器内部图层名；为空表示非容器格式。
+            current_layer_id: 可变单元，更新为该次重开产生的图层编号。
+        """
+        result = self._application.open_data(data_path, layer_name)
+        current_layer_id[0] = result.layer_id
+
+    def _reload_database_layer(
+        self, db_layer_id: int, current_layer_id: list[str]
+    ) -> None:
+        """重做加载数据库图层：重新按数据库编号加载并刷新当前图层编号。
+
+        参数:
+            db_layer_id: 数据库中的图层编号。
+            current_layer_id: 可变单元，更新为该次加载产生的图层编号。
+        """
+        result = self._application.load_database_layer(db_layer_id)
+        current_layer_id[0] = result.layer_id
+
+    def _recreate_feature_layer(
+        self,
+        layer_name: str,
+        features: tuple[Feature, ...],
+        crs: CRS | None,
+        output_path: Path,
+        current_layer_id: list[str],
+    ) -> None:
+        """重做新建要素图层：重新创建图层并刷新当前图层编号。
+
+        参数:
+            layer_name: 图层显示名称。
+            features: 待写入的要素元组。
+            crs: 图层坐标系。
+            output_path: 输出文件路径。
+            current_layer_id: 可变单元，更新为该次创建产生的图层编号。
+        """
+        result_snap = self._application.create_feature_layer(
+            layer_name=layer_name,
+            features=features,
+            crs=crs,
+            output_path=output_path,
+        )
+        for layer in result_snap.layers:
+            if layer.name == layer_name:
+                current_layer_id[0] = layer.layer_id
+                break
 
     def _move_layer(self, layer_id: str, target_index: int) -> None:
         """按照图层面板请求调整真实地图图层顺序。
@@ -744,23 +914,49 @@ class MainWindow(QMainWindow):
         self._symbology_dock.show()
         self._refresh_workspace()
 
+    def _current_symbology(
+        self, layer_id: str
+    ) -> VectorSymbology | RasterSymbology | None:
+        """读取指定图层当前符号配置；图层不存在时返回空值。"""
+        for layer in self._application.snapshot().layers:
+            if layer.layer_id == layer_id:
+                return getattr(layer.layer, "symbology", None)
+        return None
+
+    def _apply_symbology_state(
+        self,
+        layer_id: str,
+        symbology: VectorSymbology | RasterSymbology,
+    ) -> None:
+        """按符号类型将矢量或栅格符号配置应用到图层（撤销/重做共用）。"""
+        if isinstance(symbology, VectorSymbology):
+            self._application.apply_vector_symbology(layer_id, symbology)
+        else:
+            self._application.apply_raster_symbology(layer_id, symbology)
+
     def _apply_symbology(
         self,
         layer_id: str,
         symbology: VectorSymbology | RasterSymbology,
     ) -> None:
         """自动应用面板提交的完整矢量或栅格符号配置。"""
+        before: VectorSymbology | RasterSymbology | None = self._current_symbology(
+            layer_id
+        )
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            if isinstance(symbology, VectorSymbology):
-                self._application.apply_vector_symbology(layer_id, symbology)
-            else:
-                self._application.apply_raster_symbology(layer_id, symbology)
+            self._apply_symbology_state(layer_id, symbology)
         except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "符号系统更新失败", str(error))
             return
         finally:
             QApplication.restoreOverrideCursor()
+        if before is not None:
+            self._push_undo(
+                "修改符号系统",
+                undo_action=partial(self._apply_symbology_state, layer_id, before),
+                redo_action=partial(self._apply_symbology_state, layer_id, symbology),
+            )
         self._refresh_workspace()
 
     def _apply_unique_symbology(
@@ -770,6 +966,9 @@ class MainWindow(QMainWindow):
         color_scheme: str,
     ) -> None:
         """生成并自动应用唯一值符号。"""
+        before: VectorSymbology | RasterSymbology | None = self._current_symbology(
+            layer_id
+        )
         try:
             self._application.apply_unique_value_symbology(
                 layer_id,
@@ -779,6 +978,20 @@ class MainWindow(QMainWindow):
         except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "唯一值符号更新失败", str(error))
             return
+        after: VectorSymbology | RasterSymbology | None = self._current_symbology(
+            layer_id
+        )
+        # 唯一值符号只能作用于矢量图层，应用成功前后符号必为矢量配置。
+        if isinstance(before, VectorSymbology) and isinstance(after, VectorSymbology):
+            self._push_undo(
+                "唯一值符号",
+                undo_action=partial(
+                    self._application.apply_vector_symbology, layer_id, before
+                ),
+                redo_action=partial(
+                    self._application.apply_vector_symbology, layer_id, after
+                ),
+            )
         self._refresh_workspace()
 
     def _apply_graduated_symbology(
@@ -790,6 +1003,9 @@ class MainWindow(QMainWindow):
         class_count: int,
     ) -> None:
         """生成并自动应用数值分级颜色。"""
+        before: VectorSymbology | RasterSymbology | None = self._current_symbology(
+            layer_id
+        )
         try:
             self._application.apply_graduated_symbology(
                 layer_id,
@@ -801,6 +1017,20 @@ class MainWindow(QMainWindow):
         except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "分级颜色更新失败", str(error))
             return
+        after: VectorSymbology | RasterSymbology | None = self._current_symbology(
+            layer_id
+        )
+        # 分级颜色只能作用于矢量图层，应用成功前后符号必为矢量配置。
+        if isinstance(before, VectorSymbology) and isinstance(after, VectorSymbology):
+            self._push_undo(
+                "分级颜色",
+                undo_action=partial(
+                    self._application.apply_vector_symbology, layer_id, before
+                ),
+                redo_action=partial(
+                    self._application.apply_vector_symbology, layer_id, after
+                ),
+            )
         self._refresh_workspace()
 
     def _change_category_visibility(
@@ -839,6 +1069,15 @@ class MainWindow(QMainWindow):
         else:
             return
         self._application.apply_vector_symbology(layer_id, updated)
+        self._push_undo(
+            "类别显隐",
+            undo_action=partial(
+                self._application.apply_vector_symbology, layer_id, symbology
+            ),
+            redo_action=partial(
+                self._application.apply_vector_symbology, layer_id, updated
+            ),
+        )
         self._refresh_workspace()
 
     def _show_active_attribute_table(self) -> None:
@@ -1071,15 +1310,18 @@ class MainWindow(QMainWindow):
                 new_layer_id = layer.layer_id
                 break
         if new_layer_id is not None:
+            # 可变单元：重做重新创建图层会生成新编号，撤销始终移除当前编号。
+            current_layer_id: list[str] = [new_layer_id]
             self._push_undo(
                 f"新建{label}要素",
-                undo_action=partial(self._application.remove_layer, new_layer_id),
+                undo_action=partial(self._remove_layer_record, current_layer_id),
                 redo_action=partial(
-                    self._application.create_feature_layer,
+                    self._recreate_feature_layer,
                     layer_name,
                     (feature,),
                     snapshot.display_crs,
                     output_path,
+                    current_layer_id,
                 ),
             )
         self._refresh_workspace()
@@ -1804,18 +2046,16 @@ class MainWindow(QMainWindow):
             selections: {layer_id: feature_ids} 映射。
         """
         try:
-            self._application.clear_selection()
+            self._application.restore_selections(selections)
         except ApplicationError:
             return
-        for layer_id, feature_ids in selections.items():
-            try:
-                self._application.set_selection(layer_id, feature_ids)
-            except ApplicationError:
-                continue
 
     def _clear_selection(self) -> None:
-        """清除已有矢量要素选择并刷新工作区。"""
+        """清除已有矢量要素选择并刷新工作区；操作可撤销恢复原选择。"""
+        before_selections: dict[str, tuple[FeatureId, ...]] = self._capture_selections()
         self._application.clear_selection()
+        if before_selections:
+            self._push_selection_undo("清除选择", before_selections, {})
         self._refresh_workspace()
 
     def _set_display_crs(self) -> None:
@@ -2039,6 +2279,17 @@ class MainWindow(QMainWindow):
 
     # ── 撤销 ────────────────────────────────────────────────
 
+    def _update_undo_buttons(self) -> None:
+        """按撤销/重做栈是否为空同步功能区按钮的可用状态。"""
+        self._ribbon.set_action_enabled("undo", bool(self._undo_stack))
+        self._ribbon.set_action_enabled("redo", bool(self._redo_stack))
+
+    def _clear_undo_history(self) -> None:
+        """切换工程后清空撤销与重做历史，避免旧工程操作作用到新工程。"""
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._update_undo_buttons()
+
     def _push_undo(
         self,
         description: str,
@@ -2057,6 +2308,7 @@ class MainWindow(QMainWindow):
         # 限制栈深度，丢弃最早的记录。
         if len(self._undo_stack) > 50:
             self._undo_stack.pop(0)
+        self._update_undo_buttons()
 
     def _undo(self) -> None:
         """Ctrl+Z：撤销最近一次地图修改，并将其移入重做栈。"""
@@ -2064,8 +2316,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("没有可撤销的操作", 3000)
             return
         description, undo_action, redo_action = self._undo_stack.pop()
-        undo_action()
+        try:
+            undo_action()
+        except (ApplicationError, ValueError) as error:
+            # 场景失效（图层/文件已不存在、坐标系已变更）时丢弃该条记录，
+            # 避免同一记录反复失败；已弹出栈，不回填重做栈。
+            self.statusBar().showMessage(f"撤销失败：{error}", 5000)
+            self._refresh_workspace()
+            self._update_undo_buttons()
+            return
         self._redo_stack.append((description, undo_action, redo_action))
+        self._update_undo_buttons()
         self._refresh_workspace()
         self._ready_label.setText(f"已撤销  {description}")
 
@@ -2075,8 +2336,16 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("没有可重做的操作", 3000)
             return
         description, undo_action, redo_action = self._redo_stack.pop()
-        redo_action()
+        try:
+            redo_action()
+        except (ApplicationError, ValueError) as error:
+            # 场景失效（文件已删除、数据库已断开）时丢弃该条记录，不回填撤销栈。
+            self.statusBar().showMessage(f"重做失败：{error}", 5000)
+            self._refresh_workspace()
+            self._update_undo_buttons()
+            return
         self._undo_stack.append((description, undo_action, redo_action))
+        self._update_undo_buttons()
         self._refresh_workspace()
         self._ready_label.setText(f"已重做  {description}")
 
