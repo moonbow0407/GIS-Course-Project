@@ -119,6 +119,7 @@ def test_layer_context_menu_can_request_zoom_to_layer(monkeypatch) -> None:
             "缩放至图层",
             "符号系统",
             "打开属性表",
+            "打开文件夹",
             "删除图层",
         ]
         return menu.actions()[0]
