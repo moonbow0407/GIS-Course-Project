@@ -266,6 +266,12 @@ QToolButton#ribbonButton:checked {
     color: #0f6cbd;
 }
 
+QToolButton#ribbonButton:disabled {
+    color: #b6c2d0;
+    background: transparent;
+    border: 1px solid transparent;
+}
+
 QToolButton#ribbonButton::menu-button {
     border: none;
     background: transparent;

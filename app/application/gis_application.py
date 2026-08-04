@@ -849,6 +849,27 @@ class GisApplication:
         self._modified = True
         return self.snapshot()
 
+    def restore_selections(
+        self, selections: dict[str, tuple[FeatureId, ...]]
+    ) -> WorkspaceSnapshot:
+        """一次性恢复多图层选择集合，避免逐层 set_selection 互相覆盖。
+
+        参数:
+            selections: {layer_id: feature_ids} 映射。
+
+        返回:
+            更新后选择状态的工作区快照。
+        """
+        self._document.clear_selection()
+        for layer_id, feature_ids in selections.items():
+            try:
+                self._document.set_selection(layer_id, feature_ids)
+            except (KeyError, ValueError):
+                # 图层已删除或要素编号已失效时跳过该图层，继续恢复其余选择。
+                continue
+        self._modified = True
+        return self.snapshot()
+
     def clear_selection(self) -> SelectionResult:
         """清除全部图层选择并返回空选择结果。"""
         self._document.clear_selection()

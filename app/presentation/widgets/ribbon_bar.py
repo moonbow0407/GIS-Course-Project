@@ -77,6 +77,8 @@ class RibbonBar(QWidget):
         self._pages: QStackedWidget = QStackedWidget()
         # 可切换按钮引用：按 action_id 索引，供外部设置勾选状态。
         self._checkable_buttons: dict[str, QToolButton] = {}
+        # 全部按钮引用：按 action_id 索引，供外部设置启用状态。
+        self._all_buttons: dict[str, QToolButton] = {}
         self._create_ui()
 
     def _create_ui(self) -> None:
@@ -213,18 +215,19 @@ class RibbonBar(QWidget):
             button.clicked.connect(
                 lambda checked=False, action_id=spec.action_id: self.action_triggered.emit(action_id)
             )
+        self._all_buttons[spec.action_id] = button
         return button
 
     @staticmethod
-    def _glyph_icon(glyph: str, color: str) -> QIcon:
-        """把简短字符绘制为清晰、统一且无需外部资源的功能图标。
+    def _glyph_pixmap(glyph: str, color: str) -> QPixmap:
+        """把简短字符绘制为透明背景的统一尺寸像素图。
 
         参数:
             glyph: 用于表达操作含义的单字符或短符号。
             color: Qt 支持的十六进制图标颜色。
 
         返回:
-            具有透明背景和统一画布尺寸的 Qt 图标。
+            具有透明背景和统一画布尺寸的像素图。
         """
         pixmap: QPixmap = QPixmap(40, 40)
         pixmap.fill(Qt.GlobalColor.transparent)
@@ -236,7 +239,26 @@ class RibbonBar(QWidget):
         painter.setFont(font)
         painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, glyph)
         painter.end()
-        return QIcon(pixmap)
+        return pixmap
+
+    @staticmethod
+    def _glyph_icon(glyph: str, color: str) -> QIcon:
+        """创建包含正常与禁用两种模式的统一风格功能图标。
+
+        参数:
+            glyph: 用于表达操作含义的单字符或短符号。
+            color: Qt 支持的十六进制图标颜色。
+
+        返回:
+            按钮禁用时自动切换为弱化灰色模式的 Qt 图标。
+        """
+        icon: QIcon = QIcon(RibbonBar._glyph_pixmap(glyph, color))
+        icon.addPixmap(
+            RibbonBar._glyph_pixmap(glyph, "#b6c2d0"),
+            QIcon.Mode.Disabled,
+            QIcon.State.Off,
+        )
+        return icon
 
     @staticmethod
     def _tab_specs() -> tuple[tuple[str, tuple[RibbonGroupSpec, ...]], ...]:
@@ -375,6 +397,17 @@ class RibbonBar(QWidget):
         btn: QToolButton | None = self._checkable_buttons.get(action_id)
         if btn is not None:
             btn.setChecked(checked)
+
+    def set_action_enabled(self, action_id: str, enabled: bool) -> None:
+        """设置操作按钮的可用状态；禁用后不再响应点击并显示弱化样式。
+
+        参数:
+            action_id: 按钮操作编号。
+            enabled: True 为可点击状态。
+        """
+        button: QToolButton | None = self._all_buttons.get(action_id)
+        if button is not None:
+            button.setEnabled(enabled)
 
     @classmethod
     def action_title(cls, action_id: str) -> str | None:

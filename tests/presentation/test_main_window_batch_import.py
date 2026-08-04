@@ -43,7 +43,7 @@ def test_open_data_accepts_multiple_files_and_reports_partial_failures(monkeypat
         opened_paths.append(path)
         if path.suffix == ".xyz":
             raise UnsupportedVectorFormat(f"不支持的数据格式：{path.suffix}")
-        return SimpleNamespace(warning=None)
+        return SimpleNamespace(layer_id=f"fake-{len(opened_paths)}", warning=None)
 
     monkeypatch.setattr(window._application, "open_data", open_data)
     monkeypatch.setattr(
