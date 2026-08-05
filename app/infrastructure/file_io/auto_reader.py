@@ -7,14 +7,17 @@ from pyproj import CRS
 from app.application.errors import UnsupportedVectorFormat
 from app.domain.spatial_layer import SpatialLayer
 from app.infrastructure.file_io.geopandas_vector_reader import GeoPandasVectorReader
+from app.infrastructure.file_io.kml_vector_reader import KmlVectorReader
 from app.infrastructure.file_io.rasterio_raster_reader import RasterioRasterReader
 
 
 class AutoDataReader:
     """统一判断矢量或栅格文件，并转发到对应读取器。"""
 
-    # 矢量扩展名：交给 GeoPandas 读取。
-    VECTOR_SUFFIXES: frozenset[str] = GeoPandasVectorReader.SUPPORTED_SUFFIXES
+    # 矢量扩展名：GeoPandas 负责常规格式，KML 使用独立 XML 解析器。
+    VECTOR_SUFFIXES: frozenset[str] = (
+        GeoPandasVectorReader.SUPPORTED_SUFFIXES | KmlVectorReader.SUPPORTED_SUFFIXES
+    )
 
     # 栅格扩展名：交给 Rasterio 读取。
     RASTER_SUFFIXES: frozenset[str] = RasterioRasterReader.SUPPORTED_SUFFIXES
@@ -22,6 +25,7 @@ class AutoDataReader:
     def __init__(self) -> None:
         """创建自动分派器及矢量、栅格读取适配器。"""
         self._vector_reader: GeoPandasVectorReader = GeoPandasVectorReader()
+        self._kml_reader: KmlVectorReader = KmlVectorReader()
         self._raster_reader: RasterioRasterReader = RasterioRasterReader()
 
     def read(
@@ -45,6 +49,8 @@ class AutoDataReader:
         """
         suffix: str = path.suffix.lower()
         if suffix in self.VECTOR_SUFFIXES:
+            if suffix in KmlVectorReader.SUPPORTED_SUFFIXES:
+                return self._kml_reader.read(path, target_crs, layer_name)
             return self._vector_reader.read(path, target_crs, layer_name)
         if suffix in self.RASTER_SUFFIXES:
             return self._raster_reader.read(path, target_crs)

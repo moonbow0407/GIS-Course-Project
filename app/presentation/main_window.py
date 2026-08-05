@@ -424,7 +424,7 @@ class MainWindow(QMainWindow):
             self,
             "打开空间数据",
             "",
-            "空间数据 (*.shp *.geojson *.json *.gpkg *.tif *.tiff *.img *.dem);;所有文件 (*.*)",
+            "空间数据 (*.shp *.geojson *.json *.gpkg *.kml *.tif *.tiff *.img *.dem);;所有文件 (*.*)",
         )[0]
         if not path_strings:
             return
