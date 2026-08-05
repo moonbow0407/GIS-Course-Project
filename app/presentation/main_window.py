@@ -1267,6 +1267,30 @@ class MainWindow(QMainWindow):
             f"数字化{label}：左键放置  |  右键完成  |  Esc 取消"
         )
 
+    def _default_feature_output_path(
+        self, layer_name: str, snapshot: WorkspaceSnapshot
+    ) -> Path:
+        """计算新建要素图层的默认输出路径。
+
+        优先使用活动图层源文件所在目录，其次工程文件所在目录，
+        最后回退到用户主目录。
+        """
+        directory: Path | None = None
+        if snapshot.active_layer_id is not None:
+            for layer in snapshot.layers:
+                if layer.layer_id == snapshot.active_layer_id:
+                    source_path: Path | None = layer.layer.source_path
+                    if source_path is not None:
+                        directory = source_path.parent
+                    break
+        if directory is None:
+            project_path: Path | None = self._application.project_path
+            if project_path is not None:
+                directory = project_path.parent
+        if directory is None:
+            directory = Path.home()
+        return directory / f"{layer_name}.geojson"
+
     def _on_feature_digitized(self, geometry: BaseGeometry) -> None:
         """数字化完成回调：弹出属性对话框，创建图层。
 
@@ -1292,7 +1316,7 @@ class MainWindow(QMainWindow):
         snapshot: WorkspaceSnapshot = self._application.snapshot()
         ts: str = datetime.now().strftime("%Y%m%d_%H%M%S")
         layer_name: str = f"新建{label}_{ts}"
-        output_path: Path = Path.home() / f"{layer_name}.geojson"
+        output_path: Path = self._default_feature_output_path(layer_name, snapshot)
         try:
             result_snap = self._application.create_feature_layer(
                 layer_name=layer_name,
@@ -1333,7 +1357,7 @@ class MainWindow(QMainWindow):
         else:
             self._map_canvas.set_digitize_polygon_tool()
         self._ready_label.setText(
-            f"已创建{label}要素 → {layer_name}"
+            f"已创建{label}要素 → {layer_name}（{output_path.resolve()}）"
         )
 
     def _delete_selected_features(self) -> None:
