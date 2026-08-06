@@ -1248,6 +1248,26 @@ class MapCanvas(QGraphicsView):
 
         super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """线、面数字化时双击完成绘制，其余情况交给父类处理。
+
+        双击序列中第一次左键按下已经把该位置添加为顶点，
+        这里直接使用已收集的顶点完成草图，避免放置两个相同顶点。
+        """
+        if (
+            self._digitize_mode in ("line", "polygon")
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            geometry: BaseGeometry | None = self._finish_sketch()
+            if geometry is not None:
+                self.feature_digitized.emit(geometry)
+            else:
+                # 顶点不足（如面少于 3 点）时退出数字化工具。
+                self.set_pan_tool()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """驱动数字化预览、中键平移或更新框选橡皮筋。
 

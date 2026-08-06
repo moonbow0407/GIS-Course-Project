@@ -2,7 +2,6 @@
 
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 
@@ -35,6 +34,7 @@ from app.application.gis_application import GisApplication, _chaikin_smooth
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, SelectedFeature, WorkspaceSnapshot
 from app.domain.feature import AttributeValue, Feature, FeatureId
+from app.domain.layer_style import GeometryFamily
 from app.domain.symbology import RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.database.postgis_database_gateway import PostgisDatabaseGateway
@@ -61,6 +61,10 @@ from app.presentation.widgets.startup_dialog import (
     save_recent_project,
 )
 from app.presentation.widgets.symbology_panel import SymbologyPanel
+from app.presentation.widgets.target_layer_dialog import (
+    TargetLayerDialog,
+    TargetLayerOption,
+)
 
 
 class MainWindow(QMainWindow):
@@ -119,6 +123,9 @@ class MainWindow(QMainWindow):
         self._editing_fid: FeatureId | None = None
         # 当前数字化模式：供连续创建后重新激活工具。
         self._digitize_mode: str = "point"
+        # 数字化目标图层：启动时锁定，绘制期间画布点击会清除活动图层，
+        # 追加必须回到启动数字化时选定的图层而不是当时的活动图层。
+        self._digitize_target_layer_id: str | None = None
         # 捕捉开关：默认关闭。
         self._snapping_enabled: bool = False
         # 当前持续激活的查询入口，用于同步三种查询按钮的互斥高亮状态。
@@ -813,34 +820,6 @@ class MainWindow(QMainWindow):
         result = self._application.load_database_layer(db_layer_id)
         current_layer_id[0] = result.layer_id
 
-    def _recreate_feature_layer(
-        self,
-        layer_name: str,
-        features: tuple[Feature, ...],
-        crs: CRS | None,
-        output_path: Path,
-        current_layer_id: list[str],
-    ) -> None:
-        """重做新建要素图层：重新创建图层并刷新当前图层编号。
-
-        参数:
-            layer_name: 图层显示名称。
-            features: 待写入的要素元组。
-            crs: 图层坐标系。
-            output_path: 输出文件路径。
-            current_layer_id: 可变单元，更新为该次创建产生的图层编号。
-        """
-        result_snap = self._application.create_feature_layer(
-            layer_name=layer_name,
-            features=features,
-            crs=crs,
-            output_path=output_path,
-        )
-        for layer in result_snap.layers:
-            if layer.name == layer_name:
-                current_layer_id[0] = layer.layer_id
-                break
-
     def _move_layer(self, layer_id: str, target_index: int) -> None:
         """按照图层面板请求调整真实地图图层顺序。
 
@@ -1256,6 +1235,65 @@ class MainWindow(QMainWindow):
                 "请先打开一个具有坐标系的图层以确定地图坐标系。",
             )
             return
+        # 新增的要素将追加到矢量图层，先弹出对话框让用户选择目标图层；
+        # 候选按几何类型和可写回格式过滤，默认选中当前活动图层。
+        expected_family: GeometryFamily = {
+            "point": GeometryFamily.POINT,
+            "line": GeometryFamily.LINE,
+            "polygon": GeometryFamily.POLYGON,
+        }[mode]
+        options: list[TargetLayerOption] = []
+        for layer in snapshot.layers:
+            if not isinstance(layer.layer, VectorLayer):
+                continue
+            family: GeometryFamily | None = layer.geometry_family
+            if family != GeometryFamily.MIXED and family != expected_family:
+                continue
+            source_path: Path | None = layer.layer.source_path
+            if source_path is None or source_path.suffix.lower() not in {
+                ".shp",
+                ".geojson",
+            }:
+                continue
+            options.append(
+                TargetLayerOption(
+                    layer_id=layer.layer_id,
+                    name=layer.name,
+                    description=(
+                        f"{self._geometry_family_label(family)} · "
+                        f"{len(layer.layer.features)} 个要素 · "
+                        f"{source_path.suffix.lstrip('.')}"
+                    ),
+                )
+            )
+        if not options:
+            QMessageBox.information(
+                self,
+                "新增要素",
+                f"没有可用于添加{label}要素的图层。\n"
+                "请先打开一个 Shapefile 或 GeoJSON 矢量图层。",
+            )
+            return
+        dialog: TargetLayerDialog = TargetLayerDialog(
+            tuple(options),
+            label,
+            snapshot.active_layer_id,
+            self,
+        )
+        if dialog.exec() != TargetLayerDialog.DialogCode.Accepted:
+            # 用户取消：不激活数字化工具。
+            return
+        target_layer_id: str | None = dialog.selected_layer_id()
+        if target_layer_id is None:
+            return
+        target_layer: LayerSnapshot | None = None
+        for layer in snapshot.layers:
+            if layer.layer_id == target_layer_id:
+                target_layer = layer
+                break
+        if target_layer is None:
+            return
+        self._digitize_target_layer_id = target_layer.layer_id
         self._digitize_mode = mode
         if mode == "point":
             self._map_canvas.set_digitize_point_tool()
@@ -1264,101 +1302,118 @@ class MainWindow(QMainWindow):
         else:
             self._map_canvas.set_digitize_polygon_tool()
         self._ready_label.setText(
-            f"数字化{label}：左键放置  |  右键完成  |  Esc 取消"
+            f"数字化{label}：左键放置  |  双击完成  |  Esc 取消"
+            f"  （将追加到「{target_layer.name}」）"
         )
 
-    def _default_feature_output_path(
-        self, layer_name: str, snapshot: WorkspaceSnapshot
-    ) -> Path:
-        """计算新建要素图层的默认输出路径。
-
-        优先使用活动图层源文件所在目录，其次工程文件所在目录，
-        最后回退到用户主目录。
-        """
-        directory: Path | None = None
-        if snapshot.active_layer_id is not None:
-            for layer in snapshot.layers:
-                if layer.layer_id == snapshot.active_layer_id:
-                    source_path: Path | None = layer.layer.source_path
-                    if source_path is not None:
-                        directory = source_path.parent
-                    break
-        if directory is None:
-            project_path: Path | None = self._application.project_path
-            if project_path is not None:
-                directory = project_path.parent
-        if directory is None:
-            directory = Path.home()
-        return directory / f"{layer_name}.geojson"
-
     def _on_feature_digitized(self, geometry: BaseGeometry) -> None:
-        """数字化完成回调：弹出属性对话框，创建图层。
+        """数字化完成回调：填写属性并追加到活动矢量图层。
 
         参数:
             geometry: 用户绘制的 Shapely 几何对象。
         """
-        geom_type: str = geometry.geom_type
-        if geom_type == "Point":
-            label: str = "点"
-        elif geom_type == "LineString":
-            label = "线"
-        elif geom_type == "Polygon":
-            label = "面"
-        else:
-            label = "要素"
-
-        # 构造要素（空属性，后续可通过修改属性填充）。
-        fid: int = 0
-        feature: Feature = Feature(
-            fid=fid, geometry=geometry, attributes={}
-        )
-        # 自动生成图层名称和输出路径。
         snapshot: WorkspaceSnapshot = self._application.snapshot()
-        ts: str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        layer_name: str = f"新建{label}_{ts}"
-        output_path: Path = self._default_feature_output_path(layer_name, snapshot)
+        # 使用启动数字化时锁定的目标图层：绘制期间点击画布会清除
+        # 活动图层，不能依赖当时的 active_layer_id。
+        target_layer: LayerSnapshot | None = None
+        if self._digitize_target_layer_id is not None:
+            for layer in snapshot.layers:
+                if layer.layer_id == self._digitize_target_layer_id:
+                    target_layer = layer
+                    break
+        if target_layer is None:
+            # 目标图层在数字化过程中被移除，直接取消本次创建。
+            self._reactivate_digitize_tool()
+            return
+        label: str = self._geometry_label(geometry)
+        # 从图层已有要素收集字段结构，作为属性表单的预填字段；
+        # 没有字段时表单为空，用户仍可自行添加字段行。
+        fields: dict[str, AttributeValue] = {}
+        if isinstance(target_layer.layer, VectorLayer):
+            for feature in target_layer.layer.features:
+                for name in feature.attributes:
+                    fields.setdefault(name, None)
+        dialog: EditFeatureDialog = EditFeatureDialog(
+            fields, f"新增{label}要素", self
+        )
+        if dialog.exec() != EditFeatureDialog.DialogCode.Accepted:
+            # 用户取消：保持工具激活，不产生任何改动。
+            self._reactivate_digitize_tool()
+            return
+        before: tuple[Feature, ...] = ()
+        if isinstance(target_layer.layer, VectorLayer):
+            before = target_layer.layer.features
         try:
-            result_snap = self._application.create_feature_layer(
-                layer_name=layer_name,
-                features=(feature,),
-                crs=snapshot.display_crs,
-                output_path=output_path,
+            result_snap = self._application.append_feature(
+                layer_id=target_layer.layer_id,
+                geometry=geometry,
+                attributes=dialog.attributes(),
             )
         except ApplicationError as error:
-            QMessageBox.warning(self, "创建要素失败", str(error))
+            QMessageBox.warning(self, "追加要素失败", str(error))
+            self._reactivate_digitize_tool()
             return
-        # 记录新建图层的 ID，用于撤销。
-        new_layer_id: str | None = None
+        after: tuple[Feature, ...] = ()
         for layer in result_snap.layers:
-            if layer.name == layer_name:
-                new_layer_id = layer.layer_id
+            if (
+                layer.layer_id == target_layer.layer_id
+                and isinstance(layer.layer, VectorLayer)
+            ):
+                after = layer.layer.features
                 break
-        if new_layer_id is not None:
-            # 可变单元：重做重新创建图层会生成新编号，撤销始终移除当前编号。
-            current_layer_id: list[str] = [new_layer_id]
-            self._push_undo(
-                f"新建{label}要素",
-                undo_action=partial(self._remove_layer_record, current_layer_id),
-                redo_action=partial(
-                    self._recreate_feature_layer,
-                    layer_name,
-                    (feature,),
-                    snapshot.display_crs,
-                    output_path,
-                    current_layer_id,
-                ),
-            )
+        self._push_undo(
+            f"新增{label}要素",
+            undo_action=partial(
+                self._application.replace_layer_features,
+                target_layer.layer_id,
+                before,
+            ),
+            redo_action=partial(
+                self._application.replace_layer_features,
+                target_layer.layer_id,
+                after,
+            ),
+        )
         self._refresh_workspace()
-        # 保持数字化工具激活，支持连续创建。
+        # 保持数字化工具激活，支持连续追加。
+        self._reactivate_digitize_tool()
+        self._ready_label.setText(
+            f"已向图层「{target_layer.name}」添加{label}要素"
+            f"（共 {len(after)} 个要素）"
+        )
+
+    @staticmethod
+    def _geometry_family_label(family: GeometryFamily | None) -> str:
+        """返回几何类别的中文名称，未知类别时显示为矢量。"""
+        if family is None:
+            return "矢量"
+        return {
+            GeometryFamily.POINT: "点",
+            GeometryFamily.LINE: "线",
+            GeometryFamily.POLYGON: "面",
+            GeometryFamily.MIXED: "混合",
+        }.get(family, "矢量")
+
+    @staticmethod
+    def _geometry_label(geometry: BaseGeometry) -> str:
+        """返回几何类型的简短中文名称。"""
+        geometry_type: str = geometry.geom_type
+        if geometry_type == "Point":
+            return "点"
+        if geometry_type == "LineString":
+            return "线"
+        if geometry_type == "Polygon":
+            return "面"
+        return "要素"
+
+    def _reactivate_digitize_tool(self) -> None:
+        """重新激活当前数字化工具，支持连续追加要素。"""
         if self._digitize_mode == "point":
             self._map_canvas.set_digitize_point_tool()
         elif self._digitize_mode == "line":
             self._map_canvas.set_digitize_line_tool()
         else:
             self._map_canvas.set_digitize_polygon_tool()
-        self._ready_label.setText(
-            f"已创建{label}要素 → {layer_name}（{output_path.resolve()}）"
-        )
 
     def _delete_selected_features(self) -> None:
         """删除当前所有选中的要素，删除前弹出确认。

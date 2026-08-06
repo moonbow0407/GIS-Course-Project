@@ -66,6 +66,7 @@ from app.application.symbology_service import (
     create_unique_value_symbology,
 )
 from app.domain.feature import AttributeValue, Feature, FeatureId
+from app.domain.layer_style import GeometryFamily
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
@@ -205,6 +206,9 @@ class GisApplication:
     data_reader: DataReader
     # 空间数据写入端口：为空时保留只读应用服务兼容能力。
     data_writer: DataWriter | None
+
+    # 支持原地写回的矢量后缀：覆盖写入器只能安全重建整文件的格式。
+    _APPENDABLE_SUFFIXES: frozenset[str] = frozenset({".shp", ".geojson"})
 
     def __init__(
         self,
@@ -630,37 +634,61 @@ class GisApplication:
             features=tuple(matched_features), snapshot=self.snapshot()
         )
 
-    def create_feature_layer(
+    def append_feature(
         self,
-        layer_name: str,
-        features: tuple[Feature, ...],
-        crs: CRS | None,
-        output_path: Path,
+        layer_id: str,
+        geometry: BaseGeometry,
+        attributes: Mapping[str, AttributeValue],
     ) -> WorkspaceSnapshot:
-        """用给定要素创建新图层，写入磁盘并加入工作区。
+        """向指定矢量图层追加一个要素并写回源文件。
 
         参数:
-            layer_name: 图层显示名称。
-            features: 要写入的要素元组。
-            crs: 坐标系（pyproj CRS 或 None）。
-            output_path: 输出文件路径。
+            layer_id: 目标图层编号。
+            geometry: 数字化生成的地图坐标系几何对象。
+            attributes: 要素属性字典。
 
         返回:
-            新图层加入后的完整工作区快照。
+            追加完成后的完整工作区快照。
+
+        异常:
+            LayerNotFound: 图层不存在时抛出。
+            ApplicationError: 图层不是矢量图层、几何类型与图层不符，
+                或源文件格式不支持原地写回时抛出。
+            DataWriteFailed: 数据写出服务未配置或写回失败时抛出。
         """
-        if not features:
-            raise ApplicationError("要素集合不能为空。")
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ApplicationError("只能向矢量图层追加要素。")
+        self._validate_append_geometry(layer, geometry)
+        if layer.source_path is None:
+            raise ApplicationError(
+                f"图层「{layer.name}」没有本地数据文件，暂不支持追加要素。"
+            )
+        if layer.source_path.suffix.lower() not in self._APPENDABLE_SUFFIXES:
+            raise ApplicationError(
+                f"图层「{layer.name}」源文件格式 {layer.source_path.suffix} "
+                "暂不支持追加要素，请使用 Shapefile 或 GeoJSON 图层。"
+            )
         if self.data_writer is None:
             raise DataWriteFailed("空间数据写出服务尚未配置。")
-        output_layer: VectorLayer = VectorLayer.create(
-            name=layer_name,
-            features=features,
-            crs=crs,
-            source_path=output_path,
+
+        feature: Feature = Feature(
+            fid=self._next_feature_id(layer),
+            geometry=geometry,
+            attributes=dict(attributes),
         )
-        self.data_writer.write(output_layer, output_path, ())
-        self._document.add_layer(output_layer)
-        self._document.set_active_layer(output_layer.layer_id)
+        updated: VectorLayer = VectorLayer.create(
+            layer_id=layer.layer_id,
+            name=layer.name,
+            features=layer.features + (feature,),
+            crs=layer.crs,
+            source_path=layer.source_path,
+            source_layer_name=layer.source_layer_name,
+            database_layer_id=layer.database_layer_id,
+            symbology=layer.symbology,
+        )
+        self._document.replace_layer(updated)
+        self._write_layer_to_source(updated)
         self._modified = True
         return self.snapshot()
 
@@ -827,6 +855,40 @@ class GisApplication:
         self.data_writer.write(
             layer, layer.source_path, (), layer.source_layer_name
         )
+
+    @staticmethod
+    def _validate_append_geometry(
+        layer: VectorLayer, geometry: BaseGeometry
+    ) -> None:
+        """校验追加几何与图层几何类别一致，混合图层接受任意类型。"""
+        if layer.geometry_family == GeometryFamily.MIXED:
+            return
+        family_by_type: dict[str, GeometryFamily] = {
+            "Point": GeometryFamily.POINT,
+            "MultiPoint": GeometryFamily.POINT,
+            "LineString": GeometryFamily.LINE,
+            "MultiLineString": GeometryFamily.LINE,
+            "Polygon": GeometryFamily.POLYGON,
+            "MultiPolygon": GeometryFamily.POLYGON,
+        }
+        family: GeometryFamily | None = family_by_type.get(geometry.geom_type)
+        if family is None or family != layer.geometry_family:
+            raise ApplicationError(
+                f"几何类型与图层「{layer.name}」不符，无法追加要素。"
+            )
+
+    @staticmethod
+    def _next_feature_id(layer: VectorLayer) -> FeatureId:
+        """返回图层下一个可用的数值要素编号。
+
+        文件格式不保存要素编号，编号只存在于内存图层中，
+        追加时取现有最大数值编号加一，保证选择与撤销逻辑稳定。
+        """
+        max_id: int = max(
+            (feature.fid for feature in layer.features if isinstance(feature.fid, int)),
+            default=0,
+        )
+        return max_id + 1
 
     def set_selection(
         self, layer_id: str, feature_ids: tuple[FeatureId, ...]

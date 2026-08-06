@@ -289,3 +289,85 @@ def test_new_project_clears_undo_history(monkeypatch) -> None:
     assert len(window._redo_stack) == 0
     assert window._ribbon._all_buttons["undo"].isEnabled() is False
     window.close()
+
+
+class _FakeEditDialog:
+    """替代属性表单的确定性假对话框，模拟用户确认。"""
+
+    class DialogCode:
+        Accepted = 1
+        Rejected = 0
+
+    def __init__(
+        self,
+        attributes: dict[str, object],
+        feature_label: str,
+        parent: object = None,
+    ) -> None:
+        pass
+
+    def exec(self) -> int:
+        return self.DialogCode.Accepted
+
+    def attributes(self) -> dict[str, object]:
+        return {"名称": "新点"}
+
+
+class _FakeTargetDialog:
+    """替代目标图层选择对话框，返回第一个候选图层。"""
+
+    class DialogCode:
+        Accepted = 1
+        Rejected = 0
+
+    def __init__(
+        self,
+        options: tuple[object, ...],
+        geometry_label: str,
+        default_layer_id: str | None = None,
+        parent: object = None,
+    ) -> None:
+        self._options: list[object] = list(options)
+
+    def exec(self) -> int:
+        return self.DialogCode.Accepted
+
+    def selected_layer_id(self) -> str | None:
+        if self._options:
+            return self._options[0].layer_id  # type: ignore[attr-defined]
+        return None
+
+
+def test_digitize_append_undo_redo_restores_feature_set(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """撤销应恢复追加前的要素集合，重做应重新追加。"""
+    source: Path = tmp_path / "points.geojson"
+    layer: VectorLayer = VectorLayer.create(
+        layer_id="l1",
+        name="监测点",
+        features=(Feature(fid=1, geometry=Point(0, 0), attributes={"名称": "甲"}),),
+        crs=CRS_4549,
+        source_path=source,
+    )
+    document: MapDocument = MapDocument()
+    document.add_layer(layer)
+    document.set_active_layer(layer.layer_id)
+    window: MainWindow = _make_window(document)
+    monkeypatch.setattr(
+        "app.presentation.main_window.EditFeatureDialog", _FakeEditDialog
+    )
+    monkeypatch.setattr(
+        "app.presentation.main_window.TargetLayerDialog", _FakeTargetDialog
+    )
+
+    window._start_digitize("point", "点")
+    window._on_feature_digitized(Point(10, 10))
+    assert len(window._application.snapshot().layers[0].layer.features) == 2
+
+    window._undo()
+    assert len(window._application.snapshot().layers[0].layer.features) == 1
+
+    window._redo()
+    assert len(window._application.snapshot().layers[0].layer.features) == 2
+    window.close()
