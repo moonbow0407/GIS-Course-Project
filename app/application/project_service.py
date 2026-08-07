@@ -96,6 +96,15 @@ class ProjectService:
                     restored_layer.layer_id,
                     layer_reference.visible,
                 )
+                document.set_layer_opacity(
+                    restored_layer.layer_id,
+                    layer_reference.opacity,
+                )
+                document.set_layer_scale_range(
+                    restored_layer.layer_id,
+                    layer_reference.min_scale_percent,
+                    layer_reference.max_scale_percent,
+                )
                 if isinstance(restored_layer, VectorLayer):
                     try:
                         document.set_selection(
@@ -199,6 +208,9 @@ class ProjectService:
                         if layer.symbology is not None
                         else None
                     ),
+                    opacity=document.layer_opacity(layer.layer_id),
+                    min_scale_percent=document.layer_scale_range(layer.layer_id)[0],
+                    max_scale_percent=document.layer_scale_range(layer.layer_id)[1],
                 )
             )
 

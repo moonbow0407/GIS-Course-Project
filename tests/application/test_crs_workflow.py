@@ -34,6 +34,8 @@ def test_set_display_crs_reprojects_loaded_layer_without_changing_layer_id(
     application: GisApplication = GisApplication(GeoPandasVectorReader())
     application.open_data(path)
     original_layer = application.snapshot().layers[0].layer
+    application.set_layer_opacity(original_layer.layer_id, 0.35)
+    application.set_layer_scale_range(original_layer.layer_id, 75.0, 250.0)
 
     application.set_display_crs(CRS.from_epsg(3857))
 
@@ -41,6 +43,9 @@ def test_set_display_crs_reprojects_loaded_layer_without_changing_layer_id(
     assert snapshot.display_crs == CRS.from_epsg(3857)
     assert snapshot.layers[0].layer_id == original_layer.layer_id
     assert snapshot.layers[0].layer.crs == CRS.from_epsg(3857)
+    assert snapshot.layers[0].opacity == pytest.approx(0.35)
+    assert snapshot.layers[0].min_scale_percent == pytest.approx(75.0)
+    assert snapshot.layers[0].max_scale_percent == pytest.approx(250.0)
     assert snapshot.layers[0].layer.features[0].geometry.x == pytest.approx(
         111319.49,
         rel=1e-5,

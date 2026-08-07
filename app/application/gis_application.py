@@ -389,6 +389,7 @@ class GisApplication:
             raise LayerNotFound(f"图层不存在：{layer_id}") from error
         except ValueError as error:
             raise ValueError(f"透明度设置无效：{error}") from error
+        self._modified = True
         return self.snapshot()
 
     def set_layer_scale_range(
@@ -404,6 +405,7 @@ class GisApplication:
             raise LayerNotFound(f"图层不存在：{layer_id}") from error
         except ValueError as error:
             raise ValueError(f"显示比例范围无效：{error}") from error
+        self._modified = True
         return self.snapshot()
 
     def set_active_layer(self, layer_id: str) -> WorkspaceSnapshot:
@@ -494,21 +496,34 @@ class GisApplication:
         self._modified = True
         return self.snapshot()
 
-    def identify_features(self, point: Point, tolerance: float) -> list[SelectedFeature]:
+    def identify_features(
+        self,
+        point: Point,
+        tolerance: float,
+        query_layer_ids: tuple[str, ...] | None = None,
+    ) -> list[SelectedFeature]:
         """返回容差范围内所有可见图层的命中要素，按加权距离排序。
 
         点要素优先于线，线优先于面——避免点击面内线时被面抢走。
         与 select_point 不同，本方法不清除或修改选择状态，
         仅收集全部候选要素供界面弹出候选项使用。
+
+        参数:
+            query_layer_ids: 可选的当前视图可查询图层编号集合；为空时使用所有可见图层。
         """
         if tolerance < 0:
             raise ValueError("点选容差不能小于零。")
         candidates: list[tuple[float, SelectedFeature]] = []
+        queryable_ids: set[str] | None = (
+            set(query_layer_ids) if query_layer_ids is not None else None
+        )
         # 几何类型罚分系数：点 0、线 1、面 2，每级罚 tolerance/100。
         type_penalty: float = tolerance * 0.01
         ordered_layers: tuple[VectorLayer, ...] = self._point_query_order()
         for layer in ordered_layers:
-            if not self._document.is_visible(layer.layer_id):
+            if not self._document.is_visible(layer.layer_id) or (
+                queryable_ids is not None and layer.layer_id not in queryable_ids
+            ):
                 continue
             for feature in layer.features:
                 if feature.geometry.is_empty:
@@ -533,7 +548,11 @@ class GisApplication:
         return [candidate for _, candidate in candidates]
 
     def select_point(
-        self, point: Point, tolerance: float, add_to_selection: bool = False
+        self,
+        point: Point,
+        tolerance: float,
+        add_to_selection: bool = False,
+        query_layer_ids: tuple[str, ...] | None = None,
     ) -> SelectionResult:
         """选择可见图层中容差范围内优先级最高的最近要素。
 
@@ -544,6 +563,7 @@ class GisApplication:
             tolerance: 容差距离（地图单位）。
             add_to_selection: 为 True 时不先清除已有选择，在最近要素上
                 切换其选中状态（已选中则取消，未选中则加入）。
+            query_layer_ids: 可选的当前视图可查询图层编号集合；为空时使用所有可见图层。
         """
         if tolerance < 0:
             raise ValueError("点选容差不能小于零。")
@@ -553,11 +573,16 @@ class GisApplication:
         self._modified = True
         # 几何类型罚分系数。
         type_penalty: float = tolerance * 0.01
+        queryable_ids: set[str] | None = (
+            set(query_layer_ids) if query_layer_ids is not None else None
+        )
         # 点选先查活动图层，再按视觉上的顶层到下层查找。
         ordered_layers: tuple[VectorLayer, ...] = self._point_query_order()
         layer: VectorLayer
         for layer in ordered_layers:
-            if not self._document.is_visible(layer.layer_id):
+            if not self._document.is_visible(layer.layer_id) or (
+                queryable_ids is not None and layer.layer_id not in queryable_ids
+            ):
                 continue
             nearest_feature: Feature | None = None
             nearest_effective: float = float("inf")
@@ -599,7 +624,10 @@ class GisApplication:
         return SelectionResult(features=(), snapshot=self.snapshot())
 
     def select_rectangle(
-        self, rectangle: Polygon, add_to_selection: bool = False
+        self,
+        rectangle: Polygon,
+        add_to_selection: bool = False,
+        query_layer_ids: tuple[str, ...] | None = None,
     ) -> SelectionResult:
         """选择全部可见图层中与给定矩形相交的有效要素。
 
@@ -607,17 +635,23 @@ class GisApplication:
             rectangle: 查询用的地图坐标矩形多边形。
             add_to_selection: 为 True 时不先清除已有选择，将相交要素
                 合并到各图层的当前选择集中。
+            query_layer_ids: 可选的当前视图可查询图层编号集合；为空时使用所有可见图层。
         """
         if not add_to_selection:
             self._document.clear_selection()
         selected_features: list[SelectedFeature] = []
+        queryable_ids: set[str] | None = (
+            set(query_layer_ids) if query_layer_ids is not None else None
+        )
         spatial_layer: SpatialLayer
         for spatial_layer in self._document.layers:
             # 栅格没有独立矢量要素，不参与几何相交查询。
             if isinstance(spatial_layer, RasterLayer):
                 continue
             layer: VectorLayer = spatial_layer
-            if not self._document.is_visible(layer.layer_id):
+            if not self._document.is_visible(layer.layer_id) or (
+                queryable_ids is not None and layer.layer_id not in queryable_ids
+            ):
                 continue
             feature_ids: list[FeatureId] = []
             feature: Feature
@@ -1263,6 +1297,18 @@ class GisApplication:
             replacement_document.set_layer_visibility(
                 projected_layer.layer_id,
                 self._document.is_visible(old_layer.layer_id),
+            )
+            old_min_scale, old_max_scale = self._document.layer_scale_range(
+                old_layer.layer_id
+            )
+            replacement_document.set_layer_opacity(
+                projected_layer.layer_id,
+                self._document.layer_opacity(old_layer.layer_id),
+            )
+            replacement_document.set_layer_scale_range(
+                projected_layer.layer_id,
+                old_min_scale,
+                old_max_scale,
             )
             if isinstance(projected_layer, VectorLayer):
                 replacement_document.set_selection(

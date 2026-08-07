@@ -149,6 +149,23 @@ def test_rectangle_selection_returns_all_visible_intersections() -> None:
     assert {feature.layer_id for feature in selection.features} == {"first", "second"}
 
 
+def test_spatial_selection_respects_currently_queryable_layer_ids() -> None:
+    """空间选择应排除当前比例范围外的图层。"""
+    first_reader: InMemoryVectorReader = InMemoryVectorReader(make_layer("first"))
+    application: GisApplication = GisApplication(data_reader=first_reader)
+    application.open_vector(Path("first.geojson"))
+    application.data_reader = InMemoryVectorReader(make_layer("second", 0.5, 0.5))
+    application.open_vector(Path("second.geojson"))
+
+    selection: SelectionResult = application.select_rectangle(
+        box(-1, -1, 1, 1),
+        query_layer_ids=("first",),
+    )
+
+    assert selection.count == 1
+    assert {feature.layer_id for feature in selection.features} == {"first"}
+
+
 def test_clear_selection_returns_empty_result() -> None:
     """清除选择后应返回空选择结果和零计数快照。"""
     reader: InMemoryVectorReader = InMemoryVectorReader(make_layer("points"))
