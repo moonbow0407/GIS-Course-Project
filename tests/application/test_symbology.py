@@ -1,6 +1,7 @@
 """矢量与栅格符号系统应用服务测试。"""
 
 import numpy as np
+import pytest
 from affine import Affine
 from pyproj import CRS
 from shapely.geometry import Point
@@ -50,7 +51,7 @@ def test_unique_values_are_limited_to_one_hundred_with_other_symbol() -> None:
 
 
 def test_graduated_colors_support_equal_interval_and_quantile() -> None:
-    """数值字段应生成三至七级的等间隔或分位数颜色。"""
+    """数值字段应生成至少三级的等间隔或分位数颜色。"""
     layer = VectorLayer.create(
         name="监测点",
         features=tuple(
@@ -67,6 +68,21 @@ def test_graduated_colors_support_equal_interval_and_quantile() -> None:
     assert equal.graduated_classes[0].lower == 0
     assert equal.graduated_classes[-1].upper == 9
     assert len(quantile.graduated_classes) == 4
+
+
+def test_graduated_class_count_cannot_exceed_numeric_sample_count() -> None:
+    """分级数超过字段有效数值样本数时应给出明确错误。"""
+    layer = VectorLayer.create(
+        name="七个行政区",
+        features=tuple(
+            Feature(fid=index, geometry=Point(index, 0), attributes={"value": index})
+            for index in range(7)
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+
+    with pytest.raises(ValueError, match="不能超过可用于分级的数值样本数（当前为 7）"):
+        create_graduated_symbology(layer, "value", "gray", "equal_interval", 8)
 
 
 def test_single_band_raster_stretch_generates_color_ramp_and_transparent_nodata() -> None:

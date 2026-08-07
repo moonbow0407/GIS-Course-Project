@@ -12,7 +12,10 @@ from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
 from shapely.geometry import LineString, Point
 
 from app.application.results import LayerSnapshot
-from app.application.symbology_service import create_unique_value_symbology
+from app.application.symbology_service import (
+    create_graduated_symbology,
+    create_unique_value_symbology,
+)
 from app.domain.feature import Feature
 from app.domain.layer_style import LayerStyle
 from app.domain.raster_layer import RasterLayer
@@ -112,6 +115,41 @@ def test_color_controls_show_visual_swatch_and_chinese_mapping() -> None:
     assert application is not None
 
 
+def test_graduated_class_count_round_trips_and_accepts_invalid_input_for_feedback() -> None:
+    """回填分级符号时应保留实际级数，并允许输入超出样本数以便提示错误。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    source_layer = VectorLayer.create(
+        layer_id="graduated-count",
+        name="行政区边界",
+        features=tuple(
+            Feature(fid=index, geometry=Point(index, 0), attributes={"value": index})
+            for index in range(7)
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    styled_layer = VectorLayer.create(
+        layer_id=source_layer.layer_id,
+        name=source_layer.name,
+        features=source_layer.features,
+        crs=source_layer.crs,
+        symbology=create_graduated_symbology(
+            source_layer,
+            "value",
+            "gray",
+            "equal_interval",
+            3,
+        ),
+    )
+    panel = SymbologyPanel()
+    panel.set_layer(
+        LayerSnapshot(layer=styled_layer, visible=True, selected_feature_ids=())
+    )
+
+    assert panel._class_count.value() == 3
+    assert panel._class_count.maximum() > 7
+    assert application is not None
+
+
 def test_simple_color_control_follows_each_active_layers_actual_symbol() -> None:
     """切换图层后颜色控件必须回填真实符号，避免旧选项阻止再次触发变色。"""
     application: QApplication = QApplication.instance() or QApplication([])
@@ -153,6 +191,42 @@ def test_simple_color_control_follows_each_active_layers_actual_symbol() -> None
     assert QColor(str(panel._simple_color.currentData())).name() == "#39a96b"
     assert panel._simple_color.currentText() == "绿色"
     assert not panel._simple_color.itemIcon(panel._simple_color.currentIndex()).isNull()
+    assert application is not None
+
+
+def test_clearing_active_layer_clears_all_stale_symbology_controls() -> None:
+    """取消活动图层后，符号面板不能残留上一图层的字段和配色选项。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    source_layer = VectorLayer.create(
+        layer_id="landuse-clear",
+        name="土地利用",
+        features=(
+            Feature(fid=1, geometry=Point(0, 0), attributes={"类型": "林地"}),
+            Feature(fid=2, geometry=Point(1, 1), attributes={"类型": "水域"}),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    layer = VectorLayer.create(
+        layer_id=source_layer.layer_id,
+        name=source_layer.name,
+        features=source_layer.features,
+        crs=source_layer.crs,
+        symbology=create_unique_value_symbology(source_layer, "类型", "standard"),
+    )
+    panel = SymbologyPanel()
+    panel.set_layer(LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()))
+
+    assert panel._field.count() > 0
+    assert panel._scheme.count() > 0
+    panel.set_layer(None)
+
+    assert panel._title.text() == "请选择图层"
+    assert panel._metadata.text() == "打开图层后可配置显示方式"
+    assert panel._settings_card.isHidden()
+    assert panel._renderer.count() == 0
+    assert panel._field.count() == 0
+    assert panel._scheme.count() == 0
+    assert panel._classes.rowCount() == 0
     assert application is not None
 
 

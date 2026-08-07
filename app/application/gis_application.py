@@ -44,6 +44,7 @@ from app.application.ports import DataReader, DataWriter, ProjectStore
 from app.application.project_models import (
     AnalysisOutputReference,
     AnalysisRun,
+    MapBookmark,
     MapViewState,
 )
 from app.application.project_service import ProjectService
@@ -232,6 +233,8 @@ class GisApplication:
         self._project_created_at: str = self._now()
         self._analysis_runs: tuple[AnalysisRun, ...] = ()
         self._modified: bool = False
+        # 地图书签：按名称保存当前会话的地图视图定位。
+        self._bookmarks: dict[str, MapViewState] = {}
 
     @property
     def project_path(self) -> Path | None:
@@ -257,6 +260,25 @@ class GisApplication:
         """清除当前工程的分析历史，但保留地图中的结果图层和结果文件。"""
         self._analysis_runs = ()
         self._modified = True
+
+    def add_bookmark(self, name: str, view_state: MapViewState) -> None:
+        """添加一个地图书签；同名称书签会覆盖旧定位。"""
+        if not name.strip():
+            raise ValueError("书签名称不能为空。")
+        self._bookmarks[name] = view_state
+
+    def remove_bookmark(self, name: str) -> None:
+        """删除指定名称的地图书签。"""
+        if name not in self._bookmarks:
+            raise ValueError(f"书签不存在：{name}")
+        del self._bookmarks[name]
+
+    def bookmarks(self) -> tuple[MapBookmark, ...]:
+        """返回当前会话保存的只读地图书签。"""
+        return tuple(
+            MapBookmark(name=name, view_state=view_state)
+            for name, view_state in self._bookmarks.items()
+        )
 
     def open_vector(self, path: Path, layer_name: str | None = None) -> OpenVectorResult:
         """兼容旧调用方式读取矢量文件，并返回打开数据结果。"""
@@ -357,6 +379,31 @@ class GisApplication:
         except KeyError as error:
             raise LayerNotFound(f"图层不存在：{layer_id}") from error
         self._modified = True
+        return self.snapshot()
+
+    def set_layer_opacity(self, layer_id: str, opacity: float) -> WorkspaceSnapshot:
+        """设置指定图层透明度并返回最新快照。"""
+        try:
+            self._document.set_layer_opacity(layer_id, opacity)
+        except KeyError as error:
+            raise LayerNotFound(f"图层不存在：{layer_id}") from error
+        except ValueError as error:
+            raise ValueError(f"透明度设置无效：{error}") from error
+        return self.snapshot()
+
+    def set_layer_scale_range(
+        self,
+        layer_id: str,
+        min_scale: float | None,
+        max_scale: float | None,
+    ) -> WorkspaceSnapshot:
+        """设置图层显示比例尺范围并返回最新快照。"""
+        try:
+            self._document.set_layer_scale_range(layer_id, min_scale, max_scale)
+        except KeyError as error:
+            raise LayerNotFound(f"图层不存在：{layer_id}") from error
+        except ValueError as error:
+            raise ValueError(f"显示比例范围无效：{error}") from error
         return self.snapshot()
 
     def set_active_layer(self, layer_id: str) -> WorkspaceSnapshot:
@@ -1376,6 +1423,9 @@ class GisApplication:
                 layer=layer,
                 visible=self._document.is_visible(layer.layer_id),
                 selected_feature_ids=self._document.selected_feature_ids(layer.layer_id),
+                opacity=self._document.layer_opacity(layer.layer_id),
+                min_scale_percent=self._document.layer_scale_range(layer.layer_id)[0],
+                max_scale_percent=self._document.layer_scale_range(layer.layer_id)[1],
             )
             for layer in self._document.layers
         )

@@ -113,10 +113,18 @@ class SymbologyPanel(QWidget):
             if snapshot is None:
                 self._title.setText("请选择图层")
                 self._metadata.setText("打开图层后可配置显示方式")
-                self._renderer.clear()
+                for combo in (
+                    self._renderer,
+                    self._field,
+                    self._scheme,
+                    self._simple_color,
+                ):
+                    with QSignalBlocker(combo):
+                        combo.clear()
                 self._classes.setRowCount(0)
                 self._class_count_label.setText("0 类")
                 self._preview.clear()
+                self._update_control_visibility()
                 return
             self._title.setText(snapshot.name)
             if isinstance(snapshot.layer, VectorLayer):
@@ -145,7 +153,9 @@ class SymbologyPanel(QWidget):
         self._scheme.setIconSize(QSize(86, 16))
         self._field.setObjectName("symbologyField")
         self._scheme.setObjectName("symbologyScheme")
-        self._class_count.setRange(3, 7)
+        # 允许用户输入超过当前样本数的值，由应用层给出具体校验提示，
+        # 避免 QSpinBox 静默截断输入后让用户误以为分类已应用。
+        self._class_count.setRange(3, 999)
         self._class_count.setValue(5)
         self._method.addItem("等间隔", "equal_interval")
         self._method.addItem("分位数", "quantile")
@@ -300,7 +310,17 @@ class SymbologyPanel(QWidget):
             self._set_combo_data(self._scheme, symbology.color_scheme)
         self._load_simple_colors(self._symbol_color(symbology.base_symbol))
         self._set_combo_data(self._method, symbology.classification_method)
-        self._class_count.setValue(max(len(symbology.graduated_classes), 5))
+        stored_class_count: int = (
+            len(symbology.graduated_classes)
+            if symbology.renderer_type is VectorRendererType.GRADUATED
+            else 5
+        )
+        self._class_count.setValue(
+            min(
+                max(stored_class_count, self._class_count.minimum()),
+                self._class_count.maximum(),
+            )
+        )
         self._fill_vector_classes(symbology)
 
     def _load_raster(self, layer: RasterLayer) -> None:
@@ -588,6 +608,7 @@ class SymbologyPanel(QWidget):
         is_raster = snapshot is not None and isinstance(snapshot.layer, RasterLayer)
         is_rgb = is_raster and renderer_data == RasterRendererType.RGB.value
         is_stretch = is_raster and renderer_data == RasterRendererType.STRETCH.value
+        self._settings_card.setVisible(snapshot is not None)
         self._form.setRowVisible(self._field, is_unique or is_graduated)
         self._form.setRowVisible(self._scheme, is_unique or is_graduated or is_stretch)
         self._form.setRowVisible(

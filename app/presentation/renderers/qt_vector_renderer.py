@@ -3,6 +3,7 @@
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsPathItem, QGraphicsScene
+from shapely import get_num_coordinates
 from shapely.geometry import (
     GeometryCollection,
     LinearRing,
@@ -38,6 +39,9 @@ class QtVectorRenderer:
             snapshot: 待绘制的矢量图层快照。
             z_value: 图层在场景中的堆叠顺序。
             map_units_per_pixel: 当前视图每个屏幕像素对应的地图单位。
+
+        说明:
+            图层级透明度和显示比例范围在渲染时统一应用到全部要素图元。
         """
         if not isinstance(snapshot.layer, VectorLayer):
             raise TypeError("矢量渲染器只能绘制矢量图层。")
@@ -57,7 +61,11 @@ class QtVectorRenderer:
             # 选中点要素时适度放大符号。
             if selected:
                 point_size *= 1.6
-            self._append_geometry(path, feature.geometry, point_size)
+            display_geometry: BaseGeometry = self._geometry_for_display(
+                feature.geometry,
+                map_units_per_pixel,
+            )
+            self._append_geometry(path, display_geometry, point_size)
             if path.isEmpty():
                 continue
             # 选中要素先绘制光晕层（宽半透明描边），再绘制主体。
@@ -68,11 +76,14 @@ class QtVectorRenderer:
                 halo.setData(1, feature.fid)
                 halo.setZValue(z_value - 0.1)
                 halo.setVisible(snapshot.visible)
+                halo.setOpacity(snapshot.opacity)
                 halo.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
                 scene.addItem(halo)
                 items.append(halo)
             item: QGraphicsPathItem = QGraphicsPathItem(path)
             self._apply_style(item, style, selected, feature.geometry.geom_type)
+            # 图层级透明度乘以符号自身透明度，实现整体淡化而不破坏选择高亮。
+            item.setOpacity(item.opacity() * snapshot.opacity)
             # 自定义数据把 Qt 图元关联回领域图层和要素。
             item.setData(0, snapshot.layer_id)
             item.setData(1, feature.fid)
@@ -81,6 +92,29 @@ class QtVectorRenderer:
             scene.addItem(item)
             items.append(item)
         return items
+
+    @staticmethod
+    def _geometry_for_display(
+        geometry: BaseGeometry,
+        map_units_per_pixel: float,
+    ) -> BaseGeometry:
+        """按当前屏幕分辨率简化显示路径，不改动领域层原始几何。
+
+        参数:
+            geometry: 查询、编辑仍需使用的完整几何。
+            map_units_per_pixel: 当前视图一个屏幕像素对应的地图单位。
+
+        返回:
+            适合当前视图绘制的几何；小图层或低复杂度几何保持原样。
+        """
+        if map_units_per_pixel <= 0.0 or get_num_coordinates(geometry) < 64:
+            return geometry
+        tolerance: float = map_units_per_pixel * 0.5
+        simplified: BaseGeometry = geometry.simplify(
+            tolerance,
+            preserve_topology=geometry.geom_type in {"Polygon", "MultiPolygon"},
+        )
+        return geometry if simplified.is_empty else simplified
 
     def _append_geometry(
         self,

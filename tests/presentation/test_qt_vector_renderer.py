@@ -1,5 +1,6 @@
 """Qt 矢量图层渲染器测试。"""
 
+import math
 import os
 
 # 必须在导入 Qt 前启用无界面平台，测试才能在没有显示器的环境运行。
@@ -59,3 +60,31 @@ def test_renderer_creates_selectable_items_for_point_line_and_polygon() -> None:
         item for item in items if isinstance(item, QGraphicsPathItem) and item.data(1) == 3
     )
     assert polygon_item.path().fillRule() is Qt.FillRule.OddEvenFill
+
+
+def test_renderer_simplifies_dense_geometry_for_current_screen_scale() -> None:
+    """屏幕分辨率不足以区分的密集顶点应在显示路径中合并。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    coordinates = tuple(
+        (index * 0.01, math.sin(index / 4.0) * 0.02)
+        for index in range(2000)
+    )
+    layer = VectorLayer.create(
+        layer_id="dense-line",
+        name="高密度线",
+        features=(Feature(fid=1, geometry=LineString(coordinates), attributes={}),),
+        crs=CRS.from_epsg(4326),
+    )
+    scene: QGraphicsScene = QGraphicsScene()
+    renderer = QtVectorRenderer()
+
+    items = renderer.render_layer(
+        scene,
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),
+        z_value=0.0,
+        map_units_per_pixel=0.1,
+    )
+
+    item = next(item for item in items if isinstance(item, QGraphicsPathItem))
+    assert item.path().elementCount() < len(coordinates) / 4
+    assert application is not None

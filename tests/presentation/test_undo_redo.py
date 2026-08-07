@@ -9,7 +9,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pyproj import CRS
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from shapely.geometry import Point
 
 from app.application.gis_application import GisApplication
@@ -161,6 +161,42 @@ def test_unique_value_symbology_undo_returns_to_simple() -> None:
         window._application.snapshot().layers[0].layer.symbology.renderer_type
         is VectorRendererType.SIMPLE
     )
+    window.close()
+
+
+def test_invalid_graduated_count_shows_numeric_sample_warning(monkeypatch) -> None:
+    """分级数超过有效数值样本数时应弹出明确提示且不改变原符号。"""
+    layer = VectorLayer.create(
+        layer_id="graduated-warning",
+        name="行政区边界",
+        features=tuple(
+            Feature(fid=index, geometry=Point(index, 0), attributes={"value": index})
+            for index in range(7)
+        ),
+        crs=CRS_4549,
+    )
+    document: MapDocument = MapDocument()
+    document.add_layer(layer)
+    window: MainWindow = _make_window(document)
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((title, message)),
+    )
+    before = window._application.snapshot().layers[0].layer.symbology
+
+    window._apply_graduated_symbology(
+        "graduated-warning",
+        "value",
+        "gray",
+        "equal_interval",
+        8,
+    )
+
+    assert warnings
+    assert "不能超过可用于分级的数值样本数（当前为 7）" in warnings[-1][1]
+    assert window._application.snapshot().layers[0].layer.symbology == before
     window.close()
 
 

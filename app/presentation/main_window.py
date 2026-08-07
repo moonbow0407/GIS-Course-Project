@@ -52,6 +52,7 @@ from app.presentation.widgets.database_dialogs import (
     DatabaseConnectionDialog,
     DatabaseLayerDialog,
 )
+from app.presentation.widgets.display_settings_dialog import DisplaySettingsDialog
 from app.presentation.widgets.edit_feature_dialog import EditFeatureDialog
 from app.presentation.widgets.geometry_edit_toolbar import GeometryEditToolbar
 from app.presentation.widgets.layer_panel import LayerPanel
@@ -307,6 +308,7 @@ class MainWindow(QMainWindow):
             "attribute_query": self._attribute_query,
             "show_attributes": self._show_active_attribute_table,
             "set_crs": self._set_display_crs,
+            "map_settings": self._show_display_settings,
             "about": self._show_about,
             "undo": self._undo,
             "redo": self._redo,
@@ -2226,6 +2228,110 @@ class MainWindow(QMainWindow):
     def _toggle_layer_panel(self) -> None:
         """切换左侧图层管理面板的显示状态。"""
         self._layer_panel.setVisible(not self._layer_panel.isVisible())
+
+    def _show_display_settings(self) -> None:
+        """打开显示设置对话框，管理图层透明度、比例尺范围和地图书签。"""
+        dialog: DisplaySettingsDialog = DisplaySettingsDialog(self)
+        dialog.opacity_requested.connect(self._change_layer_opacity)
+        dialog.scale_range_requested.connect(self._change_layer_scale_range)
+        dialog.bookmark_add_requested.connect(self._add_bookmark)
+        dialog.bookmark_jump_requested.connect(self._jump_to_bookmark)
+        dialog.bookmark_delete_requested.connect(self._delete_bookmark)
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        dialog.set_layers(snapshot.layers, snapshot.active_layer_id)
+        dialog.set_bookmarks(self._application.bookmarks())
+        dialog.exec()
+
+    def _change_layer_opacity(self, layer_id: str, opacity: float) -> None:
+        """应用指定图层的新透明度，并刷新工作区。"""
+        before: float = 1.0
+        for layer in self._application.snapshot().layers:
+            if layer.layer_id == layer_id:
+                before = layer.opacity
+                break
+        try:
+            self._application.set_layer_opacity(layer_id, opacity)
+        except (ApplicationError, ValueError) as error:
+            self.statusBar().showMessage(f"透明度设置失败：{error}", 4000)
+            return
+        self._push_undo(
+            "调整图层透明度",
+            undo_action=partial(
+                self._application.set_layer_opacity, layer_id, before
+            ),
+            redo_action=partial(
+                self._application.set_layer_opacity, layer_id, opacity
+            ),
+        )
+        self._schedule_workspace_refresh()
+
+    def _change_layer_scale_range(
+        self,
+        layer_id: str,
+        min_scale: float | None,
+        max_scale: float | None,
+    ) -> None:
+        """应用图层的新显示比例范围并刷新工作区。"""
+        before_min: float | None = None
+        before_max: float | None = None
+        for layer in self._application.snapshot().layers:
+            if layer.layer_id == layer_id:
+                before_min = layer.min_scale_percent
+                before_max = layer.max_scale_percent
+                break
+        try:
+            self._application.set_layer_scale_range(layer_id, min_scale, max_scale)
+        except (ApplicationError, ValueError) as error:
+            self.statusBar().showMessage(f"显示比例范围设置失败：{error}", 4000)
+            return
+        self._push_undo(
+            "调整显示比例范围",
+            undo_action=partial(
+                self._application.set_layer_scale_range,
+                layer_id,
+                before_min,
+                before_max,
+            ),
+            redo_action=partial(
+                self._application.set_layer_scale_range,
+                layer_id,
+                min_scale,
+                max_scale,
+            ),
+        )
+        self._schedule_workspace_refresh()
+
+    def _add_bookmark(self, name: str) -> None:
+        """把当前地图视图捕获为命名书签。"""
+        try:
+            self._application.add_bookmark(name, self._map_canvas.capture_view_state())
+        except ValueError as error:
+            self.statusBar().showMessage(f"添加书签失败：{error}", 4000)
+            return
+        self._ready_label.setText(f"已添加书签  {name}")
+
+    def _jump_to_bookmark(self, name: str) -> None:
+        """定位到指定名称的地图书签。"""
+        view_state: MapViewState | None = next(
+            (
+                bookmark.view_state
+                for bookmark in self._application.bookmarks()
+                if bookmark.name == name
+            ),
+            None,
+        )
+        if view_state is not None:
+            self._map_canvas.restore_view_state(view_state)
+            self._ready_label.setText(f"已定位到书签  {name}")
+
+    def _delete_bookmark(self, name: str) -> None:
+        """删除指定名称的地图书签。"""
+        try:
+            self._application.remove_bookmark(name)
+        except ValueError as error:
+            self.statusBar().showMessage(f"删除书签失败：{error}", 4000)
+            return
+        self._ready_label.setText(f"已删除书签  {name}")
 
     def _show_placeholder(self, feature_name: str) -> None:
         """为尚未实现的业务能力提供清晰且不伪造结果的界面反馈。

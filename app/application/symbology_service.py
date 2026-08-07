@@ -64,9 +64,9 @@ def create_graduated_symbology(
     classification_method: str,
     class_count: int,
 ) -> VectorSymbology:
-    """按等间隔或分位数创建三到七级数值颜色。"""
-    if not 3 <= class_count <= 7:
-        raise ValueError("分级数量必须在 3 到 7 之间。")
+    """按等间隔或分位数创建数值颜色分级。"""
+    if class_count < 3:
+        raise ValueError("分级数量至少为 3 级。")
     values = np.asarray(
         [
             float(value)
@@ -79,6 +79,11 @@ def create_graduated_symbology(
     )
     if values.size == 0:
         raise ValueError("所选字段没有可用于分级的数值。")
+    sample_count: int = int(values.size)
+    if class_count > sample_count:
+        raise ValueError(
+            f"分级数量不能超过可用于分级的数值样本数（当前为 {sample_count}）。"
+        )
     if classification_method == "quantile":
         breaks = np.quantile(values, np.linspace(0.0, 1.0, class_count + 1))
     elif classification_method == "equal_interval":

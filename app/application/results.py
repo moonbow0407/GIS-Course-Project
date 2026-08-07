@@ -27,6 +27,13 @@ class LayerSnapshot:
     # 已选要素编号：保存该图层当前选择集的稳定编号。
     selected_feature_ids: tuple[FeatureId, ...]
 
+    # 显示透明度：界面用于整体淡化图层，取值范围为零到一。
+    opacity: float = 1.0
+
+    # 显示比例范围：视图比例低于最小值或高于最大值时不绘制该图层。
+    min_scale_percent: float | None = None
+    max_scale_percent: float | None = None
+
     @property
     def layer_id(self) -> str:
         """返回图层稳定编号。"""

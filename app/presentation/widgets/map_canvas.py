@@ -105,6 +105,8 @@ class MapCanvas(QGraphicsView):
         self._snap_marker: QGraphicsPathItem | None = None
         # 缓存最近一次快照，供缩放后重新渲染使用。
         self._last_snapshot: WorkspaceSnapshot | None = None
+        # 图层图元缓存：按图层编号保存该图层全部 Qt 图元，供显示比例过滤使用。
+        self._layer_items: dict[str, list[QGraphicsItem]] = {}
         # 顶点编辑状态。
         self._vertex_edit_active: bool = False
         self._edit_geometry: BaseGeometry | None = None
@@ -150,6 +152,9 @@ class MapCanvas(QGraphicsView):
         is_first_load: bool = self._map_scene_rect is None
 
         self._scene.clear()
+        # scene.clear() 会销毁全部图元，先清空按图层保存的引用，避免空快照或
+        # 失败回滚时缩放状态仍访问已经删除的 QGraphicsItem。
+        self._layer_items.clear()
         # scene.clear() 会立即销毁全部 C++ 图元；同步清空 Python 侧临时图元引用，
         # 否则几何编辑提交后的工具切换会再次 removeItem 并中断查询工具激活。
         self._vertex_items.clear()
@@ -157,6 +162,8 @@ class MapCanvas(QGraphicsView):
         self._snap_marker = None
         self._empty_overlay.setVisible(not snapshot.layers)
         if not snapshot.layers:
+            self._last_snapshot = snapshot
+            self._selected_fids.clear()
             self._map_scene_rect = None
             self._scene.setSceneRect(0, 0, 1000, 700)
             self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
@@ -194,14 +201,18 @@ class MapCanvas(QGraphicsView):
         # 快照按底到顶排列，枚举值可直接作为 Qt 图元的叠放顺序。
         for z_value, current_layer in enumerate(layer_snapshot):
             if isinstance(current_layer.layer, RasterLayer):
-                self._raster_renderer.render_layer(self._scene, current_layer, float(z_value))
+                raster_item = self._raster_renderer.render_layer(
+                    self._scene, current_layer, float(z_value)
+                )
+                self._layer_items[current_layer.layer_id] = [raster_item]
             else:
-                self._vector_renderer.render_layer(
+                vector_items = self._vector_renderer.render_layer(
                     self._scene,
                     current_layer,
                     float(z_value),
                     map_units_per_pixel,
                 )
+                self._layer_items[current_layer.layer_id] = vector_items
         self._ensure_pan_area()
         self._build_snap_index(snapshot)
         self._last_snapshot = snapshot
@@ -210,6 +221,8 @@ class MapCanvas(QGraphicsView):
         for layer in snapshot.layers:
             for fid in layer.selected_feature_ids:
                 self._selected_fids.add((layer.layer_id, fid))
+        # 按当前视图比例应用图层的显示比例范围。
+        self._apply_scale_ranges()
 
     def capture_view_state(self) -> MapViewState:
         """捕获当前地图中心和相对于全图的缩放比例。"""
@@ -1549,7 +1562,37 @@ class MapCanvas(QGraphicsView):
 
     def _emit_view_scale(self) -> None:
         """发出格式化后的当前视图比例文本。"""
+        self._apply_scale_ranges()
         self.view_scale_changed.emit(f"视图比例  {self._zoom_percent:.0f}%")
+
+    def _apply_scale_ranges(self) -> None:
+        """按当前视图比例过滤各图层的显示比例范围。
+
+        视图比例低于图层最小比例或高于最大比例时，该图层所有图元隐藏；
+        回到范围内后恢复显隐原状态。缩放操作会反复调用本方法，
+        因此隐藏状态是临时的，始终以快照中的 visible 为最终依据。
+        """
+        if self._last_snapshot is None:
+            return
+        zoom_percent: float = self._zoom_percent
+        for layer in self._last_snapshot.layers:
+            layer_visible: bool = layer.visible
+            if layer_visible:
+                if (
+                    layer.min_scale_percent is not None
+                    and zoom_percent < float(layer.min_scale_percent)
+                ):
+                    layer_visible = False
+                if (
+                    layer.max_scale_percent is not None
+                    and zoom_percent > float(layer.max_scale_percent)
+                ):
+                    layer_visible = False
+            items: list[QGraphicsItem] | None = self._layer_items.get(layer.layer_id)
+            if not items:
+                continue
+            for item in items:
+                item.setVisible(layer_visible)
 
     def _ensure_pan_area(self) -> None:
         """确保当前视口周围存在可供手形拖动的场景范围。"""

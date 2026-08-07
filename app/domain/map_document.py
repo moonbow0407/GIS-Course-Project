@@ -8,15 +8,21 @@ from app.domain.spatial_layer import SpatialLayer
 
 
 class MapDocument:
-    """统一管理地图中的图层顺序、活动状态、显隐状态和选择集。"""
+    """统一管理所有图层顺序、活动状态、显隐状态、显示设置和选择集。"""
 
     def __init__(self) -> None:
-        """创建不含图层、坐标系和选择状态的空地图文档。"""
+        """创建不包含图层、坐标系和选择状态的空地图文档。"""
         # 图层列表：按照从底层到顶层的顺序保存地图中的图层。
         self._layers: list[SpatialLayer] = []
 
         # 图层显隐状态：按图层编号保存当前是否参与显示和查询。
         self._visibility: dict[str, bool] = {}
+
+        # 图层次级透明度：按图层编号保存显示透明度，取值范围为零到一。
+        self._opacity: dict[str, float] = {}
+
+        # 图层显示比例尺范围：按图层编号保存 (最小比例, 最大比例)，空值表示不限。
+        self._scale_range: dict[str, tuple[float | None, float | None]] = {}
 
         # 活动图层编号：表示当前接收编辑和优先查询操作的图层。
         self._active_layer_id: str | None = None
@@ -59,6 +65,8 @@ class MapDocument:
 
         self._layers.append(layer)
         self._visibility[layer.layer_id] = True
+        self._opacity[layer.layer_id] = 1.0
+        self._scale_range[layer.layer_id] = (None, None)
         self._selection[layer.layer_id] = ()
         if self._active_layer_id is None:
             self._active_layer_id = layer.layer_id
@@ -70,6 +78,8 @@ class MapDocument:
         current_index: int = self._layer_index(layer_id)
         removed_layer: SpatialLayer = self._layers.pop(current_index)
         self._visibility.pop(layer_id, None)
+        self._opacity.pop(layer_id, None)
+        self._scale_range.pop(layer_id, None)
         self._selection.pop(layer_id, None)
 
         if not self._layers:
@@ -115,6 +125,48 @@ class MapDocument:
         """返回指定图层当前是否可见。"""
         self._require_layer(layer_id)
         return self._visibility[layer_id]
+
+    def set_layer_opacity(self, layer_id: str, opacity: float) -> None:
+        """设置指定图层的显示透明度，取值范围为零到一。"""
+        self._require_layer(layer_id)
+        if not 0.0 <= opacity <= 1.0:
+            raise ValueError("图层透明度必须介于 0 和 1 之间。")
+        self._opacity[layer_id] = opacity
+
+    def layer_opacity(self, layer_id: str) -> float:
+        """返回指定图层的显示透明度。"""
+        self._require_layer(layer_id)
+        return self._opacity[layer_id]
+
+    def set_layer_scale_range(
+        self,
+        layer_id: str,
+        min_scale: float | None,
+        max_scale: float | None,
+    ) -> None:
+        """设置图层的显示比例尺范围；空值表示对应方向不设限制。
+
+        参数:
+            min_scale: 显示该图层所需的最小视图比例（百分比），必须大于零。
+            max_scale: 显示该图层所需的最大视图比例（百分比），必须大于零。
+        """
+        self._require_layer(layer_id)
+        if min_scale is not None and min_scale <= 0:
+            raise ValueError("最小显示比例必须大于零。")
+        if max_scale is not None and max_scale <= 0:
+            raise ValueError("最大显示比例必须大于零。")
+        if (
+            min_scale is not None
+            and max_scale is not None
+            and max_scale < min_scale
+        ):
+            raise ValueError("最大显示比例不能小于最小显示比例。")
+        self._scale_range[layer_id] = (min_scale, max_scale)
+
+    def layer_scale_range(self, layer_id: str) -> tuple[float | None, float | None]:
+        """返回指定图层的最小和最大显示比例。"""
+        self._require_layer(layer_id)
+        return self._scale_range[layer_id]
 
     def set_selection(self, layer_id: str, feature_ids: tuple[FeatureId, ...]) -> None:
         """替换指定图层的要素选择集合。"""

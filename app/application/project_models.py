@@ -22,6 +22,14 @@ class MapViewState:
 
 
 @dataclass(frozen=True, slots=True)
+class MapBookmark:
+    """保存一个带名称的地图视图定位书签。"""
+
+    name: str
+    view_state: MapViewState
+
+
+@dataclass(frozen=True, slots=True)
 class SourceFingerprint:
     """记录外部数据源的轻量文件指纹。"""
 

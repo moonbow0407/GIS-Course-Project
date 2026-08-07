@@ -61,6 +61,7 @@ class QtRasterRenderer:
         item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         item.setZValue(z_value)
         item.setVisible(snapshot.visible)
+        item.setOpacity(snapshot.opacity)
         # 保存图层编号，方便后续由 Qt 图元反查领域图层。
         item.setData(0, snapshot.layer_id)
         scene.addItem(item)
