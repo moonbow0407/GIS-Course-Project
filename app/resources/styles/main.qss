@@ -2,14 +2,16 @@ QMainWindow#mainWindow {
     background: #f5f7fa;
 }
 
-QDockWidget#symbologyDock,
+QDockWidget#workspacePanelDock,
+QWidget#workspacePanelTabs,
+QWidget#attributeTablePanel,
+QWidget#analysisHistoryPanel,
 QWidget#symbologyPanel {
     background: #ffffff;
     color: #263548;
 }
 
-QDockWidget#symbologyDock::title,
-QDockWidget#analysisHistoryDock::title {
+QDockWidget#workspacePanelDock::title {
     padding: 7px 10px;
     border-bottom: 1px solid #d9e1ea;
     background: #eef4fa;
@@ -19,7 +21,167 @@ QDockWidget#analysisHistoryDock::title {
     font-weight: 600;
 }
 
-QDockWidget#analysisHistoryDock,
+QWidget#workspacePanelTitleBar {
+    min-height: 34px;
+    background: #eef4fa;
+    border-bottom: 1px solid #d9e1ea;
+}
+
+QLabel#workspacePanelTitle {
+    color: #263548;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+QToolButton#workspacePanelFloatButton,
+QToolButton#workspacePanelCloseButton {
+    min-width: 30px;
+    max-width: 30px;
+    min-height: 28px;
+    max-height: 28px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: #eef4fa;
+    color: #263548;
+    font-family: "Segoe UI Symbol", "Microsoft YaHei UI", sans-serif;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+QToolButton#workspacePanelFloatButton:hover,
+QToolButton#workspacePanelCloseButton:hover {
+    border-color: #9dc3e3;
+    background: #dcecf9;
+    color: #0f5f9f;
+}
+
+QToolButton#workspacePanelFloatButton:pressed,
+QToolButton#workspacePanelCloseButton:pressed {
+    border-color: #7eaed3;
+    background: #c8e1f2;
+    color: #0f4f86;
+}
+
+QTabWidget#workspacePanelTabs {
+    background: #eef3f8;
+    color: #263548;
+}
+
+QTabWidget#workspacePanelTabs::pane {
+    border: none;
+    background: #eef3f8;
+    top: -1px;
+}
+
+QTabBar#workspacePanelTabBar {
+    background: #eef4fa;
+    border-bottom: 1px solid #d9e1ea;
+}
+
+QTabBar#workspacePanelTabBar::tab {
+    min-width: 84px;
+    min-height: 36px;
+    padding: 0 10px;
+    border: none;
+    border-bottom: 3px solid transparent;
+    background: #eef4fa;
+    color: #526277;
+    font-size: 13px;
+}
+
+QTabBar#workspacePanelTabBar::tab:hover {
+    background: #e3eef8;
+    color: #0f6cbd;
+}
+
+QTabBar#workspacePanelTabBar::tab:selected {
+    background: #ffffff;
+    color: #0f5f9f;
+    border-bottom-color: #0f6cbd;
+    font-weight: 600;
+}
+
+QWidget#attributeTablePanel {
+    min-height: 190px;
+    background: #ffffff;
+    border-top: 1px solid #b8c9d9;
+    color: #263548;
+}
+
+QLabel#attributeTableTitle {
+    color: #1e3a5f;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+QLabel#attributeTableLayerLabel {
+    padding-left: 6px;
+    color: #64748b;
+    font-size: 12px;
+}
+
+QPushButton#attributeTableQueryButton,
+QPushButton#attributeTableAddButton,
+QPushButton#attributeTableEditButton,
+QPushButton#attributeTableDeleteButton,
+QPushButton#attributeTableCloseButton {
+    min-height: 28px;
+    padding: 0 10px;
+    border: 1px solid #bfcbd8;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #263548;
+}
+
+QPushButton#attributeTableQueryButton:hover,
+QPushButton#attributeTableAddButton:hover,
+QPushButton#attributeTableEditButton:hover,
+QPushButton#attributeTableDeleteButton:hover,
+QPushButton#attributeTableCloseButton:hover {
+    border-color: #77a9d0;
+    background: #edf5fc;
+    color: #0f5f9f;
+}
+
+QPushButton#attributeTableDeleteButton:hover {
+    border-color: #e0a28b;
+    background: #fff4ef;
+    color: #b45309;
+}
+
+QPushButton#attributeTableQueryButton:disabled,
+QPushButton#attributeTableAddButton:disabled,
+QPushButton#attributeTableEditButton:disabled,
+QPushButton#attributeTableDeleteButton:disabled {
+    border-color: #e1e7ee;
+    background: #f3f6f9;
+    color: #9aa8b7;
+}
+
+QDockWidget::close-button,
+QDockWidget::float-button {
+    padding: 2px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: #eef4fa;
+    color: #263548;
+}
+
+QDockWidget::close-button:hover,
+QDockWidget::float-button:hover {
+    border-color: #9dc3e3;
+    background: #dcecf9;
+    color: #0f6cbd;
+}
+
+QDockWidget::close-button:pressed,
+QDockWidget::float-button:pressed {
+    border-color: #7eaed3;
+    background: #c8e1f2;
+    color: #0f5f9f;
+}
+
 QWidget#analysisHistoryPanel {
     background: #ffffff;
     color: #263548;
@@ -203,7 +365,7 @@ QLabel#panelTitle {
     padding: 1px 0 4px 0;
 }
 
-QLabel#ribbonHelp {
+QLabel#ribbonAbout {
     color: #64748b;
     padding-right: 4px;
 }
@@ -288,9 +450,20 @@ QFrame#ribbonSeparator {
     margin: 3px 7px 5px 7px;
 }
 
-QSplitter#workspaceSplitter::handle {
+QSplitter#mapWorkspaceSplitter::handle {
     background: #d9e1ea;
     width: 1px;
+}
+
+QSplitter#mainWorkspaceSplitter::handle:vertical {
+    min-height: 7px;
+    background: #d9e1ea;
+    border-top: 1px solid #b8c9d9;
+    border-bottom: 1px solid #b8c9d9;
+}
+
+QSplitter#mainWorkspaceSplitter::handle:vertical:hover {
+    background: #8db6d5;
 }
 
 LayerPanel {
@@ -525,6 +698,37 @@ QTableWidget QScrollBar::sub-page:vertical {
 QTableWidget QScrollBar::add-line:vertical,
 QTableWidget QScrollBar::sub-line:vertical {
     height: 14px;
+    border: none;
+    background: #dce8f2;
+}
+
+QTableWidget QScrollBar:horizontal {
+    min-height: 14px;
+    max-height: 14px;
+    margin: 0 2px 2px 2px;
+    border: 1px solid #d9e1ea;
+    border-radius: 5px;
+    background: #eef4fa;
+}
+
+QTableWidget QScrollBar::handle:horizontal {
+    min-width: 36px;
+    border-radius: 5px;
+    background: #9eb5ca;
+}
+
+QTableWidget QScrollBar::handle:horizontal:hover {
+    background: #6f9bc0;
+}
+
+QTableWidget QScrollBar::add-page:horizontal,
+QTableWidget QScrollBar::sub-page:horizontal {
+    background: #eef4fa;
+}
+
+QTableWidget QScrollBar::add-line:horizontal,
+QTableWidget QScrollBar::sub-line:horizontal {
+    width: 14px;
     border: none;
     background: #dce8f2;
 }

@@ -7,8 +7,17 @@ from pathlib import Path
 
 from pyproj import CRS
 from pyproj.exceptions import CRSError
-from PySide6.QtCore import QPointF, Qt, QTimer, QUrl
-from PySide6.QtGui import QCloseEvent, QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtCore import QPointF, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import (
+    QCloseEvent,
+    QDesktopServices,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -17,6 +26,7 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
     QFormLayout,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -24,6 +34,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QSplitter,
     QStatusBar,
+    QTabWidget,
+    QToolButton,
+    QWidget,
 )
 from shapely.geometry import Point, Polygon
 from shapely.geometry.base import BaseGeometry
@@ -71,6 +84,9 @@ from app.presentation.widgets.target_layer_dialog import (
 class MainWindow(QMainWindow):
     """组装功能区、图层面板、地图画布和状态栏的 GIS 工作台。"""
 
+    _ANALYSIS_TAB_INDEX: int = 0
+    _SYMBOLOGY_TAB_INDEX: int = 1
+
     def __init__(self, project_path: Path | None = None) -> None:
         """创建 GIS 工作区，可选自动加载指定工程。
 
@@ -92,15 +108,14 @@ class MainWindow(QMainWindow):
         self._layer_panel: LayerPanel = LayerPanel()
         # 地图画布：显示矢量与栅格图层并提供基础导航能力。
         self._map_canvas: MapCanvas = MapCanvas()
-        # 符号系统面板：右侧停靠并跟随当前活动图层。
+        # 三个工具面板共用一个右侧停靠容器，通过标签页切换，避免多个 dock
+        # 在同一侧堆叠后出现焦点丢失或点击落到不可见面板的问题。
         self._symbology_panel: SymbologyPanel = SymbologyPanel()
-        self._symbology_dock: QDockWidget = QDockWidget("符号系统", self)
-        # 分析历史面板：右侧停靠展示空间分析执行记录。
         self._analysis_history_panel: AnalysisHistoryPanel = AnalysisHistoryPanel()
-        self._analysis_history_dock: QDockWidget = QDockWidget("分析记录", self)
-        # 属性表面板：右侧停靠展示矢量要素属性和栅格元数据。
         self._attribute_table_panel: AttributeTablePanel = AttributeTablePanel()
-        self._attribute_table_dock: QDockWidget = QDockWidget("属性表", self)
+        self._panel_tabs: QTabWidget = QTabWidget()
+        self._panel_dock: QDockWidget = QDockWidget("工作面板", self)
+        self._workspace_splitter: QSplitter
         # 状态提示标签：显示就绪状态和最近一次操作反馈。
         self._ready_label: QLabel = QLabel("就绪")
         # 坐标标签：实时显示鼠标对应的地图坐标。
@@ -165,45 +180,50 @@ class MainWindow(QMainWindow):
             self._refresh_workspace(preserve_view=False)
 
     def _create_ui(self) -> None:
-        """创建功能区、双栏工作区和多信息状态栏。"""
+        """创建功能区、双栏工作区、统一工具面板和多信息状态栏。"""
         self.setObjectName("mainWindow")
         self.setWindowTitle("GIS桌面通用平台")
         self.resize(1680, 940)
         self.setMinimumSize(1120, 720)
         self.setMenuWidget(self._ribbon)
 
-        workspace: QSplitter = QSplitter(Qt.Orientation.Horizontal)
-        workspace.setObjectName("workspaceSplitter")
-        workspace.setChildrenCollapsible(False)
-        workspace.addWidget(self._layer_panel)
-        workspace.addWidget(self._map_canvas)
-        workspace.setSizes([300, 1380])
-        workspace.setStretchFactor(0, 0)
-        workspace.setStretchFactor(1, 1)
-        self.setCentralWidget(workspace)
-        self._symbology_dock.setObjectName("symbologyDock")
-        self._symbology_dock.setWidget(self._symbology_panel)
-        self._symbology_dock.setAllowedAreas(
+        map_workspace: QSplitter = QSplitter(Qt.Orientation.Horizontal)
+        map_workspace.setObjectName("mapWorkspaceSplitter")
+        map_workspace.setChildrenCollapsible(False)
+
+        # 左侧图层面板独立占据整列；只有右侧地图区域参与地图/属性表上下分割，
+        # 避免属性表横向覆盖图层列表。
+        self._workspace_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._workspace_splitter.setObjectName("mainWorkspaceSplitter")
+        self._workspace_splitter.setChildrenCollapsible(False)
+        self._workspace_splitter.addWidget(self._map_canvas)
+        self._workspace_splitter.addWidget(self._attribute_table_panel)
+        self._workspace_splitter.setSizes([720, 0])
+        self._workspace_splitter.setStretchFactor(0, 1)
+        self._workspace_splitter.setStretchFactor(1, 0)
+        self._attribute_table_panel.hide()
+
+        map_workspace.addWidget(self._layer_panel)
+        map_workspace.addWidget(self._workspace_splitter)
+        map_workspace.setSizes([300, 1380])
+        map_workspace.setStretchFactor(0, 0)
+        map_workspace.setStretchFactor(1, 1)
+        self.setCentralWidget(map_workspace)
+        self._panel_tabs.setObjectName("workspacePanelTabs")
+        self._panel_tabs.setDocumentMode(True)
+        self._panel_tabs.tabBar().setObjectName("workspacePanelTabBar")
+        self._panel_tabs.tabBar().setMovable(False)
+        self._panel_tabs.addTab(self._analysis_history_panel, "分析记录")
+        self._panel_tabs.addTab(self._symbology_panel, "符号系统")
+        self._panel_dock.setObjectName("workspacePanelDock")
+        self._panel_dock.setWidget(self._panel_tabs)
+        self._panel_dock.setTitleBarWidget(self._create_panel_title_bar())
+        self._panel_dock.setMinimumWidth(360)
+        self._panel_dock.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._symbology_dock)
-        self._symbology_dock.hide()
-        self._analysis_history_dock.setObjectName("analysisHistoryDock")
-        self._analysis_history_dock.setWidget(self._analysis_history_panel)
-        self._analysis_history_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
-        )
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._analysis_history_dock)
-        self._analysis_history_dock.hide()
-        self._attribute_table_dock.setObjectName("attributeTableDock")
-        self._attribute_table_dock.setWidget(self._attribute_table_panel)
-        self._attribute_table_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea
-            | Qt.DockWidgetArea.RightDockWidgetArea
-            | Qt.DockWidgetArea.BottomDockWidgetArea
-        )
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._attribute_table_dock)
-        self._attribute_table_dock.hide()
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._panel_dock)
+        self._panel_dock.hide()
 
         status_bar: QStatusBar = QStatusBar(self)
         status_bar.setObjectName("mainStatusBar")
@@ -258,6 +278,102 @@ class MainWindow(QMainWindow):
         self._attribute_table_panel.feature_zoom_requested.connect(
             self._on_table_zoom_requested
         )
+        self._attribute_table_panel.query_requested.connect(
+            self._on_attribute_table_query_requested
+        )
+        self._attribute_table_panel.add_feature_requested.connect(
+            self._on_attribute_table_add_requested
+        )
+        self._attribute_table_panel.edit_feature_requested.connect(
+            self._on_attribute_table_edit_requested
+        )
+        self._attribute_table_panel.delete_features_requested.connect(
+            self._on_attribute_table_delete_requested
+        )
+        self._attribute_table_panel.close_requested.connect(
+            self._hide_attribute_table
+        )
+
+    def _create_panel_title_bar(self) -> QWidget:
+        """创建带有明确文字按钮的工作面板标题栏。"""
+        title_bar: QWidget = QWidget()
+        title_bar.setObjectName("workspacePanelTitleBar")
+        layout: QHBoxLayout = QHBoxLayout(title_bar)
+        layout.setContentsMargins(10, 0, 4, 0)
+        layout.setSpacing(3)
+
+        title: QLabel = QLabel("工作面板")
+        title.setObjectName("workspacePanelTitle")
+        layout.addWidget(title, 1)
+
+        float_button: QToolButton = QToolButton()
+        float_button.setObjectName("workspacePanelFloatButton")
+        float_button.setIcon(self._panel_title_icon("float"))
+        float_button.setIconSize(QSize(16, 16))
+        float_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        float_button.setAccessibleName("浮动/停靠")
+        float_button.setToolTip("浮动/停靠")
+        float_button.clicked.connect(
+            lambda: self._panel_dock.setFloating(not self._panel_dock.isFloating())
+        )
+        layout.addWidget(float_button)
+
+        close_button: QToolButton = QToolButton()
+        close_button.setObjectName("workspacePanelCloseButton")
+        close_button.setIcon(self._panel_title_icon("close"))
+        close_button.setIconSize(QSize(16, 16))
+        close_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        close_button.setAccessibleName("关闭工作面板")
+        close_button.setToolTip("关闭工作面板")
+        close_button.clicked.connect(self._panel_dock.hide)
+        layout.addWidget(close_button)
+        return title_bar
+
+    @staticmethod
+    def _panel_title_icon(kind: str) -> QIcon:
+        """绘制不依赖系统字体的停靠栏按钮图标。"""
+        pixmap: QPixmap = QPixmap(18, 18)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter: QPainter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen: QPen = QPen(Qt.GlobalColor.darkGray, 1.8)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        if kind == "close":
+            painter.drawLine(4, 4, 14, 14)
+            painter.drawLine(14, 4, 4, 14)
+        else:
+            painter.drawRect(3, 6, 8, 8)
+            painter.drawLine(8, 3, 15, 3)
+            painter.drawLine(15, 3, 15, 10)
+            painter.drawLine(15, 3, 9, 9)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _show_workspace_panel(self, tab_index: int) -> None:
+        """切换到指定工具面板并确保统一停靠容器获得焦点。"""
+        self._panel_tabs.setCurrentIndex(tab_index)
+        self._panel_dock.show()
+        self._panel_dock.raise_()
+        self._panel_dock.activateWindow()
+
+    def _show_attribute_table_panel(self) -> None:
+        """显示地图下方属性表，并恢复一个可用的初始高度。"""
+        self._attribute_table_panel.show()
+        available_height: int = max(self._workspace_splitter.height(), 720)
+        table_height: int = min(320, max(220, available_height // 3))
+        self._workspace_splitter.setSizes(
+            [max(360, available_height - table_height), table_height]
+        )
+
+    def _hide_attribute_table(self) -> None:
+        """隐藏地图下方属性表，保留当前图层和选择状态。"""
+        self._attribute_table_panel.hide()
+        self._workspace_splitter.setSizes([self._workspace_splitter.height(), 0])
+
+    def _workspace_panel_is_visible(self) -> bool:
+        """返回统一工具面板是否处于可见状态。"""
+        return self._panel_dock.isVisible()
 
     def _handle_action(self, action_id: str) -> None:
         """把稳定功能编号路由到已实现能力或预留接口。
@@ -660,7 +776,7 @@ class MainWindow(QMainWindow):
                 active_name = layer.name
         self._layer_label.setText(f"当前图层  {active_name}")
         # 符号系统面板若已打开需跟随活动图层切换。
-        if self._symbology_dock.isVisible():
+        if self._workspace_panel_is_visible():
             active_snapshot: LayerSnapshot | None = next(
                 (
                     layer
@@ -679,6 +795,8 @@ class MainWindow(QMainWindow):
             pass
         self._layer_label.setText("当前图层  无")
         self._symbology_panel.set_layer(None)
+        self._attribute_table_panel.set_layer(None)
+        self._hide_attribute_table()
 
     def _on_canvas_clicked(self) -> None:
         """点击地图画布时取消图层面板选中。"""
@@ -858,8 +976,7 @@ class MainWindow(QMainWindow):
         if layer_snapshot is None:
             return
         self._attribute_table_panel.set_layer(layer_snapshot)
-        self._attribute_table_dock.show()
-        self._attribute_table_dock.raise_()
+        self._show_attribute_table_panel()
         # 同步当前地图选择到属性表。
         if layer_snapshot.layer_id in (
             snapshot.active_layer_id or "",
@@ -892,7 +1009,7 @@ class MainWindow(QMainWindow):
             self._application.set_active_layer(layer_id)
         except ApplicationError:
             return
-        self._symbology_dock.show()
+        self._show_workspace_panel(self._SYMBOLOGY_TAB_INDEX)
         self._refresh_workspace()
 
     def _current_symbology(
@@ -1111,6 +1228,62 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage("属性表对应图层已不在工作区中", 4000)
 
+    def _on_attribute_table_query_requested(self, layer_id: str) -> None:
+        """从底部属性表打开当前图层的属性查询。"""
+        self._attribute_query(layer_id=layer_id, toggle=False)
+
+    def _on_attribute_table_add_requested(self, layer_id: str) -> None:
+        """从底部属性表启动当前图层的几何新增流程。"""
+        layer_snapshot: LayerSnapshot | None = next(
+            (
+                layer
+                for layer in self._application.snapshot().layers
+                if layer.layer_id == layer_id
+            ),
+            None,
+        )
+        if layer_snapshot is None or not isinstance(layer_snapshot.layer, VectorLayer):
+            return
+        mode_by_family: dict[GeometryFamily, tuple[str, str]] = {
+            GeometryFamily.POINT: ("point", "点"),
+            GeometryFamily.LINE: ("line", "线"),
+            GeometryFamily.POLYGON: ("polygon", "面"),
+        }
+        family = layer_snapshot.layer.geometry_family
+        mode_label: tuple[str, str] | None = mode_by_family.get(family)
+        if mode_label is None:
+            QMessageBox.information(
+                self,
+                "新增要素",
+                "当前图层是混合几何类型，请使用功能区中的点、线或面新增入口。",
+            )
+            return
+        self._start_digitize(
+            mode_label[0], mode_label[1], target_layer_id=layer_snapshot.layer_id
+        )
+
+    def _on_attribute_table_edit_requested(
+        self, layer_id: str, fid: FeatureId
+    ) -> None:
+        """把属性表选中的要素交给现有属性编辑流程。"""
+        try:
+            self._application.set_selection(layer_id, (fid,))
+        except ApplicationError:
+            return
+        self._edit_selected_feature()
+        self._refresh_attribute_table()
+
+    def _on_attribute_table_delete_requested(
+        self, layer_id: str, fids: tuple
+    ) -> None:
+        """把属性表选中的要素交给现有删除流程。"""
+        try:
+            self._application.set_selection(layer_id, fids)
+        except ApplicationError:
+            return
+        self._delete_selected_features()
+        self._refresh_attribute_table()
+
     def _set_active_query_action(self, action_id: str | None) -> None:
         """同步当前查询模式和三个功能区按钮的互斥高亮状态。"""
         self._active_query_action = action_id
@@ -1165,14 +1338,18 @@ class MainWindow(QMainWindow):
             "框选查询：拖拽矩形选择  |  Shift+拖拽追加"
         )
 
-    def _attribute_query(self) -> None:
+    def _attribute_query(
+        self, layer_id: str | None = None, toggle: bool = True
+    ) -> None:
         """打开属性查询对话框，按字段条件筛选要素。"""
-        if self._active_query_action == "attribute_query":
+        if toggle and self._active_query_action == "attribute_query":
             self._exit_query_mode()
             return
         snapshot: WorkspaceSnapshot = self._application.snapshot()
         vector_layers: tuple[LayerSnapshot, ...] = tuple(
-            layer for layer in snapshot.layers if not layer.is_raster
+            layer
+            for layer in snapshot.layers
+            if not layer.is_raster and (layer_id is None or layer.layer_id == layer_id)
         )
         if not vector_layers:
             self._set_active_query_action(None)
@@ -1221,7 +1398,9 @@ class MainWindow(QMainWindow):
         """激活面要素数字化工具。"""
         self._start_digitize("polygon", "面")
 
-    def _start_digitize(self, mode: str, label: str) -> None:
+    def _start_digitize(
+        self, mode: str, label: str, target_layer_id: str | None = None
+    ) -> None:
         """激活数字化工具并更新状态栏。
 
         参数:
@@ -1237,8 +1416,8 @@ class MainWindow(QMainWindow):
                 "请先打开一个具有坐标系的图层以确定地图坐标系。",
             )
             return
-        # 新增的要素将追加到矢量图层，先弹出对话框让用户选择目标图层；
-        # 候选按几何类型和可写回格式过滤，默认选中当前活动图层。
+        # 新增的要素将追加到矢量图层；功能区入口让用户选择目标图层，
+        # 属性表入口则传入当前图层编号，避免重复选择。
         expected_family: GeometryFamily = {
             "point": GeometryFamily.POINT,
             "line": GeometryFamily.LINE,
@@ -1268,24 +1447,32 @@ class MainWindow(QMainWindow):
                     ),
                 )
             )
-        if not options:
+        if target_layer_id is None:
+            if not options:
+                QMessageBox.information(
+                    self,
+                    "新增要素",
+                    f"没有可用于添加{label}要素的图层。\n"
+                    "请先打开一个 Shapefile 或 GeoJSON 矢量图层。",
+                )
+                return
+            dialog: TargetLayerDialog = TargetLayerDialog(
+                tuple(options),
+                label,
+                snapshot.active_layer_id,
+                self,
+            )
+            if dialog.exec() != TargetLayerDialog.DialogCode.Accepted:
+                # 用户取消：不激活数字化工具。
+                return
+            target_layer_id = dialog.selected_layer_id()
+        elif not any(option.layer_id == target_layer_id for option in options):
             QMessageBox.information(
                 self,
                 "新增要素",
-                f"没有可用于添加{label}要素的图层。\n"
-                "请先打开一个 Shapefile 或 GeoJSON 矢量图层。",
+                f"图层不支持新增{label}要素，请检查图层几何类型和文件格式。",
             )
             return
-        dialog: TargetLayerDialog = TargetLayerDialog(
-            tuple(options),
-            label,
-            snapshot.active_layer_id,
-            self,
-        )
-        if dialog.exec() != TargetLayerDialog.DialogCode.Accepted:
-            # 用户取消：不激活数字化工具。
-            return
-        target_layer_id: str | None = dialog.selected_layer_id()
         if target_layer_id is None:
             return
         target_layer: LayerSnapshot | None = None
@@ -1377,6 +1564,7 @@ class MainWindow(QMainWindow):
             ),
         )
         self._refresh_workspace()
+        self._refresh_attribute_table()
         # 保持数字化工具激活，支持连续追加。
         self._reactivate_digitize_tool()
         self._ready_label.setText(
@@ -1452,16 +1640,17 @@ class MainWindow(QMainWindow):
 
         # 记录每个被影响图层删前/删后的完整要素列表用于撤销。
         affected: dict[str, tuple[tuple[Feature, ...], tuple[Feature, ...]]] = {}
+        selected_by_layer: dict[str, set[FeatureId]] = {}
         for layer_id, fid, _feature in to_delete:
-            if layer_id in affected:
-                continue
+            selected_by_layer.setdefault(layer_id, set()).add(fid)
+        for layer_id, selected_fids in selected_by_layer.items():
             for layer in snapshot.layers:
                 if layer.layer_id == layer_id and isinstance(
                     layer.layer, VectorLayer
                 ):
                     before: tuple[Feature, ...] = layer.layer.features
                     after: tuple[Feature, ...] = tuple(
-                        f for f in before if f.fid != fid
+                        f for f in before if f.fid not in selected_fids
                     )
                     affected[layer_id] = (before, after)
                     break
@@ -1483,6 +1672,7 @@ class MainWindow(QMainWindow):
             ),
         )
         self._refresh_workspace()
+        self._refresh_attribute_table()
         self._ready_label.setText(f"已删除 {count} 个要素")
 
     def _restore_layer_features(
@@ -1574,6 +1764,7 @@ class MainWindow(QMainWindow):
             ),
         )
         self._refresh_workspace()
+        self._refresh_attribute_table()
         self._ready_label.setText(
             f"已修改要素属性  FID {selected_fid}"
         )
@@ -1957,7 +2148,11 @@ class MainWindow(QMainWindow):
         """
         tolerance: float = 5.0 * self._map_canvas.map_units_per_pixel
         try:
-            candidates = self._application.identify_features(point, tolerance)
+            candidates = self._application.identify_features(
+                point,
+                tolerance,
+                query_layer_ids=self._map_canvas.queryable_layer_ids(),
+            )
         except (ApplicationError, ValueError):
             return
 
@@ -2069,7 +2264,9 @@ class MainWindow(QMainWindow):
         before_selections: dict[str, tuple[FeatureId, ...]] = self._capture_selections()
         try:
             result = self._application.select_rectangle(
-                polygon, add_to_selection=add_to_selection
+                polygon,
+                add_to_selection=add_to_selection,
+                query_layer_ids=self._map_canvas.queryable_layer_ids(),
             )
         except (ApplicationError, ValueError):
             self._map_canvas.set_pan_tool()
@@ -2201,12 +2398,14 @@ class MainWindow(QMainWindow):
 
     def _toggle_analysis_history(self) -> None:
         """切换分析历史面板的显示状态。"""
-        if self._analysis_history_dock.isVisible():
-            self._analysis_history_dock.hide()
+        if (
+            self._workspace_panel_is_visible()
+            and self._panel_tabs.currentIndex() == self._ANALYSIS_TAB_INDEX
+        ):
+            self._panel_dock.hide()
             return
         self._refresh_analysis_history()
-        self._analysis_history_dock.show()
-        self._analysis_history_dock.raise_()
+        self._show_workspace_panel(self._ANALYSIS_TAB_INDEX)
 
     def _clear_analysis_history(self) -> None:
         """清除分析历史记录，但不删除已有结果图层和结果文件。"""
@@ -2386,7 +2585,7 @@ class MainWindow(QMainWindow):
         crs_name: str = self._format_crs(snapshot.display_crs)
         self._crs_label.setText(f"坐标系  {crs_name}")
         self._refresh_analysis_history(snapshot)
-        if self._symbology_dock.isVisible():
+        if self._workspace_panel_is_visible():
             active_snapshot: LayerSnapshot | None = next(
                 (
                     layer
@@ -2396,7 +2595,7 @@ class MainWindow(QMainWindow):
                 None,
             )
             self._symbology_panel.set_layer(active_snapshot)
-        if self._attribute_table_dock.isVisible():
+        if self._attribute_table_panel.isVisible():
             table_layer_snapshot: LayerSnapshot | None = next(
                 (
                     layer
@@ -2410,6 +2609,9 @@ class MainWindow(QMainWindow):
                 self._attribute_table_panel.highlight_features(
                     set(table_layer_snapshot.selected_feature_ids)
                 )
+            else:
+                self._attribute_table_panel.set_layer(None)
+                self._hide_attribute_table()
         self._update_window_title()
 
     def _refresh_analysis_history(self, snapshot: WorkspaceSnapshot | None = None) -> None:
@@ -2422,6 +2624,24 @@ class MainWindow(QMainWindow):
             self._application.analysis_runs,
             layer_names,
         )
+
+    def _refresh_attribute_table(self) -> None:
+        """在要素属性发生变化后重建底部属性表内容。"""
+        if not self._attribute_table_panel.isVisible():
+            return
+        layer_snapshot: LayerSnapshot | None = next(
+            (
+                layer
+                for layer in self._application.snapshot().layers
+                if layer.layer_id == self._attribute_table_panel.layer_id
+            ),
+            None,
+        )
+        if layer_snapshot is None:
+            self._attribute_table_panel.set_layer(None)
+            self._hide_attribute_table()
+            return
+        self._attribute_table_panel.refresh_layer(layer_snapshot)
 
     def _schedule_workspace_refresh(self) -> None:
         """在当前 Qt 事件结束后合并执行一次完整工作区刷新。
@@ -2513,6 +2733,7 @@ class MainWindow(QMainWindow):
         self._redo_stack.append((description, undo_action, redo_action))
         self._update_undo_buttons()
         self._refresh_workspace()
+        self._refresh_attribute_table()
         self._ready_label.setText(f"已撤销  {description}")
 
     def _redo(self) -> None:
@@ -2532,6 +2753,7 @@ class MainWindow(QMainWindow):
         self._undo_stack.append((description, undo_action, redo_action))
         self._update_undo_buttons()
         self._refresh_workspace()
+        self._refresh_attribute_table()
         self._ready_label.setText(f"已重做  {description}")
 
     def closeEvent(self, event: QCloseEvent) -> None:

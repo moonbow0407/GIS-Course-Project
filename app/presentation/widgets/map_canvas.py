@@ -102,6 +102,7 @@ class MapCanvas(QGraphicsView):
         # 捕捉状态。
         self._snapping_enabled: bool = False
         self._snap_coords: list[tuple[float, float]] = []
+        self._snap_layer_ids: tuple[str, ...] = ()
         self._snap_marker: QGraphicsPathItem | None = None
         # 缓存最近一次快照，供缩放后重新渲染使用。
         self._last_snapshot: WorkspaceSnapshot | None = None
@@ -132,6 +133,12 @@ class MapCanvas(QGraphicsView):
     def has_map_data(self) -> bool:
         """返回画布当前是否已经建立真实地图范围。"""
         return self._map_scene_rect is not None
+
+    def queryable_layer_ids(self) -> tuple[str, ...]:
+        """返回当前视图中可见且未超出比例范围的图层编号。"""
+        if self._last_snapshot is None:
+            return ()
+        return self._queryable_layer_ids(self._last_snapshot)
 
     @property
     def map_units_per_pixel(self) -> float:
@@ -164,6 +171,8 @@ class MapCanvas(QGraphicsView):
         if not snapshot.layers:
             self._last_snapshot = snapshot
             self._selected_fids.clear()
+            self._snap_coords.clear()
+            self._snap_layer_ids = ()
             self._map_scene_rect = None
             self._scene.setSceneRect(0, 0, 1000, 700)
             self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
@@ -678,8 +687,10 @@ class MapCanvas(QGraphicsView):
     def _build_snap_index(self, snapshot: WorkspaceSnapshot) -> None:
         """从工作区快照构建捕捉顶点索引。"""
         coords: list[tuple[float, float]] = []
+        queryable_layer_ids: tuple[str, ...] = self._queryable_layer_ids(snapshot)
+        queryable_ids: set[str] = set(queryable_layer_ids)
         for layer in snapshot.layers:
-            if not layer.visible:
+            if layer.layer_id not in queryable_ids:
                 continue
             if not isinstance(layer.layer, VectorLayer):
                 continue
@@ -688,6 +699,29 @@ class MapCanvas(QGraphicsView):
                     continue
                 self._collect_coords(feature.geometry, coords)
         self._snap_coords = coords
+        self._snap_layer_ids = queryable_layer_ids
+
+    def _queryable_layer_ids(self, snapshot: WorkspaceSnapshot) -> tuple[str, ...]:
+        """按当前视图比例返回可参与查询和捕捉的图层编号。"""
+        return tuple(
+            layer.layer_id
+            for layer in snapshot.layers
+            if layer.visible and self._is_layer_in_scale_range(layer)
+        )
+
+    def _is_layer_in_scale_range(self, layer: LayerSnapshot) -> bool:
+        """判断图层在当前视图比例下是否应显示和参与交互。"""
+        if (
+            layer.min_scale_percent is not None
+            and self._zoom_percent < float(layer.min_scale_percent)
+        ):
+            return False
+        if (
+            layer.max_scale_percent is not None
+            and self._zoom_percent > float(layer.max_scale_percent)
+        ):
+            return False
+        return True
 
     @staticmethod
     def _collect_coords(
@@ -1574,25 +1608,19 @@ class MapCanvas(QGraphicsView):
         """
         if self._last_snapshot is None:
             return
-        zoom_percent: float = self._zoom_percent
+        queryable_layer_ids: tuple[str, ...] = self._queryable_layer_ids(
+            self._last_snapshot
+        )
+        queryable_ids: set[str] = set(queryable_layer_ids)
         for layer in self._last_snapshot.layers:
-            layer_visible: bool = layer.visible
-            if layer_visible:
-                if (
-                    layer.min_scale_percent is not None
-                    and zoom_percent < float(layer.min_scale_percent)
-                ):
-                    layer_visible = False
-                if (
-                    layer.max_scale_percent is not None
-                    and zoom_percent > float(layer.max_scale_percent)
-                ):
-                    layer_visible = False
+            layer_visible: bool = layer.layer_id in queryable_ids
             items: list[QGraphicsItem] | None = self._layer_items.get(layer.layer_id)
             if not items:
                 continue
             for item in items:
                 item.setVisible(layer_visible)
+        if queryable_layer_ids != self._snap_layer_ids:
+            self._build_snap_index(self._last_snapshot)
 
     def _ensure_pan_area(self) -> None:
         """确保当前视口周围存在可供手形拖动的场景范围。"""

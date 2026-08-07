@@ -121,6 +121,47 @@ def test_canvas_extent_ignores_hidden_layers() -> None:
     assert canvas._map_scene_rect.height() == pytest.approx(21.0)
 
 
+def test_scale_hidden_layers_are_excluded_from_query_and_snapping() -> None:
+    """超出显示比例范围的图层不应参与画布查询或顶点捕捉。"""
+    application = QApplication.instance() or QApplication([])
+    visible_layer = VectorLayer.create(
+        layer_id="visible-layer",
+        name="可见图层",
+        features=(Feature(fid=1, geometry=Point(0, 0), attributes={}),),
+        crs=CRS.from_epsg(4326),
+    )
+    scale_hidden_layer = VectorLayer.create(
+        layer_id="scale-hidden-layer",
+        name="比例隐藏图层",
+        features=(Feature(fid=2, geometry=Point(100, 100), attributes={}),),
+        crs=CRS.from_epsg(4326),
+    )
+    canvas = MapCanvas()
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(
+                LayerSnapshot(
+                    layer=visible_layer,
+                    visible=True,
+                    selected_feature_ids=(),
+                ),
+                LayerSnapshot(
+                    layer=scale_hidden_layer,
+                    visible=True,
+                    selected_feature_ids=(),
+                    min_scale_percent=200.0,
+                ),
+            ),
+            active_layer_id=visible_layer.layer_id,
+            display_crs=visible_layer.crs,
+        )
+    )
+
+    assert application is not None
+    assert canvas.queryable_layer_ids() == (visible_layer.layer_id,)
+    assert canvas._snap_coords == [(0.0, 0.0)]
+
+
 def test_canvas_full_extent_uses_relative_margin_for_small_geographic_bounds() -> None:
     """小范围经纬度数据全图显示时，应按包络比例留白并充分利用视口。"""
     application: QApplication = QApplication.instance() or QApplication([])

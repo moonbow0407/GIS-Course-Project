@@ -5,7 +5,7 @@ import os
 # 必须在导入 Qt 前启用无界面平台，测试才能在 CI 中创建原生控件。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QDockWidget, QLabel
 
 from app.application.project_models import AnalysisOutputReference, AnalysisRun
 from app.presentation.main_window import MainWindow
@@ -70,20 +70,39 @@ def test_history_panel_lists_latest_first_and_uses_hover_details() -> None:
     assert "缓冲距离" in panel._history_list.item(0).toolTip()
 
 
-def test_main_window_toggles_analysis_history_dock() -> None:
-    """连续点击分析记录入口应在显示和隐藏之间切换。"""
+def test_main_window_toggles_analysis_history_tab() -> None:
+    """连续点击分析记录入口应在统一工作面板中显示和隐藏。"""
     qt_application: QApplication = QApplication.instance() or QApplication([])
     window = MainWindow()
     window.show()
     qt_application.processEvents()
 
-    assert not window._analysis_history_dock.isVisible()
+    assert not window._panel_dock.isVisible()
     window._toggle_analysis_history()
     qt_application.processEvents()
-    assert window._analysis_history_dock.isVisible()
+    assert window._panel_dock.isVisible()
+    assert window._panel_tabs.currentIndex() == window._ANALYSIS_TAB_INDEX
     window._toggle_analysis_history()
     qt_application.processEvents()
-    assert not window._analysis_history_dock.isVisible()
+    assert not window._panel_dock.isVisible()
+    window.close()
+
+
+def test_main_window_switches_workspace_tabs_without_stacking_docks() -> None:
+    """分析记录和符号系统应复用一个 dock 并可连续切换。"""
+    qt_application: QApplication = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.show()
+
+    window._show_workspace_panel(window._ANALYSIS_TAB_INDEX)
+    window._show_workspace_panel(window._SYMBOLOGY_TAB_INDEX)
+    qt_application.processEvents()
+
+    assert window._panel_dock.isVisible()
+    assert window._panel_dock.widget() is window._panel_tabs
+    assert window._panel_tabs.count() == 2
+    assert window._panel_tabs.currentIndex() == window._SYMBOLOGY_TAB_INDEX
+    assert len(window.findChildren(QDockWidget)) == 1
     window.close()
 
 

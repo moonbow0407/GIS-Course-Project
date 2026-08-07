@@ -93,9 +93,9 @@ class RibbonBar(QWidget):
         title_row.setContentsMargins(18, 5, 14, 0)
         title_row.addWidget(brand)
         title_row.addStretch()
-        help_label: QLabel = QLabel("帮助  ·  关于")
-        help_label.setObjectName("ribbonHelp")
-        title_row.addWidget(help_label)
+        about_label: QLabel = QLabel("关于")
+        about_label.setObjectName("ribbonAbout")
+        title_row.addWidget(about_label)
 
         self._tabs.setObjectName("ribbonTabs")
         self._tabs.setExpanding(False)
@@ -379,8 +379,7 @@ class RibbonBar(QWidget):
                         RibbonActionSpec("set_crs", "坐标系统", "◎", "#0f766e"),
                         RibbonActionSpec("map_settings", "显示设置", "⚙", "#475569"),
                     )),
-                    RibbonGroupSpec("帮助", (
-                        RibbonActionSpec("help", "使用帮助", "?", "#2563eb"),
+                    RibbonGroupSpec("关于", (
                         RibbonActionSpec("about", "关于平台", "i", "#475569"),
                     )),
                 ),

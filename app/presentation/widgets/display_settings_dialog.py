@@ -137,6 +137,7 @@ class DisplaySettingsDialog(QDialog):
 
     def _connect_signals(self) -> None:
         """绑定自动应用与书签管理信号。"""
+        self._layer_combo.currentIndexChanged.connect(self._on_layer_changed)
         self._opacity_slider.valueChanged.connect(self._schedule_opacity)
         self._min_scale.valueChanged.connect(self._schedule_scale)
         self._max_scale.valueChanged.connect(self._schedule_scale)
@@ -161,6 +162,13 @@ class DisplaySettingsDialog(QDialog):
                         self._layer_combo.setCurrentIndex(index)
         finally:
             self._updating = False
+        self._load_controls(self.selected_layer())
+        self._update_controls()
+
+    def _on_layer_changed(self, _index: int) -> None:
+        """切换图层后同步透明度和显示比例控件。"""
+        if self._updating:
+            return
         self._load_controls(self.selected_layer())
         self._update_controls()
 

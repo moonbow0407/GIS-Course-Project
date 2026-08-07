@@ -9,9 +9,11 @@ from pyproj import CRS
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QDockWidget,
     QFileDialog,
     QInputDialog,
     QLineEdit,
@@ -90,6 +92,53 @@ def test_layer_context_menu_keeps_light_readable_background_with_dark_system_pal
 
     menu.close()
     application.setPalette(original_palette)
+
+
+def test_dock_title_buttons_follow_light_workspace_palette() -> None:
+    """统一工作面板停靠标题栏按钮应与浅色标题栏保持一致。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    load_style(application)
+    style_sheet: str = application.styleSheet()
+
+    assert "QDockWidget::close-button" in style_sheet
+    assert "QDockWidget::float-button" in style_sheet
+    assert "QDockWidget::close-button:hover" in style_sheet
+    assert "QDockWidget::float-button:hover" in style_sheet
+
+    dock: QDockWidget = QDockWidget("符号系统")
+    dock.setObjectName("workspacePanelDock")
+    dock.show()
+    application.processEvents()
+    title_buttons: list[QAbstractButton] = [
+        button
+        for button in dock.findChildren(QAbstractButton)
+        if button.objectName()
+        in {"qt_dockwidget_closebutton", "qt_dockwidget_floatbutton"}
+    ]
+
+    assert len(title_buttons) == 2
+    assert all(
+        button.palette().color(QPalette.ColorRole.Button).name() == "#eef4fa"
+        for button in title_buttons
+    )
+    assert all(
+        button.palette().color(QPalette.ColorRole.ButtonText).lightness() < 180
+        for button in title_buttons
+    )
+    dock.close()
+
+
+def test_workspace_panel_tabs_use_explicit_light_contrast() -> None:
+    """统一工作面板和三个标签页必须使用明确的浅色背景与深色文字。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    load_style(application)
+    style_sheet: str = application.styleSheet()
+
+    assert "QDockWidget#workspacePanelDock::title" in style_sheet
+    assert "QDockWidget#workspacePanelDock" in style_sheet
+    assert "QTabBar#workspacePanelTabBar::tab:selected" in style_sheet
+    assert "background: #ffffff" in style_sheet
+    assert "color: #0f5f9f" in style_sheet
 
 
 def test_combo_box_popup_keeps_light_readable_background_with_dark_system_palette() -> None:
