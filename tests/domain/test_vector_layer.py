@@ -74,7 +74,7 @@ def test_vector_layer_reports_mixed_geometry_family() -> None:
 @pytest.mark.parametrize(
     ("family", "expected_fill", "expected_point_size"),
     [
-        (GeometryFamily.POINT, "#2f7de1", 5.0),
+        (GeometryFamily.POINT, "#2f7de1", 8.0),
         (GeometryFamily.LINE, "transparent", 0.0),
         (GeometryFamily.POLYGON, "#9ec5fe", 0.0),
     ],

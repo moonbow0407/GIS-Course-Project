@@ -73,6 +73,22 @@ class EmptyBufferResult(ApplicationError):
     """表示缓冲区计算后没有产生可用几何。"""
 
 
+class InvalidOverlayParameters(ApplicationError):
+    """表示叠加分析参数不满足业务约束。"""
+
+
+class UnsupportedOverlayInput(ApplicationError):
+    """表示叠加分析输入不是可处理的矢量图层。"""
+
+
+class OverlayAnalysisFailed(ApplicationError):
+    """表示叠加几何计算失败。"""
+
+
+class EmptyOverlayResult(ApplicationError):
+    """表示叠加计算后没有产生可用几何。"""
+
+
 class LayerReprojectionFailed(ApplicationError):
     """表示图层无法根据原始数据源转换到目标坐标系。"""
 

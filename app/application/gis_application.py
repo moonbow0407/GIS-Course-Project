@@ -20,6 +20,11 @@ from app.application.buffer_analysis import (
     reproject_vector_layer,
     resolve_buffer_analysis_crs,
 )
+from app.application.overlay_analysis import (
+    OverlayRequest,
+    operation_label,
+    overlay_features,
+)
 from app.application.database_models import (
     DatabaseConnectionConfig,
     DatabaseLayerInfo,
@@ -32,13 +37,17 @@ from app.application.errors import (
     DatabaseImportFailed,
     DatabaseNotConfigured,
     DataWriteFailed,
+    EmptyOverlayResult,
     InvalidBufferParameters,
+    InvalidOverlayParameters,
     LayerNotFound,
     LayerReprojectionFailed,
     NoActiveLayer,
+    OverlayAnalysisFailed,
     ProjectNotSaved,
     ProjectStoreNotConfigured,
     UnsupportedBufferInput,
+    UnsupportedOverlayInput,
 )
 from app.application.ports import DataReader, DataWriter, ProjectStore
 from app.application.project_models import (
@@ -55,6 +64,7 @@ from app.application.results import (
     LayerSnapshot,
     OpenDataResult,
     OpenVectorResult,
+    OverlayAnalysisResult,
     ProjectOpenResult,
     ProjectSaveResult,
     SelectedFeature,
@@ -320,6 +330,43 @@ class GisApplication:
             snapshot=self.snapshot(),
             warning=warning,
         )
+
+    def create_empty_layer(
+        self,
+        name: str,
+        geometry_family: GeometryFamily,
+        crs: CRS | None,
+    ) -> OpenDataResult:
+        """新建一个空白矢量图层并加入当前地图文档。
+
+        参数:
+            name: 图层显示名称。
+            geometry_family: 几何类别，决定图层的要素类型（点/线/面）。
+            crs: 坐标参考系统，需与当前地图 CRS 一致（或同时为空）。
+
+        返回:
+            包含新建图层编号和最新工作区快照的结果。
+        """
+        # 为该空白图层预留本地文件路径，支持后续新增要素等操作。
+        # 空图层无需立即写出文件——首次新增要素时由 append_feature 写回。
+        base_dir: Path = (
+            self._project_path.parent
+            if self._project_path is not None
+            else Path.cwd()
+        )
+        safe_name: str = "".join(
+            c if c not in '<>:"/\\|?*' else "_" for c in name
+        ).rstrip(".")
+        output_path: Path = (base_dir / f"{safe_name}.geojson").resolve()
+
+        layer: VectorLayer = VectorLayer.create(
+            name=name,
+            features=(),
+            crs=crs,
+            source_path=output_path,
+            geometry_family=geometry_family,
+        )
+        return self.add_layer(layer)
 
     @property
     def database_is_connected(self) -> bool:
@@ -1597,6 +1644,179 @@ class GisApplication:
             message=message,
         )
 
+    def overlay_analysis(self, request: OverlayRequest) -> OverlayAnalysisResult:
+        """执行叠加分析，并为成功或失败的执行追加一条历史记录。
+
+        参数:
+            request: 两个输入图层、叠加操作类型和输出位置等分析参数。
+
+        返回:
+            包含输出图层编号、写出路径、要素数量和最新工作区快照的结果。
+
+        异常:
+            ApplicationError: 分析参数、输入数据或结果写出失败时抛出。
+        """
+        started_at: str = self._now()
+        started_monotonic: float = perf_counter()
+        try:
+            return self._execute_overlay_analysis(request, started_at, started_monotonic)
+        except Exception as error:
+            self._append_failed_overlay_analysis(request, started_at, started_monotonic, error)
+            raise
+
+    def _execute_overlay_analysis(
+        self,
+        request: OverlayRequest,
+        started_at: str,
+        started_monotonic: float,
+    ) -> OverlayAnalysisResult:
+        """执行叠加分析、写出结果并将结果图层加入当前工作区。
+
+        参数:
+            request: 两个输入图层、叠加操作类型和输出位置等分析参数。
+            started_at: 分析开始的 UTC 时间。
+            started_monotonic: 分析开始的单调时钟值。
+
+        返回:
+            包含输出图层编号、写出路径、要素数量和最新工作区快照的结果。
+
+        异常:
+            UnsupportedOverlayInput: 输入图层不是有坐标系的矢量图层。
+            DataWriteFailed: 输出服务未配置或结果无法写出。
+            ApplicationError: 叠加计算失败或结果为空。
+        """
+        if self.data_writer is None:
+            raise DataWriteFailed("空间数据写出服务尚未配置。")
+
+        input_layer: SpatialLayer = self._find_layer(request.input_layer_id)
+        overlay_layer: SpatialLayer = self._find_layer(request.overlay_layer_id)
+        if not isinstance(input_layer, VectorLayer):
+            raise UnsupportedOverlayInput("叠加分析的主输入必须是矢量图层。")
+        if not isinstance(overlay_layer, VectorLayer):
+            raise UnsupportedOverlayInput("叠加分析的叠加输入必须是矢量图层。")
+        if input_layer.crs is None:
+            raise UnsupportedOverlayInput(
+                f"主输入图层“{input_layer.name}”没有坐标参考系统，无法执行叠加分析。"
+            )
+        if overlay_layer.crs is None:
+            raise UnsupportedOverlayInput(
+                f"叠加图层“{overlay_layer.name}”没有坐标参考系统，无法执行叠加分析。"
+            )
+        if input_layer.crs != overlay_layer.crs:
+            raise UnsupportedOverlayInput(
+                "两个输入图层的坐标参考系统不一致，无法执行叠加分析。"
+            )
+        display_crs: CRS | None = self._document.display_crs
+        if display_crs is None:
+            raise UnsupportedOverlayInput("当前地图没有坐标参考系统，无法加入叠加分析结果。")
+
+        output_path: Path = request.output_path.expanduser().resolve()
+        output_name: str = request.output_layer_name.strip()
+        if not output_name:
+            raise InvalidOverlayParameters("叠加分析输出图层名不能为空。")
+        if (
+            input_layer.source_path is not None
+            and output_path == input_layer.source_path.resolve()
+            and output_path.suffix.lower() != ".gpkg"
+        ):
+            raise InvalidOverlayParameters("叠加分析输出位置不能覆盖主输入图层源文件。")
+        if (
+            overlay_layer.source_path is not None
+            and output_path == overlay_layer.source_path.resolve()
+            and output_path.suffix.lower() != ".gpkg"
+        ):
+            raise InvalidOverlayParameters("叠加分析输出位置不能覆盖叠加图层源文件。")
+        if output_path.exists() and output_path.suffix.lower() != ".gpkg":
+            raise InvalidOverlayParameters("分析结果输出已存在，请使用新的结果文件或图层名称。")
+
+        # 叠加分析不需要 CRS 转换：两个图层已通过 MapDocument 验证为同一 CRS。
+        try:
+            calculated_features = overlay_features(input_layer, overlay_layer, request)
+        except EmptyOverlayResult:
+            raise
+        except ApplicationError:
+            raise
+        except Exception as error:
+            raise OverlayAnalysisFailed(f"叠加分析计算失败：{error}") from error
+
+        source_layer_name: str | None = (
+            output_name if output_path.suffix.lower() == ".gpkg" else None
+        )
+        output_layer: VectorLayer = VectorLayer.create(
+            name=output_name,
+            features=calculated_features,
+            crs=display_crs,
+            source_path=output_path,
+            source_layer_name=source_layer_name,
+        )
+        self.data_writer.write(output_layer, output_path, (), output_name)
+        self._document.add_layer(output_layer)
+        self._document.set_active_layer(output_layer.layer_id)
+        run: AnalysisRun = self._create_analysis_run(
+            algorithm_id="overlay",
+            input_layer_ids=(input_layer.layer_id, overlay_layer.layer_id),
+            parameters=self._overlay_request_parameters(request),
+            output_layer_id=output_layer.layer_id,
+            output_path=output_path,
+            output_layer_name=output_name,
+            started_at=started_at,
+            completed_at=self._now(),
+            duration_seconds=perf_counter() - started_monotonic,
+        )
+        self._analysis_runs = self._analysis_runs + (run,)
+        self._modified = True
+        return OverlayAnalysisResult(
+            input_layer_id=input_layer.layer_id,
+            overlay_layer_id=overlay_layer.layer_id,
+            output_layer_id=output_layer.layer_id,
+            output_layer_name=output_name,
+            output_path=output_path,
+            feature_count=len(output_layer.features),
+            snapshot=self.snapshot(),
+        )
+
+    def _append_failed_overlay_analysis(
+        self,
+        request: OverlayRequest,
+        started_at: str,
+        started_monotonic: float,
+        error: Exception,
+    ) -> None:
+        """将失败的叠加分析执行写入历史，保留输入和用户参数便于回溯。"""
+        parameters: dict[str, object] = self._overlay_request_parameters(request)
+        input_layer: SpatialLayer | None = next(
+            (
+                layer
+                for layer in self._document.layers
+                if layer.layer_id == request.input_layer_id
+            ),
+            None,
+        )
+        if isinstance(input_layer, VectorLayer):
+            parameters["input_geometry_family"] = input_layer.geometry_family.value
+        overlay_ref: SpatialLayer | None = next(
+            (
+                layer
+                for layer in self._document.layers
+                if layer.layer_id == request.overlay_layer_id
+            ),
+            None,
+        )
+        if isinstance(overlay_ref, VectorLayer):
+            parameters["overlay_geometry_family"] = overlay_ref.geometry_family.value
+        run: AnalysisRun = self._create_analysis_run(
+            algorithm_id="overlay",
+            input_layer_ids=(request.input_layer_id, request.overlay_layer_id),
+            parameters=parameters,
+            status="failed",
+            message=str(error),
+            started_at=started_at,
+            completed_at=self._now(),
+            duration_seconds=perf_counter() - started_monotonic,
+        )
+        self._analysis_runs = self._analysis_runs + (run,)
+        self._modified = True
+
     @staticmethod
     def _buffer_request_parameters(request: BufferRequest) -> dict[str, object]:
         """将缓冲区请求转换为可持久化的历史参数。"""
@@ -1613,6 +1833,20 @@ class GisApplication:
             "analysis_crs": (
                 request.analysis_crs.to_string() if request.analysis_crs is not None else None
             ),
+            "output_path": str(request.output_path.expanduser().resolve()),
+            "output_layer_name": request.output_layer_name,
+        }
+
+    @staticmethod
+    def _overlay_request_parameters(request: OverlayRequest) -> dict[str, object]:
+        """将叠加分析请求转换为可持久化的历史参数。"""
+        return {
+            "operation": request.operation,
+            "operation_label": operation_label(request.operation),
+            "keep_geom_type": request.keep_geom_type,
+            "make_valid": request.make_valid,
+            "sjoin_predicate": request.sjoin_predicate,
+            "sjoin_how": request.sjoin_how,
             "output_path": str(request.output_path.expanduser().resolve()),
             "output_layer_name": request.output_layer_name,
         }

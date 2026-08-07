@@ -275,6 +275,7 @@ class RibbonBar(QWidget):
                         RibbonActionSpec("new_project", "新建工程", "＋"),
                         RibbonActionSpec("open_project", "打开工程", "⌑"),
                         RibbonActionSpec("save_project", "保存工程", "◇"),
+                        RibbonActionSpec("new_layer", "新建图层", "▣", "#16a34a"),
                     )),
                 ),
             ),

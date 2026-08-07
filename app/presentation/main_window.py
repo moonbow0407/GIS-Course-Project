@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QTabWidget,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 from shapely.geometry import Point, Polygon
@@ -45,7 +46,7 @@ from app.application.database_service import DatabaseService
 from app.application.errors import ApplicationError
 from app.application.gis_application import GisApplication, _chaikin_smooth
 from app.application.project_models import MapViewState
-from app.application.results import LayerSnapshot, SelectedFeature, WorkspaceSnapshot
+from app.application.results import LayerSnapshot, OpenDataResult, SelectedFeature, WorkspaceSnapshot
 from app.domain.feature import AttributeValue, Feature, FeatureId
 from app.domain.layer_style import GeometryFamily
 from app.domain.symbology import RasterSymbology, VectorSymbology
@@ -60,7 +61,11 @@ from app.presentation.widgets.attribute_query_dialog import (
     AttributeQueryRequest,
 )
 from app.presentation.widgets.attribute_table import AttributeTablePanel
+from app.application.overlay_analysis import operation_label
 from app.presentation.widgets.buffer_analysis_dialog import BufferAnalysisDialog
+from app.presentation.widgets.crs_select_widget import CrsSelectWidget
+from app.presentation.widgets.new_layer_dialog import NewLayerDialog
+from app.presentation.widgets.overlay_analysis_dialog import OverlayAnalysisDialog
 from app.presentation.widgets.database_dialogs import (
     DatabaseConnectionDialog,
     DatabaseLayerDialog,
@@ -395,6 +400,7 @@ class MainWindow(QMainWindow):
             "load_database": self._load_database,
             "database_manager": self._database_manager,
             "new_project": self._new_project,
+            "new_layer": self._new_layer,
             "open_project": self._open_project,
             "save_project": self._save_project_action,
             "zoom_in": self._map_canvas.zoom_in,
@@ -405,6 +411,7 @@ class MainWindow(QMainWindow):
             "refresh_map": self._refresh_workspace,
             "clear_selection": self._clear_selection,
             "buffer_analysis": self._buffer_analysis,
+            "overlay_analysis": self._overlay_analysis,
             "analysis_history": self._toggle_analysis_history,
             "toggle_layers": self._toggle_layer_panel,
             "add_feature": self._add_point_feature,
@@ -679,6 +686,63 @@ class MainWindow(QMainWindow):
         self._clear_undo_history()
         self._refresh_workspace(preserve_view=False)
         self._ready_label.setText("已新建空白工程")
+
+    def _new_layer(self) -> None:
+        """弹出新建空白图层对话框并创建空图层加入地图。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        dialog: NewLayerDialog = NewLayerDialog(
+            display_crs=snapshot.display_crs,
+            parent=self,
+        )
+        if dialog.exec() != NewLayerDialog.DialogCode.Accepted:
+            return
+
+        name: str = dialog.layer_name()
+        geometry_family: GeometryFamily = dialog.geometry_family()
+        crs_text: str = dialog.crs_text()
+
+        # 解析坐标系：用户输入优先，否则使用地图 CRS。
+        try:
+            if crs_text:
+                crs: CRS | None = CRS.from_user_input(crs_text)
+            elif snapshot.display_crs is not None:
+                crs = snapshot.display_crs
+            else:
+                QMessageBox.warning(
+                    self,
+                    "缺少坐标系",
+                    "当前地图没有坐标系，请在对话框中输入坐标系（如 EPSG:4326）。",
+                )
+                return
+        except CRSError:
+            QMessageBox.warning(
+                self,
+                "坐标系无效",
+                f"无法识别坐标系输入：{crs_text}",
+            )
+            return
+
+        try:
+            result: OpenDataResult = self._application.create_empty_layer(
+                name=name,
+                geometry_family=geometry_family,
+                crs=crs,
+            )
+        except ValueError as error:
+            QMessageBox.warning(self, "新建图层失败", str(error))
+            return
+
+        self._push_undo(
+            description=f"新建空白图层“{name}”",
+            undo_action=lambda layer_id=result.layer_id: self._application.remove_layer(layer_id),
+            redo_action=lambda n=name, gf=geometry_family, c=crs: self._application.create_empty_layer(
+                name=n, geometry_family=gf, crs=c,
+            ),
+        )
+        self._refresh_workspace()
+        self._ready_label.setText(f"已新建空白图层  {name}")
+        if result.warning:
+            self.statusBar().showMessage(result.warning, 8000)
 
     def _open_project_path(self, path: Path) -> None:
         """直接打开指定工程文件（用于启动对话框）。
@@ -1563,6 +1627,10 @@ class MainWindow(QMainWindow):
                 after,
             ),
         )
+        # 首个要素加入空图层后，先缩放到要素位置再刷新渲染，
+        # 确保 map_units_per_pixel 在缩放后计算，点符号尺寸与视口一致。
+        if len(before) == 0:
+            self._map_canvas.zoom_to_feature(geometry.bounds)
         self._refresh_workspace()
         self._refresh_attribute_table()
         # 保持数字化工具激活，支持连续追加。
@@ -2337,24 +2405,37 @@ class MainWindow(QMainWindow):
         self._refresh_workspace()
 
     def _set_display_crs(self) -> None:
-        """通过 CRS 标识设置地图显示坐标系并重建已有图层。"""
+        """弹出坐标系选择对话框，设置地图显示坐标系并重建已有图层。"""
         snapshot: WorkspaceSnapshot = self._application.snapshot()
-        current_crs: str = snapshot.display_crs.to_string() if snapshot.display_crs else ""
-        crs_text, accepted = QInputDialog.getText(
-            self,
-            "设置地图坐标系",
-            "输入 CRS 标识（例如 EPSG:4326 或 ESRI:102026）：",
-            text=current_crs,
+
+        dialog: QDialog = QDialog(self)
+        dialog.setWindowTitle("设置地图坐标系")
+        dialog.setMinimumWidth(520)
+
+        crs_widget: CrsSelectWidget = CrsSelectWidget()
+        crs_widget.set_placeholder("选择预设坐标系，或切换为自定义输入...")
+        if snapshot.display_crs is not None:
+            crs_widget.set_crs(snapshot.display_crs)
+
+        buttons: QDialogButtonBox = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        normalized_text: str = crs_text.strip()
-        if not accepted or not normalized_text:
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        layout: QVBoxLayout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("选择或输入地图显示坐标系："))
+        layout.addWidget(crs_widget)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        try:
-            target_crs: CRS = CRS.from_user_input(normalized_text)
-        except CRSError as error:
-            QMessageBox.warning(self, "坐标系设置失败", f"无法识别坐标系：{normalized_text}")
-            self.statusBar().showMessage(str(error), 5000)
+
+        target_crs: CRS | None = crs_widget.crs()
+        if target_crs is None:
+            QMessageBox.warning(self, "坐标系设置失败", "请输入有效的坐标系标识。")
             return
+
         try:
             self._application.set_display_crs(target_crs)
         except (ApplicationError, ValueError) as error:
@@ -2391,6 +2472,39 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "缓冲区分析完成",
+            f"结果图层：{result.output_layer_name}\n"
+            f"要素数量：{result.feature_count}\n"
+            f"输出位置：\n{result.output_path}",
+        )
+
+    def _overlay_analysis(self) -> None:
+        """打开叠加分析参数窗口并执行真实分析结果写出。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        vector_layers: tuple[LayerSnapshot, ...] = tuple(
+            layer for layer in snapshot.layers if not layer.is_raster
+        )
+        if len(vector_layers) < 2:
+            self.statusBar().showMessage("叠加分析需要至少两个矢量图层。", 4000)
+            return
+
+        dialog: OverlayAnalysisDialog = OverlayAnalysisDialog(
+            snapshot.layers,
+            display_crs=snapshot.display_crs,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            result = self._application.overlay_analysis(dialog.request())
+        except (ApplicationError, ValueError) as error:
+            self._refresh_analysis_history()
+            QMessageBox.warning(self, "叠加分析失败", str(error))
+            return
+        self._refresh_workspace()
+        self._ready_label.setText(f"已生成叠加结果  {result.output_layer_name}")
+        QMessageBox.information(
+            self,
+            "叠加分析完成",
             f"结果图层：{result.output_layer_name}\n"
             f"要素数量：{result.feature_count}\n"
             f"输出位置：\n{result.output_path}",

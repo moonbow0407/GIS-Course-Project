@@ -1016,9 +1016,10 @@ class MapCanvas(QGraphicsView):
         target_h: float = visible.height() / zoom_factor
         center_x: float = (min_x + max_x) / 2.0 if feature_w > 0.0 else min_x
         center_y: float = (min_y + max_y) / 2.0 if feature_h > 0.0 else min_y
+        # Qt 场景 Y 轴向下，需将地图 Y（向上）取反后才能传入 fitInView。
         feature_rect: QRectF = QRectF(
             center_x - target_w / 2.0,
-            center_y - target_h / 2.0,
+            -center_y - target_h / 2.0,
             target_w,
             target_h,
         )

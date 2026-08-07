@@ -72,14 +72,31 @@ class VectorLayer:
     # 图层范围：根据全部有效几何计算得到的最小包围矩形。
     bounds: Bounds = field(init=False)
 
-    # 几何类别：表示点、线、面或混合几何图层。
-    geometry_family: GeometryFamily = field(init=False)
+    # 几何类别：表示点、线、面或混合几何图层，显式传入时允许空要素。
+    geometry_family: GeometryFamily | None = field(default=None)
 
     # 图层样式：根据几何类别生成的界面无关默认样式。
     style: LayerStyle = field(init=False)
 
     def __post_init__(self) -> None:
-        """校验图层要素，并派生图层范围、几何类别和默认样式。"""
+        """校验图层要素，并派生图层范围、几何类别和默认样式。
+
+        当显式传入 geometry_family 时允许空要素，用于新建空白图层；
+        否则通过自动检测派生几何类别，空要素时抛出 ValueError。
+        """
+        # 显式指定几何类型时允许空图层（新建空白图层场景）。
+        if self.geometry_family is not None and not self.features:
+            bounds: Bounds = (0.0, 0.0, 0.0, 0.0)
+            object.__setattr__(self, "bounds", bounds)
+            default_style: LayerStyle = LayerStyle.for_geometry_family(self.geometry_family)
+            resolved_symbology: VectorSymbology = self.symbology or VectorSymbology(
+                renderer_type=VectorRendererType.SIMPLE,
+                base_symbol=default_style,
+            )
+            object.__setattr__(self, "symbology", resolved_symbology)
+            object.__setattr__(self, "style", resolved_symbology.base_symbol)
+            return
+
         if not self.features:
             raise ValueError("矢量图层必须至少包含一个要素。")
 
@@ -109,6 +126,7 @@ class VectorLayer:
         if not families:
             raise ValueError("矢量图层不包含受支持的可用几何。")
 
+        # auto-detect 优先于显式传入的值（兼容性）
         geometry_family: GeometryFamily = (
             next(iter(families)) if len(families) == 1 else GeometryFamily.MIXED
         )
@@ -140,8 +158,13 @@ class VectorLayer:
         database_layer_id: int | None = None,
         layer_id: str | None = None,
         symbology: VectorSymbology | None = None,
+        geometry_family: GeometryFamily | None = None,
     ) -> "VectorLayer":
-        """创建矢量图层，并在未提供编号时生成稳定的随机编号。"""
+        """创建矢量图层，并在未提供编号时生成稳定的随机编号。
+
+        参数:
+            geometry_family: 显式指定几何类别，允许传入空要素以创建空白图层。
+        """
         resolved_layer_id: str = layer_id or uuid4().hex
         return cls(
             layer_id=resolved_layer_id,
@@ -152,4 +175,5 @@ class VectorLayer:
             source_layer_name=source_layer_name,
             database_layer_id=database_layer_id,
             symbology=symbology,
+            geometry_family=geometry_family,
         )

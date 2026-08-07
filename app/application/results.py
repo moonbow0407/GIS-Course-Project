@@ -166,6 +166,32 @@ class BufferAnalysisResult:
 
 
 @dataclass(frozen=True, slots=True)
+class OverlayAnalysisResult:
+    """表示叠加分析写出并加入工作区后的结构化结果。"""
+
+    # 输入图层编号：主输入图层，用于追踪本次分析所使用的工作区图层。
+    input_layer_id: str
+
+    # 叠加图层编号：用于叠加或空间连接的第二个图层。
+    overlay_layer_id: str
+
+    # 输出图层编号：用于界面定位并激活新生成的结果图层。
+    output_layer_id: str
+
+    # 输出图层名称：用于状态反馈和结果管理。
+    output_layer_name: str
+
+    # 实际写出路径：统一为绝对路径。
+    output_path: Path
+
+    # 结果要素数量。
+    feature_count: int
+
+    # 加入结果图层后的完整工作区快照。
+    snapshot: WorkspaceSnapshot
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectOpenResult:
     """表示工程打开并恢复完成后的工作区结果。"""
 

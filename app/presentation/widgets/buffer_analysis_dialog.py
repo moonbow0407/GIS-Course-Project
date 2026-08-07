@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import cast
 
 from pyproj import CRS
-from pyproj.exceptions import CRSError
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -34,6 +33,7 @@ from app.application.errors import ApplicationError
 from app.application.results import LayerSnapshot
 from app.domain.layer_style import GeometryFamily
 from app.domain.vector_layer import VectorLayer
+from app.presentation.widgets.crs_select_widget import CrsSelectWidget
 
 
 class BufferAnalysisDialog(QDialog):
@@ -127,9 +127,9 @@ class BufferAnalysisDialog(QDialog):
         self._mitre_limit_spin.setValue(5.0)
 
         self._dissolve_check: QCheckBox = QCheckBox("融合相互重叠的缓冲结果")
-        self._analysis_crs_edit: QLineEdit = QLineEdit()
+        self._analysis_crs_widget: CrsSelectWidget = CrsSelectWidget()
         current_crs_hint: str = display_crs.to_string() if display_crs is not None else "未设置"
-        self._analysis_crs_edit.setPlaceholderText(
+        self._analysis_crs_widget.set_placeholder(
             f"留空自动选择米制计算 CRS（当前地图：{current_crs_hint}）"
         )
         self._geometry_type_label: QLabel = QLabel()
@@ -146,7 +146,7 @@ class BufferAnalysisDialog(QDialog):
         form_layout.addRow(self._cap_style_label, self._cap_style_combo)
         form_layout.addRow(self._join_style_label, self._join_style_combo)
         form_layout.addRow(self._mitre_limit_label, self._mitre_limit_spin)
-        form_layout.addRow("计算 CRS（可选）", self._analysis_crs_edit)
+        form_layout.addRow("计算 CRS（可选）", self._analysis_crs_widget)
         form_layout.addRow(QLabel(""), self._dissolve_check)
 
         self._hint_label: QLabel = QLabel()
@@ -176,13 +176,10 @@ class BufferAnalysisDialog(QDialog):
             raise ApplicationError("请选择缓冲区分析输出位置。")
         output_path: Path = self._with_output_suffix(Path(output_path_text))
 
-        analysis_crs: CRS | None = None
-        analysis_crs_text: str = self._analysis_crs_edit.text().strip()
-        if analysis_crs_text:
-            try:
-                analysis_crs = CRS.from_user_input(analysis_crs_text)
-            except CRSError as error:
-                raise ApplicationError(f"无法识别分析坐标系：{analysis_crs_text}") from error
+        analysis_crs: CRS | None = self._analysis_crs_widget.crs()
+        analysis_crs_text: str = self._analysis_crs_widget.crs_text()
+        if analysis_crs_text and analysis_crs is None:
+            raise ApplicationError(f"无法识别分析坐标系：{analysis_crs_text}")
 
         return BufferRequest(
             input_layer_id=input_layer_id,

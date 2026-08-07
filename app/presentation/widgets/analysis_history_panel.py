@@ -24,6 +24,7 @@ class AnalysisHistoryPanel(QWidget):
 
     _OPERATION_NAMES: dict[str, str] = {
         "buffer": "缓冲区分析",
+        "overlay": "叠加分析",
     }
     _PARAMETER_NAMES: dict[str, str] = {
         "geometry_family": "几何类型",
@@ -40,6 +41,14 @@ class AnalysisHistoryPanel(QWidget):
         "calculation_crs": "计算 CRS",
         "output_path": "输出位置",
         "output_layer_name": "输出图层名",
+        "operation": "叠加类型",
+        "operation_label": "叠加类型",
+        "input_geometry_family": "输入几何类型",
+        "overlay_geometry_family": "叠加几何类型",
+        "keep_geom_type": "保持几何类型",
+        "make_valid": "自动修复几何",
+        "sjoin_predicate": "空间连接谓词",
+        "sjoin_how": "连接方式",
     }
 
     def __init__(self, parent: QWidget | None = None) -> None:
