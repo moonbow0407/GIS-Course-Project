@@ -66,6 +66,7 @@ from app.presentation.widgets.buffer_analysis_dialog import BufferAnalysisDialog
 from app.presentation.widgets.crs_select_widget import CrsSelectWidget
 from app.presentation.widgets.new_layer_dialog import NewLayerDialog
 from app.presentation.widgets.overlay_analysis_dialog import OverlayAnalysisDialog
+from app.presentation.widgets.raster_calculator_dialog import RasterCalculatorDialog
 from app.presentation.widgets.database_dialogs import (
     DatabaseConnectionDialog,
     DatabaseLayerDialog,
@@ -412,6 +413,7 @@ class MainWindow(QMainWindow):
             "clear_selection": self._clear_selection,
             "buffer_analysis": self._buffer_analysis,
             "overlay_analysis": self._overlay_analysis,
+            "raster_calculator": self._raster_calculator,
             "analysis_history": self._toggle_analysis_history,
             "toggle_layers": self._toggle_layer_panel,
             "add_feature": self._add_point_feature,
@@ -2507,6 +2509,58 @@ class MainWindow(QMainWindow):
             "叠加分析完成",
             f"结果图层：{result.output_layer_name}\n"
             f"要素数量：{result.feature_count}\n"
+            f"输出位置：\n{result.output_path}",
+        )
+
+    def _raster_calculator(self) -> None:
+        """打开栅格计算器对话框并执行逐像素表达式求值。
+
+        计算失败时对话框保留所有已填内容，用户可直接修改后重试，
+        无需重新打开对话框和重新设置变量映射。
+        """
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        raster_layers: tuple[LayerSnapshot, ...] = tuple(
+            layer for layer in snapshot.layers if layer.is_raster
+        )
+        if not raster_layers:
+            self.statusBar().showMessage(
+                "当前工作区没有可用于栅格计算的栅格图层。", 4000
+            )
+            return
+        try:
+            dialog: RasterCalculatorDialog = RasterCalculatorDialog(
+                snapshot.layers, parent=self
+            )
+        except ValueError:
+            self.statusBar().showMessage(
+                "当前工作区没有可用于栅格计算的栅格图层。", 4000
+            )
+            return
+        # 计算失败时循环回到对话框，保留已填内容供用户修改。
+        while True:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            try:
+                result = self._application.raster_calculation(dialog.request())
+            except (ApplicationError, ValueError) as error:
+                self._refresh_analysis_history()
+                QMessageBox.warning(
+                    self,
+                    "栅格计算失败",
+                    f"{error}\n\n请修改参数后重试。",
+                )
+                # 对话框保留打开状态，进入下一次循环让用户修改。
+                continue
+            break
+        self._refresh_workspace()
+        self._ready_label.setText(
+            f"栅格计算完成  {result.output_layer_name}"
+        )
+        QMessageBox.information(
+            self,
+            "栅格计算完成",
+            f"结果图层：{result.output_layer_name}\n"
+            f"表达式：{result.expression}\n"
             f"输出位置：\n{result.output_path}",
         )
 

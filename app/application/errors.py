@@ -143,3 +143,15 @@ class DatabaseListFailed(ApplicationError):
 
 class DatabaseLoadFailed(ApplicationError):
     """表示数据库图层加载或空间数据转换失败。"""
+
+
+class InvalidRasterCalculatorParameters(ApplicationError):
+    """表示栅格计算器参数不满足业务约束。"""
+
+
+class RasterCalculatorFailed(ApplicationError):
+    """表示栅格像素表达式求值失败。"""
+
+
+class RasterBandAlignmentError(ApplicationError):
+    """表示输入栅格波段空间对齐不一致（CRS/分辨率/范围）。"""

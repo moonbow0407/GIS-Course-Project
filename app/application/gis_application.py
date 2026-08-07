@@ -6,6 +6,7 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
+import numpy as np
 from pyproj import CRS
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
@@ -40,14 +41,24 @@ from app.application.errors import (
     EmptyOverlayResult,
     InvalidBufferParameters,
     InvalidOverlayParameters,
+    InvalidRasterCalculatorParameters,
     LayerNotFound,
     LayerReprojectionFailed,
     NoActiveLayer,
     OverlayAnalysisFailed,
     ProjectNotSaved,
     ProjectStoreNotConfigured,
+    RasterBandAlignmentError,
+    RasterCalculatorFailed,
     UnsupportedBufferInput,
     UnsupportedOverlayInput,
+)
+from app.application.raster_calculator import (
+    BandMapping,
+    RasterCalculatorRequest,
+    compute_raster_expression,
+    generate_display_image,
+    validate_band_alignment,
 )
 from app.application.ports import DataReader, DataWriter, ProjectStore
 from app.application.project_models import (
@@ -67,6 +78,7 @@ from app.application.results import (
     OverlayAnalysisResult,
     ProjectOpenResult,
     ProjectSaveResult,
+    RasterCalculatorResult,
     SelectedFeature,
     SelectionResult,
     WorkspaceSnapshot,
@@ -1808,6 +1820,201 @@ class GisApplication:
             algorithm_id="overlay",
             input_layer_ids=(request.input_layer_id, request.overlay_layer_id),
             parameters=parameters,
+            status="failed",
+            message=str(error),
+            started_at=started_at,
+            completed_at=self._now(),
+            duration_seconds=perf_counter() - started_monotonic,
+        )
+        self._analysis_runs = self._analysis_runs + (run,)
+        self._modified = True
+
+    # ── 栅格计算器 ─────────────────────────────────────────
+
+    def raster_calculation(
+        self, request: RasterCalculatorRequest
+    ) -> RasterCalculatorResult:
+        """执行栅格逐像素表达式计算，并为结果追加历史记录。
+
+        参数:
+            request: 波段映射、表达式、输出位置和图层名等参数。
+
+        返回:
+            包含输出图层编号、写出路径和最新工作区快照的结果。
+
+        异常:
+            ApplicationError: 输入数据无效、计算失败或结果写出失败时抛出。
+        """
+        started_at: str = self._now()
+        started_monotonic: float = perf_counter()
+        try:
+            return self._execute_raster_calculation(
+                request, started_at, started_monotonic
+            )
+        except Exception as error:
+            self._append_failed_raster_calculation(
+                request, started_at, started_monotonic, error
+            )
+            raise
+
+    def _execute_raster_calculation(
+        self,
+        request: RasterCalculatorRequest,
+        started_at: str,
+        started_monotonic: float,
+    ) -> RasterCalculatorResult:
+        """执行栅格表达式求值、生成显示图、写出 GeoTIFF 并加入工作区。"""
+        if self.data_writer is None:
+            raise DataWriteFailed("空间数据写出服务尚未配置。")
+
+        # 1. 查找所有引用的栅格图层并提取数据。
+        band_arrays: dict[str, np.ndarray] = {}
+        transforms: list[object] = []
+        crss: list[object | None] = []
+        shapes: list[tuple[int, int]] = []
+        layer_names: list[str] = []
+        input_layer_ids: list[str] = []
+        reference_transform = None
+        reference_crs = None
+
+        for mapping in request.band_mappings:
+            layer: SpatialLayer = self._find_layer(mapping.layer_id)
+            if not isinstance(layer, RasterLayer):
+                raise InvalidRasterCalculatorParameters(
+                    f"图层「{layer.name}」不是栅格图层。"
+                )
+            band_idx: int = mapping.band_index - 1  # 1-based → 0-based
+            if band_idx < 0 or band_idx >= layer.band_count:
+                raise InvalidRasterCalculatorParameters(
+                    f"图层「{layer.name}」没有波段 {mapping.band_index}"
+                    f"（共 {layer.band_count} 个波段）。"
+                )
+            # 提取单波段 2D 数据
+            band_2d: np.ndarray = layer.raster_data[band_idx]
+            band_arrays[mapping.alias] = band_2d
+            transforms.append(layer.transform)
+            crss.append(layer.crs)
+            shapes.append(band_2d.shape)
+            layer_names.append(layer.name)
+            if mapping.layer_id not in input_layer_ids:
+                input_layer_ids.append(mapping.layer_id)
+            if reference_transform is None:
+                reference_transform = layer.transform
+                reference_crs = layer.crs
+
+        # 2. 校验对齐。
+        warnings_list: list[str] = validate_band_alignment(
+            tuple(transforms), tuple(crss), tuple(shapes), tuple(layer_names)
+        )
+        if warnings_list:
+            # 检查是否有 CRS 不一致（硬错误）
+            if crss and len(set(crss)) > 1:
+                raise RasterBandAlignmentError(
+                    "输入栅格波段坐标系不一致，无法执行逐像素计算。\n"
+                    + "\n".join(warnings_list)
+                )
+            # 其他不一致仅记录（尺寸/分辨率），由 np 广播处理
+
+        # 3. 执行表达式求值。
+        try:
+            result_data: np.ndarray = compute_raster_expression(
+                band_arrays, request.expression
+            )
+        except ValueError as exc:
+            raise RasterCalculatorFailed(str(exc)) from exc
+
+        # 4. 构建有效掩码（所有输入波段掩码 AND 结果有限性）。
+        combined_mask: np.ndarray = np.ones(shapes[0], dtype=bool)
+        for mapping in request.band_mappings:
+            layer_ref: SpatialLayer = self._find_layer(mapping.layer_id)
+            if isinstance(layer_ref, RasterLayer):
+                combined_mask &= layer_ref.valid_mask
+        combined_mask &= np.isfinite(result_data)
+        if request.nodata is not None:
+            combined_mask &= ~np.isclose(result_data, request.nodata)
+
+        # 5. 生成 RGBA 显示图。
+        image_data: np.ndarray = generate_display_image(result_data, combined_mask)
+
+        # 6. 构建输出 RasterLayer。
+        output_path: Path = request.output_path.expanduser().resolve()
+        output_name: str = request.output_layer_name.strip()
+        import rasterio.transform
+
+        height, width = result_data.shape
+        output_bounds: tuple[float, float, float, float] = rasterio.transform.array_bounds(
+            height, width, reference_transform
+        )
+        output_raster: np.ndarray = result_data[np.newaxis, ...]  # (1, H, W)
+
+        output_layer = RasterLayer.create(
+            name=output_name,
+            raster_data=output_raster,
+            image_data=image_data,
+            valid_mask=combined_mask,
+            transform=reference_transform,
+            crs=reference_crs,
+            bounds=output_bounds,
+            nodata=request.nodata,
+            source_path=output_path,
+        )
+
+        # 7. 写出 GeoTIFF。
+        self.data_writer.write(output_layer, output_path)
+
+        # 8. 加入工作区。
+        self._document.add_layer(output_layer)
+        self._document.set_active_layer(output_layer.layer_id)
+
+        # 9. 创建分析历史记录。
+        run: AnalysisRun = self._create_analysis_run(
+            algorithm_id="raster_calculator",
+            input_layer_ids=tuple(input_layer_ids),
+            parameters={
+                "expression": request.expression,
+                "variable_count": len(request.band_mappings),
+                "aliases": {m.alias: m.band_index for m in request.band_mappings},
+                "output_path": str(output_path),
+                "nodata": request.nodata,
+            },
+            output_layer_id=output_layer.layer_id,
+            output_path=output_path,
+            output_layer_name=output_name,
+            started_at=started_at,
+            completed_at=self._now(),
+            duration_seconds=perf_counter() - started_monotonic,
+        )
+        self._analysis_runs = self._analysis_runs + (run,)
+        self._modified = True
+
+        return RasterCalculatorResult(
+            output_layer_id=output_layer.layer_id,
+            output_layer_name=output_name,
+            output_path=output_path,
+            expression=request.expression,
+            variable_count=len(request.band_mappings),
+            snapshot=self.snapshot(),
+        )
+
+    def _append_failed_raster_calculation(
+        self,
+        request: RasterCalculatorRequest,
+        started_at: str,
+        started_monotonic: float,
+        error: Exception,
+    ) -> None:
+        """将失败的栅格计算写入历史，便于用户回溯。"""
+        input_ids: tuple[str, ...] = tuple(
+            {m.layer_id for m in request.band_mappings}
+        )
+        run: AnalysisRun = self._create_analysis_run(
+            algorithm_id="raster_calculator",
+            input_layer_ids=input_ids,
+            parameters={
+                "expression": request.expression,
+                "variable_count": len(request.band_mappings),
+                "output_path": str(request.output_path.expanduser().resolve()),
+            },
             status="failed",
             message=str(error),
             started_at=started_at,

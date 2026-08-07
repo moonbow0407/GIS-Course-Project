@@ -219,5 +219,17 @@ class AnalysisResultPersisted:
     snapshot: WorkspaceSnapshot
 
 
+@dataclass(frozen=True, slots=True)
+class RasterCalculatorResult:
+    """表示栅格计算器写出并加入工作区后的结构化结果。"""
+
+    output_layer_id: str
+    output_layer_name: str
+    output_path: Path
+    expression: str
+    variable_count: int
+    snapshot: WorkspaceSnapshot
+
+
 # 旧矢量结果名称：仅供既有调用代码兼容，新代码应使用 OpenDataResult。
 OpenVectorResult: TypeAlias = OpenDataResult
