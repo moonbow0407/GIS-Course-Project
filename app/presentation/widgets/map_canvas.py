@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
 from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
+from app.presentation.global_display_settings import sketch_color
+
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.raster_layer import RasterLayer
@@ -387,7 +389,7 @@ class MapCanvas(QGraphicsView):
         # 原地更新或创建顶点标记。选中顶点用金色(#FFD700)，未选中用品红。
         selected_set: set[int] = self._selected_vertex_indices
         for i, (mx, my) in enumerate(coords):
-            color: str = "#FFD700" if i in selected_set else "#FF1493"
+            color: str = "#FFD700" if i in selected_set else sketch_color().name()
             if i < len(items_to_keep):
                 item = items_to_keep[i]
                 if isinstance(item, QGraphicsEllipseItem):
@@ -445,7 +447,7 @@ class MapCanvas(QGraphicsView):
             if not preview_path.isEmpty():
                 preview_item: QGraphicsPathItem = QGraphicsPathItem(preview_path)
                 preview_item.setData(0, "preview")
-                prev_pen2: QPen = QPen(QColor("#FF1493"), 1.5, Qt.PenStyle.DashLine)
+                prev_pen2: QPen = QPen(sketch_color(), 1.5, Qt.PenStyle.DashLine)
                 prev_pen2.setCosmetic(True)
                 preview_item.setPen(prev_pen2)
                 preview_item.setBrush(Qt.BrushStyle.NoBrush)
@@ -777,7 +779,7 @@ class MapCanvas(QGraphicsView):
         path.lineTo(px + s, -py + s)
         path.moveTo(px + s, -py - s)
         path.lineTo(px - s, -py + s)
-        pen: QPen = QPen(QColor("#FF1493"), 2)
+        pen: QPen = QPen(sketch_color(), 2)
         pen.setCosmetic(True)
         item.setPen(pen)
         item.setZValue(3000)
@@ -908,10 +910,10 @@ class MapCanvas(QGraphicsView):
                 dot_size,
             )
             dot_item.setPath(dpath)
-            dot_pen: QPen = QPen(QColor("#FF1493"), 1)
+            dot_pen: QPen = QPen(sketch_color(), 1)
             dot_pen.setCosmetic(True)
             dot_item.setPen(dot_pen)
-            dot_item.setBrush(QBrush(QColor("#FF1493")))
+            dot_item.setBrush(QBrush(sketch_color()))
             dot_item.setZValue(1000)
             self._scene.addItem(dot_item)
             self._sketch_items.append(dot_item)
@@ -940,11 +942,13 @@ class MapCanvas(QGraphicsView):
             preview_path.closeSubpath()
 
         preview_item: QGraphicsPathItem = QGraphicsPathItem(preview_path)
-        prev_pen: QPen = QPen(QColor("#FF1493"), 1.5, Qt.PenStyle.DashLine)
+        prev_pen: QPen = QPen(sketch_color(), 1.5, Qt.PenStyle.DashLine)
         prev_pen.setCosmetic(True)
         preview_item.setPen(prev_pen)
         if is_polygon:
-            preview_item.setBrush(QBrush(QColor(255, 20, 147, 40)))
+            preview_item.setBrush(
+                QBrush(QColor(sketch_color().red(), sketch_color().green(), sketch_color().blue(), 40))
+            )
         else:
             preview_item.setBrush(Qt.BrushStyle.NoBrush)
         preview_item.setZValue(1000)

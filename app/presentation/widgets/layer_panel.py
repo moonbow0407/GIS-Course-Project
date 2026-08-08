@@ -265,6 +265,9 @@ class LayerPanel(QWidget):
         item: QTreeWidgetItem | None = self._tree.itemAt(position)
         if item is None:
             return
+        # 子节点（如图例类别）不直接持有 layer_id，需向上查找父节点。
+        if item.parent() is not None:
+            item = item.parent()
         menu: QMenu = QMenu(self)
         zoom_action = menu.addAction("缩放至图层")
         symbology_action = menu.addAction("符号系统")

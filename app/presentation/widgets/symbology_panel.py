@@ -1,5 +1,6 @@
 """跟随活动图层的符号系统侧边面板。"""
 
+from collections.abc import Callable
 from dataclasses import replace
 
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer, Signal
@@ -17,15 +18,14 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
     QCheckBox,
-    QColorDialog,
     QComboBox,
-    QDialog,
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QPushButton,
     QScrollArea,
     QSpinBox,
     QTableWidget,
@@ -33,6 +33,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from app.presentation.widgets.color_wheel_picker import ColorWheelPicker
 
 from app.application.results import LayerSnapshot
 from app.domain.layer_style import GeometryFamily, LayerStyle
@@ -49,16 +51,6 @@ from app.domain.symbology import (
     VectorSymbology,
 )
 from app.domain.vector_layer import VectorLayer
-
-_SIMPLE_COLORS: tuple[tuple[str, str], ...] = (
-    ("蓝色", "#2F7DE1"),
-    ("橙色", "#F28C28"),
-    ("绿色", "#39A96B"),
-    ("红色", "#D9534F"),
-    ("紫色", "#8B5CF6"),
-    ("中性灰", "#6B7280"),
-)
-
 
 class SymbologyPanel(QWidget):
     """编辑活动图层符号并通过信号请求自动应用。"""
@@ -81,7 +73,9 @@ class SymbologyPanel(QWidget):
         self._metadata: QLabel = QLabel("打开图层后可配置显示方式")
         self._preview: QLabel = QLabel()
         self._class_count_label: QLabel = QLabel("0 类")
-        self._auto_apply_status: QLabel = QLabel("●  自动应用已开启")
+        self._auto_apply_checkbox: QCheckBox = QCheckBox("自动应用")
+        self._apply_button: QPushButton = QPushButton("应用")
+        self._pending_action: Callable[[], None] | None = None
         self._settings_card: QFrame = QFrame()
         self._classes_card: QFrame = QFrame()
         self._renderer: QComboBox = QComboBox()
@@ -89,7 +83,8 @@ class SymbologyPanel(QWidget):
         self._scheme: QComboBox = QComboBox()
         self._method: QComboBox = QComboBox()
         self._class_count: QSpinBox = QSpinBox()
-        self._simple_color: QComboBox = QComboBox()
+        self._simple_color_button: QPushButton = QPushButton("选择颜色…")
+        self._current_simple_color: str = "#2F7DE1"
         self._red_band: QSpinBox = QSpinBox()
         self._green_band: QSpinBox = QSpinBox()
         self._blue_band: QSpinBox = QSpinBox()
@@ -117,7 +112,6 @@ class SymbologyPanel(QWidget):
                     self._renderer,
                     self._field,
                     self._scheme,
-                    self._simple_color,
                 ):
                     with QSignalBlocker(combo):
                         combo.clear()
@@ -144,12 +138,16 @@ class SymbologyPanel(QWidget):
         self._preview.setObjectName("symbologyPreview")
         self._preview.setMinimumHeight(64)
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._auto_apply_status.setObjectName("symbologyAutoApplyStatus")
+        self._auto_apply_checkbox.setObjectName("symbologyAutoApplyCheck")
+        self._auto_apply_checkbox.setChecked(True)
+        self._apply_button.setObjectName("symbologyApplyButton")
+        self._apply_button.setVisible(False)
+        self._apply_button.setFixedWidth(72)
         self._class_count_label.setObjectName("symbologyClassCount")
         self._settings_card.setObjectName("symbologySettingsCard")
         self._classes_card.setObjectName("symbologyClassesCard")
         self._renderer.setObjectName("symbologyRenderer")
-        self._simple_color.setIconSize(QSize(44, 16))
+        self._simple_color_button.setObjectName("symbologySimpleColorButton")
         self._scheme.setIconSize(QSize(86, 16))
         self._field.setObjectName("symbologyField")
         self._scheme.setObjectName("symbologyScheme")
@@ -159,7 +157,7 @@ class SymbologyPanel(QWidget):
         self._class_count.setValue(5)
         self._method.addItem("等间隔", "equal_interval")
         self._method.addItem("分位数", "quantile")
-        self._load_simple_colors("#2F7DE1")
+        self._set_simple_color_button(QColor("#2F7DE1"))
         for spin in (self._red_band, self._green_band, self._blue_band, self._stretch_band):
             spin.setMinimum(1)
             spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -201,7 +199,7 @@ class SymbologyPanel(QWidget):
         self._form.addRow("符号类型", self._renderer)
         self._form.addRow("字段", self._field)
         self._form.addRow("配色方案", self._scheme)
-        self._form.addRow("单一颜色", self._simple_color)
+        self._form.addRow("单一颜色", self._simple_color_button)
         self._form.addRow("分级方法", self._method)
         self._form.addRow("级数", self._class_count)
         self._form.addRow("红色波段", self._red_band)
@@ -264,7 +262,13 @@ class SymbologyPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(scroll, 1)
-        layout.addWidget(self._auto_apply_status)
+        # 底部：自动应用开关 + 手动应用按钮。
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(14, 6, 14, 6)
+        bottom_row.addWidget(self._auto_apply_checkbox)
+        bottom_row.addStretch()
+        bottom_row.addWidget(self._apply_button)
+        layout.addLayout(bottom_row)
         self.setMinimumWidth(350)
 
     def _connect_signals(self) -> None:
@@ -274,7 +278,7 @@ class SymbologyPanel(QWidget):
         self._scheme.currentIndexChanged.connect(self._on_vector_or_raster_change)
         self._method.currentIndexChanged.connect(self._on_vector_or_raster_change)
         self._class_count.valueChanged.connect(self._on_vector_or_raster_change)
-        self._simple_color.currentIndexChanged.connect(self._emit_simple)
+        self._simple_color_button.clicked.connect(self._on_simple_color_clicked)
         for spin in (self._red_band, self._green_band, self._blue_band, self._stretch_band):
             spin.valueChanged.connect(self._emit_raster)
         self._stretch_type.currentIndexChanged.connect(self._emit_raster)
@@ -283,6 +287,30 @@ class SymbologyPanel(QWidget):
         self._upper_percent.valueChanged.connect(self._schedule_raster)
         self._classes.itemChanged.connect(self._on_class_item_changed)
         self._classes.cellDoubleClicked.connect(self._edit_class_color)
+        self._auto_apply_checkbox.toggled.connect(self._on_auto_apply_toggled)
+        self._apply_button.clicked.connect(self._on_apply_clicked)
+
+    def _on_auto_apply_toggled(self, checked: bool) -> None:
+        """自动应用关闭时显示手动应用按钮并隐藏待定操作。"""
+        self._apply_button.setVisible(not checked)
+        if checked and self._pending_action is not None:
+            self._pending_action()
+            self._pending_action = None
+
+    def _on_apply_clicked(self) -> None:
+        """手动应用当前待定的符号变更。"""
+        if self._pending_action is not None:
+            self._pending_action()
+            self._pending_action = None
+        self._apply_button.setVisible(False)
+
+    def _emit_or_defer(self, action: Callable[[], None]) -> None:
+        """自动应用开启时直接执行，否则暂存待手动应用。"""
+        if self._auto_apply_checkbox.isChecked():
+            action()
+        else:
+            self._pending_action = action
+            self._apply_button.setVisible(True)
 
     def _load_vector(self, layer: VectorLayer) -> None:
         """加载矢量字段、类型、方案和类别表。"""
@@ -308,7 +336,7 @@ class SymbologyPanel(QWidget):
                 for name in COLOR_RAMPS:
                     self._add_scheme_item(name)
             self._set_combo_data(self._scheme, symbology.color_scheme)
-        self._load_simple_colors(self._symbol_color(symbology.base_symbol))
+        self._set_simple_color_button(QColor(self._symbol_color(symbology.base_symbol)))
         self._set_combo_data(self._method, symbology.classification_method)
         stored_class_count: int = (
             len(symbology.graduated_classes)
@@ -404,15 +432,67 @@ class SymbologyPanel(QWidget):
             return
         scheme: str = str(self._scheme.currentData())
         if renderer is VectorRendererType.UNIQUE:
-            self.unique_requested.emit(self._snapshot.layer_id, field_name, scheme)
-        else:
-            self.graduated_requested.emit(
-                self._snapshot.layer_id,
-                field_name,
-                scheme,
-                str(self._method.currentData()),
-                self._class_count.value(),
+            self._emit_or_defer(
+                lambda: self.unique_requested.emit(
+                    self._snapshot.layer_id, field_name, scheme
+                )
             )
+        else:
+            self._emit_or_defer(
+                lambda: self.graduated_requested.emit(
+                    self._snapshot.layer_id,
+                    field_name,
+                    scheme,
+                    str(self._method.currentData()),
+                    self._class_count.value(),
+                )
+            )
+
+    def _set_simple_color_button(self, color: QColor) -> None:
+        """更新单一颜色按钮的图标和文字。
+
+        参数:
+            color: 要显示在按钮上的当前颜色。
+        """
+        self._current_simple_color = color.name()
+        self._setup_color_button(self._simple_color_button, color)
+
+    def _setup_color_button(self, button: QPushButton, color: QColor) -> None:
+        """统一设置颜色按钮的外观：色块图标 + 边框 + hover 高亮。
+
+        参数:
+            button: 目标按钮。
+            color: 要显示的色块颜色。
+        """
+        pixmap = QPixmap(60, 24)
+        pixmap.fill(color)
+        button.setIcon(QIcon(pixmap))
+        button.setIconSize(QSize(60, 24))
+        button.setText("颜色 ▾")
+        button.setStyleSheet(
+            "QPushButton {"
+            "  border: 1px solid #CBD5E1;"
+            "  border-radius: 4px;"
+            "  padding: 4px 10px;"
+            "  text-align: left;"
+            "  font-size: 12px;"
+            "  color: #475569;"
+            "}"
+            "QPushButton:hover {"
+            "  border-color: #3B82F6;"
+            "  background-color: #F8FAFC;"
+            "}"
+        )
+
+    def _on_simple_color_clicked(self) -> None:
+        """弹出 HSB 色轮选择单一符号颜色。"""
+        color: QColor | None = ColorWheelPicker.get_color(
+            QColor(self._current_simple_color), self
+        )
+        if color is None:
+            return
+        self._set_simple_color_button(color)
+        self._emit_simple()
 
     def _emit_simple(self) -> None:
         """应用当前单一颜色并保留符号尺寸。"""
@@ -421,16 +501,18 @@ class SymbologyPanel(QWidget):
         layer = self._snapshot.layer
         if not isinstance(layer, VectorLayer):
             return
-        color: str = str(self._simple_color.currentData())
+        color: str = self._current_simple_color
         base: LayerStyle = layer.style
         symbol = (
             replace(base, stroke_color=color)
             if base.fill_color == "transparent"
             else replace(base, fill_color=color)
         )
-        self.symbology_changed.emit(
-            layer.layer_id,
-            VectorSymbology(VectorRendererType.SIMPLE, symbol),
+        self._emit_or_defer(
+            lambda: self.symbology_changed.emit(
+                layer.layer_id,
+                VectorSymbology(VectorRendererType.SIMPLE, symbol),
+            )
         )
 
     def _emit_raster(self) -> None:
@@ -458,7 +540,9 @@ class SymbologyPanel(QWidget):
             color_scheme=str(self._scheme.currentData()),
             inverted=self._invert.isChecked(),
         )
-        self.symbology_changed.emit(layer.layer_id, config)
+        self._emit_or_defer(
+            lambda: self.symbology_changed.emit(layer.layer_id, config)
+        )
 
     def _schedule_raster(self) -> None:
         """在连续数值输入停止三百毫秒后重算栅格。"""
@@ -535,9 +619,11 @@ class SymbologyPanel(QWidget):
         if symbology.renderer_type is VectorRendererType.UNIQUE:
             classes = list(symbology.unique_classes)
             if row == len(classes):
-                self.symbology_changed.emit(
-                    layer.layer_id,
-                    replace(symbology, other_visible=visible),
+                self._emit_or_defer(
+                    lambda: self.symbology_changed.emit(
+                        layer.layer_id,
+                        replace(symbology, other_visible=visible),
+                    )
                 )
                 return
             classes[row] = replace(classes[row], visible=visible, label=label)
@@ -546,7 +632,9 @@ class SymbologyPanel(QWidget):
             classes2 = list(symbology.graduated_classes)
             classes2[row] = replace(classes2[row], visible=visible, label=label)
             updated = replace(symbology, graduated_classes=tuple(classes2))
-        self.symbology_changed.emit(layer.layer_id, updated)
+        self._emit_or_defer(
+            lambda: self.symbology_changed.emit(layer.layer_id, updated)
+        )
 
     def _edit_class_color(self, row: int, column: int) -> None:
         """双击颜色列后修改单个类别颜色。"""
@@ -572,13 +660,9 @@ class SymbologyPanel(QWidget):
         current_color = (
             current.stroke_color if current.fill_color == "transparent" else current.fill_color
         )
-        color_dialog = QColorDialog(QColor(current_color), self)
-        color_dialog.setWindowTitle("选择类别颜色")
-        color_dialog.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
-        self._set_light_palette(color_dialog)
-        if color_dialog.exec() != QDialog.DialogCode.Accepted:
+        color: QColor | None = ColorWheelPicker.get_color(QColor(current_color), self)
+        if color is None:
             return
-        color: QColor = color_dialog.currentColor()
         updated_symbol = (
             replace(current, stroke_color=color.name())
             if current.fill_color == "transparent"
@@ -596,7 +680,9 @@ class SymbologyPanel(QWidget):
                 symbol=updated_symbol,
             )
             updated = replace(symbology, graduated_classes=tuple(graduated_classes))
-        self.symbology_changed.emit(layer.layer_id, updated)
+        self._emit_or_defer(
+            lambda: self.symbology_changed.emit(layer.layer_id, updated)
+        )
 
     def _update_control_visibility(self) -> None:
         """根据当前图层和主符号类型显示相关控件。"""
@@ -612,7 +698,7 @@ class SymbologyPanel(QWidget):
         self._form.setRowVisible(self._field, is_unique or is_graduated)
         self._form.setRowVisible(self._scheme, is_unique or is_graduated or is_stretch)
         self._form.setRowVisible(
-            self._simple_color,
+            self._simple_color_button,
             is_vector and not is_unique and not is_graduated,
         )
         self._form.setRowVisible(self._method, is_graduated)
@@ -635,37 +721,6 @@ class SymbologyPanel(QWidget):
         index: int = combo.findData(value)
         if index >= 0:
             combo.setCurrentIndex(index)
-
-    def _load_simple_colors(self, active_color: str) -> None:
-        """重建单色选项并选中图层真实颜色，避免跨图层残留旧状态。"""
-        normalized_active: str = QColor(active_color).name()
-        with QSignalBlocker(self._simple_color):
-            self._simple_color.clear()
-            active_index: int = -1
-            for label, color in _SIMPLE_COLORS:
-                self._simple_color.addItem(self._solid_color_icon(color), label, color)
-                index: int = self._simple_color.count() - 1
-                self._simple_color.setItemData(
-                    index,
-                    color.upper(),
-                    Qt.ItemDataRole.ToolTipRole,
-                )
-                if QColor(color).name() == normalized_active:
-                    active_index = index
-            if active_index < 0:
-                label = f"{self._color_display_name(active_color)}（自定义）"
-                self._simple_color.addItem(
-                    self._solid_color_icon(active_color),
-                    label,
-                    active_color,
-                )
-                active_index = self._simple_color.count() - 1
-                self._simple_color.setItemData(
-                    active_index,
-                    active_color.upper(),
-                    Qt.ItemDataRole.ToolTipRole,
-                )
-            self._simple_color.setCurrentIndex(active_index)
 
     @staticmethod
     def _scheme_label(name: str) -> str:
@@ -700,7 +755,6 @@ class SymbologyPanel(QWidget):
             self._field,
             self._scheme,
             self._method,
-            self._simple_color,
             self._stretch_type,
         ):
             self._set_light_palette(combo)

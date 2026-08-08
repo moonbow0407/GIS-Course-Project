@@ -1,12 +1,14 @@
-"""显示设置对话框：图层透明度、显示比例尺范围和地图书签。"""
+"""显示设置对话框：图层属性、符号系统、显示比例、全局显示和地图书签。"""
 
-from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -15,19 +17,22 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QSlider,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from app.application.project_models import MapBookmark
 from app.application.results import LayerSnapshot
+import app.presentation.global_display_settings as global_display_settings
+from app.presentation.widgets.color_wheel_picker import ColorWheelPicker
+from app.presentation.widgets.symbology_panel import SymbologyPanel
 
 
 class DisplaySettingsDialog(QDialog):
-    """编辑活动图层显示属性和当前会话的地图书签。
+    """编辑活动图层显示属性、符号系统和地图书签。
 
-    信号连接由主窗口完成：透明度、显示比例范围和应用层操作绑定，
-    书签添加依靠主窗口捕获当前视图后写入应用层会话。
+    信号连接由主窗口完成：图层属性、符号变更和书签操作。
     """
 
     # 请求调整图层透明度：(图层编号, 目标透明度 0 到 1)。
@@ -42,12 +47,17 @@ class DisplaySettingsDialog(QDialog):
     bookmark_jump_requested = Signal(str)
     # 请求删除指定名称的书签。
     bookmark_delete_requested = Signal(str)
+    # 转发自嵌入的 SymbologyPanel。
+    symbology_changed = Signal(str, object)
+    unique_requested = Signal(str, str, str)
+    graduated_requested = Signal(str, str, str, str, int)
+    global_display_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """创建绑定工作区图层的显示设置对话框。"""
         super().__init__(parent)
         self.setWindowTitle("显示设置")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(480)
         self._layers: tuple[LayerSnapshot, ...] = ()
         self._updating: bool = False
         self._opacity_timer: QTimer = QTimer(self)
@@ -80,6 +90,9 @@ class DisplaySettingsDialog(QDialog):
             spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
             spin.setSpecialValueText("不限")
             spin.setValue(0.0)
+        self._symbology_panel: SymbologyPanel = SymbologyPanel()
+        self._selection_color_button: QPushButton = QPushButton("颜色 ▾")
+        self._sketch_color_button: QPushButton = QPushButton("颜色 ▾")
         self._bookmark_name: QLineEdit = QLineEdit()
         self._bookmark_name.setPlaceholderText("请输入书签名称")
         self._bookmark_list: QListWidget = QListWidget()
@@ -88,25 +101,46 @@ class DisplaySettingsDialog(QDialog):
         self._update_controls()
 
     def _create_ui(self) -> None:
-        """组装图层属性、比例范围和书签三组控件。"""
-        opacity_group: QGroupBox = QGroupBox("活动图层")
-        opacity_layout: QVBoxLayout = QVBoxLayout(opacity_group)
-        opacity_layout.setSpacing(8)
+        """组装图层选择器、符号/显示双标签页和书签控件。"""
+        layout: QVBoxLayout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        # ── 顶部：图层选择器（两个标签页共用） ──
         layer_row: QHBoxLayout = QHBoxLayout()
         layer_row.addWidget(QLabel("图层"))
         layer_row.addWidget(self._layer_combo, 1)
+        layout.addLayout(layer_row)
+
+        # ── 双标签页：符号系统 / 显示设置 ──
+        self._tabs: QTabWidget = QTabWidget()
+        self._tabs.setDocumentMode(True)
+
+        # 标签页 1：符号系统。
+        self._tabs.addTab(self._symbology_panel, "符号系统")
+
+        # 标签页 2：显示设置（图层属性 + 比例 + 全局 + 书签）。
+        display_page: QWidget = QWidget()
+        display_layout: QVBoxLayout = QVBoxLayout(display_page)
+        display_layout.setContentsMargins(0, 8, 0, 0)
+        display_layout.setSpacing(12)
+
+        # 图层属性。
+        layer_group: QGroupBox = QGroupBox("图层属性")
+        layer_group_layout: QVBoxLayout = QVBoxLayout(layer_group)
+        layer_group_layout.setSpacing(8)
         opacity_row: QHBoxLayout = QHBoxLayout()
-        opacity_row.addWidget(QLabel("透明度"))
+        opacity_row.addWidget(QLabel("不透明度"))
         opacity_row.addWidget(self._opacity_slider, 1)
         opacity_row.addWidget(self._opacity_value)
-        opacity_layout.addLayout(layer_row)
-        opacity_layout.addLayout(opacity_row)
-
+        layer_group_layout.addLayout(opacity_row)
         blend_row: QHBoxLayout = QHBoxLayout()
         blend_row.addWidget(QLabel("混合模式"))
         blend_row.addWidget(self._blend_mode_combo, 1)
-        opacity_layout.addLayout(blend_row)
+        layer_group_layout.addLayout(blend_row)
+        display_layout.addWidget(layer_group)
 
+        # 显示比例范围。
         scale_group: QGroupBox = QGroupBox("显示比例范围")
         scale_layout: QVBoxLayout = QVBoxLayout(scale_group)
         scale_layout.setSpacing(8)
@@ -122,7 +156,25 @@ class DisplaySettingsDialog(QDialog):
         scale_row.addWidget(QLabel("最大比例"))
         scale_row.addWidget(self._max_scale, 1)
         scale_layout.addLayout(scale_row)
+        display_layout.addWidget(scale_group)
 
+        # 全局显示。
+        global_group: QGroupBox = QGroupBox("全局显示")
+        global_layout: QFormLayout = QFormLayout(global_group)
+        global_layout.setSpacing(8)
+        self._setup_color_button(
+            self._selection_color_button,
+            global_display_settings.selection_color(),
+        )
+        self._setup_color_button(
+            self._sketch_color_button,
+            global_display_settings.sketch_color(),
+        )
+        global_layout.addRow("选择高亮", self._selection_color_button)
+        global_layout.addRow("草图预览", self._sketch_color_button)
+        display_layout.addWidget(global_group)
+
+        # 地图书签。
         bookmark_group: QGroupBox = QGroupBox("地图书签")
         bookmark_layout: QVBoxLayout = QVBoxLayout(bookmark_group)
         bookmark_layout.setSpacing(8)
@@ -141,17 +193,14 @@ class DisplaySettingsDialog(QDialog):
         action_row.addWidget(jump_button)
         action_row.addWidget(delete_button)
         bookmark_layout.addLayout(action_row)
+        display_layout.addWidget(bookmark_group, 1)
 
-        layout: QVBoxLayout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-        layout.addWidget(opacity_group)
-        layout.addWidget(scale_group)
-        layout.addWidget(bookmark_group, 1)
+        self._tabs.addTab(display_page, "显示设置")
+        layout.addWidget(self._tabs, 1)
         self._apply_light_palette()
 
     def _connect_signals(self) -> None:
-        """绑定自动应用与书签管理信号。"""
+        """绑定自动应用、书签管理和符号系统转发信号。"""
         self._layer_combo.currentIndexChanged.connect(self._on_layer_changed)
         self._opacity_slider.valueChanged.connect(self._schedule_opacity)
         self._min_scale.valueChanged.connect(self._schedule_scale)
@@ -160,6 +209,16 @@ class DisplaySettingsDialog(QDialog):
         self._bookmark_list.itemDoubleClicked.connect(
             lambda _item: self._on_jump_bookmark()
         )
+        self._selection_color_button.clicked.connect(
+            lambda: self._on_global_color_clicked("selection")
+        )
+        self._sketch_color_button.clicked.connect(
+            lambda: self._on_global_color_clicked("sketch")
+        )
+        # 转发 SymbologyPanel 信号。
+        self._symbology_panel.symbology_changed.connect(self.symbology_changed.emit)
+        self._symbology_panel.unique_requested.connect(self.unique_requested.emit)
+        self._symbology_panel.graduated_requested.connect(self.graduated_requested.emit)
 
     def set_layers(
         self,
@@ -178,14 +237,18 @@ class DisplaySettingsDialog(QDialog):
                         self._layer_combo.setCurrentIndex(index)
         finally:
             self._updating = False
-        self._load_controls(self.selected_layer())
+        active = self.selected_layer()
+        self._load_controls(active)
+        self._symbology_panel.set_layer(active)
         self._update_controls()
 
     def _on_layer_changed(self, _index: int) -> None:
-        """切换图层后同步透明度和显示比例控件。"""
+        """切换图层后同步所有图层相关控件。"""
         if self._updating:
             return
-        self._load_controls(self.selected_layer())
+        layer = self.selected_layer()
+        self._load_controls(layer)
+        self._symbology_panel.set_layer(layer)
         self._update_controls()
 
     def set_bookmarks(self, bookmarks: tuple[MapBookmark, ...]) -> None:
@@ -234,13 +297,13 @@ class DisplaySettingsDialog(QDialog):
                 self._blend_mode_combo.setCurrentIndex(blend_index)
 
     def _schedule_opacity(self, value: int) -> None:
-        """更新百分比标签并在连续拖动停止后应用透明度。"""
+        """更新百分比标签并在连续拖动停止后应用不透明度。"""
         self._opacity_value.setText(f"{value}%")
         if not self._updating:
             self._opacity_timer.start()
 
     def _emit_opacity(self) -> None:
-        """发出当前透明度请求。"""
+        """发出当前不透明度请求。"""
         layer: LayerSnapshot | None = self.selected_layer()
         if layer is None:
             return
@@ -299,12 +362,57 @@ class DisplaySettingsDialog(QDialog):
             self.bookmark_delete_requested.emit(current.text())
 
     def _update_controls(self) -> None:
-        """根据是否存在图层启用或禁用显示设置控件。"""
+        """根据是否存在图层启用或禁用图层相关控件。"""
         has_layer: bool = self.selected_layer() is not None
         self._opacity_slider.setEnabled(has_layer)
         self._blend_mode_combo.setEnabled(has_layer)
         self._min_scale.setEnabled(has_layer)
         self._max_scale.setEnabled(has_layer)
+        self._tabs.setTabEnabled(0, has_layer)
+
+    def _on_global_color_clicked(self, kind: str) -> None:
+        """弹出 HSB 色轮选择全局显示颜色。
+
+        参数:
+            kind: "selection" 或 "sketch"。
+        """
+        if kind == "selection":
+            current = global_display_settings.selection_color()
+            button = self._selection_color_button
+        else:
+            current = global_display_settings.sketch_color()
+            button = self._sketch_color_button
+        color: QColor | None = ColorWheelPicker.get_color(current, self)
+        if color is None:
+            return
+        if kind == "selection":
+            global_display_settings.set_selection_color(color)
+        else:
+            global_display_settings.set_sketch_color(color)
+        self._setup_color_button(button, color)
+        self.global_display_changed.emit()
+
+    def _setup_color_button(self, button: QPushButton, color: QColor) -> None:
+        """统一设置颜色按钮的外观：色块图标 + 边框 + hover 高亮。"""
+        pixmap = QPixmap(60, 24)
+        pixmap.fill(color)
+        button.setIcon(QIcon(pixmap))
+        button.setIconSize(QSize(60, 24))
+        button.setText("颜色 ▾")
+        button.setStyleSheet(
+            "QPushButton {"
+            "  border: 1px solid #CBD5E1;"
+            "  border-radius: 4px;"
+            "  padding: 4px 10px;"
+            "  text-align: left;"
+            "  font-size: 12px;"
+            "  color: #475569;"
+            "}"
+            "QPushButton:hover {"
+            "  border-color: #3B82F6;"
+            "  background-color: #F8FAFC;"
+            "}"
+        )
 
     def _apply_light_palette(self) -> None:
         """给对话框和内部列表设置完整的浅色窗口、输入和选择颜色。"""

@@ -41,7 +41,7 @@ class LayerStyle:
                 fill_color="#2f7de1",
                 line_width=1.2,
                 point_size=8.0,
-                opacity=0.9,
+                opacity=1.0,
             )
         if family is GeometryFamily.LINE:
             return cls(
@@ -49,12 +49,12 @@ class LayerStyle:
                 fill_color="transparent",
                 line_width=2.0,
                 point_size=0.0,
-                opacity=0.95,
+                opacity=1.0,
             )
         return cls(
             stroke_color="#2f7de1",
             fill_color="#9ec5fe",
             line_width=1.2,
             point_size=0.0,
-            opacity=0.65,
+            opacity=1.0,
         )

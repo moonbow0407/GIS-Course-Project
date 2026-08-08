@@ -243,7 +243,7 @@ def _style_from_object(value: object) -> LayerStyle:
         fill_color=str(value["fill_color"]),
         line_width=float(value["line_width"]),
         point_size=float(value["point_size"]),
-        opacity=float(value["opacity"]),
+        opacity=1.0,
     )
 
 
