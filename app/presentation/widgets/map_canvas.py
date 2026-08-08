@@ -1003,8 +1003,9 @@ class MapCanvas(QGraphicsView):
             feature_w / max(visible.width(), 1e-9),
             feature_h / max(visible.height(), 1e-9),
         )
-        # 点要素占比接近 0，赋予一个极小值以防除零。
-        feature_fraction = max(feature_fraction, 0.001)
+        # 点要素占比接近 0，使用最小虚拟占比约 12%，对应约 3× 放大；
+        # 避免点要素无限放大到 20× 上限。
+        feature_fraction = max(feature_fraction, 0.12)
         # 目标：要素占视野约 35%，由此计算需要放大的倍率。
         target_fraction: float = 0.35
         zoom_factor: float = target_fraction / feature_fraction
