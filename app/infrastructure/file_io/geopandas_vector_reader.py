@@ -69,6 +69,20 @@ class GeoPandasVectorReader:
                 resolved_path,
                 layer=resolved_layer_name,
             )
+        except UnicodeDecodeError:
+            # 中文 Windows 上 ArcGIS 导出的 shapefile 的 .dbf 属性表
+            # 经常使用 GBK 编码，pyogrio 默认 UTF-8 解码会失败。
+            # 回退为 GBK 再试一次。
+            try:
+                dataframe = gpd.read_file(
+                    resolved_path,
+                    layer=resolved_layer_name,
+                    encoding="gbk",
+                )
+            except Exception as fallback_error:
+                raise VectorReadFailed(
+                    f"矢量文件读取失败（已尝试 UTF-8 / GBK 编码）：{resolved_path.name}"
+                ) from fallback_error
         except Exception as error:
             raise VectorReadFailed(f"矢量文件读取失败：{resolved_path.name}") from error
 
