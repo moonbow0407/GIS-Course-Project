@@ -722,8 +722,29 @@ class MainWindow(QMainWindow):
             f"空间数据已导出到：\n{result.path}",
         )
 
+    def _cleanup_query_and_selection(self) -> None:
+        """退出查询/数字化模式并清空所有要素选择。
+
+        在关闭、新建或打开工程之前调用，确保无论用户保存与否，
+        查询工具状态和选择集都不会残留到下一个工作区。
+        """
+        # 退出查询和数字化模式，恢复默认平移工具。
+        # set_pan_tool 内部调用 _deactivate_all_tools() 会同时关闭
+        # 点选/框选/数字化/顶点编辑等全部特殊工具。
+        self._map_canvas.set_pan_tool()
+        self._set_active_query_action(None)
+        self._set_active_digitize_action(None)
+        # 清空所有图层的要素选择（不推入撤销栈，避免在切换工程时
+        # 残留的撤销记录引用已销毁的领域对象）。
+        self._application.clear_selection()
+        # 隐藏属性表，关闭几何编辑工具栏。
+        self._hide_attribute_table()
+        self._geom_edit_toolbar.hide()
+        self._ready_label.setText("就绪")
+
     def _new_project(self) -> None:
         """新建空白工程，并在需要时处理当前未保存修改。"""
+        self._cleanup_query_and_selection()
         if not self._confirm_project_switch():
             return
         self._application.new_project()
@@ -794,6 +815,7 @@ class MainWindow(QMainWindow):
         参数:
             path: 工程文件路径。
         """
+        self._cleanup_query_and_selection()
         try:
             result = self._application.open_project(path)
         except ApplicationError as error:
@@ -819,6 +841,7 @@ class MainWindow(QMainWindow):
         )[0]
         if not path_string:
             return
+        self._cleanup_query_and_selection()
         if not self._confirm_project_switch():
             return
         try:
@@ -2656,7 +2679,7 @@ class MainWindow(QMainWindow):
         dialog.symbology_changed.connect(self._apply_symbology)
         dialog.unique_requested.connect(self._apply_unique_symbology)
         dialog.graduated_requested.connect(self._apply_graduated_symbology)
-        dialog.global_display_changed.connect(self._map_canvas.viewport().update)
+        dialog.global_display_changed.connect(lambda: self._refresh_workspace())
         snapshot: WorkspaceSnapshot = self._application.snapshot()
         dialog.set_layers(snapshot.layers, snapshot.active_layer_id)
         dialog.set_bookmarks(self._application.bookmarks())
@@ -2998,7 +3021,8 @@ class MainWindow(QMainWindow):
         self._ready_label.setText(f"已重做  {description}")
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """关闭窗口前避免未保存工程修改被静默丢弃。"""
+        """关闭窗口前清空查询选择和要素选择，避免未保存修改被静默丢弃。"""
+        self._cleanup_query_and_selection()
         if self._confirm_project_switch():
             if self._application.database_is_connected:
                 self._application.disconnect_database()

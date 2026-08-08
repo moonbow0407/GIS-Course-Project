@@ -22,6 +22,7 @@ def load_style(app: QApplication) -> None:
 def main() -> int:
     """显示启动对话框，然后创建主窗口并进入 Qt 事件循环。"""
     app = QApplication(sys.argv)
+    app.setOrganizationName("GISPlatform")
     app.setApplicationName("GIS桌面通用平台")
     load_style(app)
 

@@ -218,18 +218,16 @@ class QtVectorRenderer:
             item: 光晕层 Qt 图元。
             geom_type: Shapely 几何类型名称。
         """
-        # 光晕色：基于全局选择高亮的半透明派生色。
         halo_color: QColor = QColor(selection_color())
-        halo_color.setAlpha(80)
-        halo_width: float = 8.0
-        halo_pen: QPen = QPen(halo_color, halo_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        halo_color.setAlpha(120)
+        halo_width: float = 10.0
+        halo_pen: QPen = QPen(
+            halo_color, halo_width,
+            Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin,
+        )
         halo_pen.setCosmetic(True)
         item.setPen(halo_pen)
-        # 面要素光晕不填充，线/点同理。
-        if geom_type in ("Polygon", "MultiPolygon"):
-            item.setBrush(Qt.BrushStyle.NoBrush)
-        else:
-            item.setBrush(Qt.BrushStyle.NoBrush)
+        item.setBrush(Qt.BrushStyle.NoBrush)
 
     @staticmethod
     def _apply_style(
@@ -259,37 +257,30 @@ class QtVectorRenderer:
             item.setOpacity(style.opacity)
             return
 
-        # ── 选中高亮策略 ──
-        # 主体色：荧光青，与光晕同色系但完全不透明。
+        # ── 选中高亮策略：统一使用全局选择高亮色 ──
         highlight_color: QColor = selection_color()
 
-        # 面要素：填充大幅加深，配醒目青绿色粗边界线。
+        # 面要素：填充用选中色半透明覆盖，边界用选中色粗线。
         if geom_type in ("Polygon", "MultiPolygon"):
-            original_fill: QColor = QColor(style.fill_color)
-            if original_fill.isValid():
-                # 降到原色的 25% 亮度，几乎黑，确保与周围未选面拉开差距。
-                darkened: QColor = original_fill.darker(300)
-                selected_brush: QBrush = QBrush(darkened)
-            else:
-                selected_brush = QBrush(Qt.BrushStyle.NoBrush)
-            highlight_pen: QPen = QPen(highlight_color, style.line_width + 4.0)
-            highlight_pen.setCosmetic(True)
-            item.setPen(highlight_pen)
-            item.setBrush(selected_brush)
+            fill = QColor(highlight_color)
+            fill.setAlpha(80)
+            pen = QPen(highlight_color, style.line_width + 3.0)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+            item.setBrush(QBrush(fill))
             item.setOpacity(1.0)
 
-        # 线要素：亮青粗线，配合光晕在密集线网中突出。
+        # 线要素：选中色粗线。
         elif geom_type in ("LineString", "MultiLineString", "LinearRing"):
-            highlight_pen = QPen(highlight_color, style.line_width + 4.0)
-            highlight_pen.setCosmetic(True)
-            item.setPen(highlight_pen)
+            pen = QPen(highlight_color, style.line_width + 3.0)
+            pen.setCosmetic(True)
+            item.setPen(pen)
             item.setOpacity(1.0)
 
-        # 点要素：亮青填充 + 深蓝描边，配合 2.5× 放大符号。
+        # 点要素：选中色填充 + 略微加深的选中色描边。
         else:
-            highlight_pen = QPen(selection_color().darker(200), style.line_width + 2.0)
-            highlight_pen.setCosmetic(True)
-            highlight_brush: QBrush = QBrush(highlight_color)
-            item.setPen(highlight_pen)
-            item.setBrush(highlight_brush)
+            pen = QPen(highlight_color.darker(150), style.line_width + 2.0)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+            item.setBrush(QBrush(highlight_color))
             item.setOpacity(1.0)

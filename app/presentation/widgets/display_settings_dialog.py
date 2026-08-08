@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
@@ -197,6 +198,15 @@ class DisplaySettingsDialog(QDialog):
 
         self._tabs.addTab(display_page, "显示设置")
         layout.addWidget(self._tabs, 1)
+
+        # ── 底部：确定 / 取消 ──
+        button_box: QDialogButtonBox = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
         self._apply_light_palette()
 
     def _connect_signals(self) -> None:
