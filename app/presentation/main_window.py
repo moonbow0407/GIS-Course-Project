@@ -46,7 +46,12 @@ from app.application.database_service import DatabaseService
 from app.application.errors import ApplicationError
 from app.application.gis_application import GisApplication, _chaikin_smooth
 from app.application.project_models import MapViewState
-from app.application.results import LayerSnapshot, OpenDataResult, SelectedFeature, WorkspaceSnapshot
+from app.application.results import (
+    LayerSnapshot,
+    OpenDataResult,
+    SelectedFeature,
+    WorkspaceSnapshot,
+)
 from app.domain.feature import AttributeValue, Feature, FeatureId
 from app.domain.layer_style import GeometryFamily
 from app.domain.symbology import RasterSymbology, VectorSymbology
@@ -61,12 +66,8 @@ from app.presentation.widgets.attribute_query_dialog import (
     AttributeQueryRequest,
 )
 from app.presentation.widgets.attribute_table import AttributeTablePanel
-from app.application.overlay_analysis import operation_label
 from app.presentation.widgets.buffer_analysis_dialog import BufferAnalysisDialog
 from app.presentation.widgets.crs_select_widget import CrsSelectWidget
-from app.presentation.widgets.new_layer_dialog import NewLayerDialog
-from app.presentation.widgets.overlay_analysis_dialog import OverlayAnalysisDialog
-from app.presentation.widgets.raster_calculator_dialog import RasterCalculatorDialog
 from app.presentation.widgets.database_dialogs import (
     DatabaseConnectionDialog,
     DatabaseLayerDialog,
@@ -76,6 +77,9 @@ from app.presentation.widgets.edit_feature_dialog import EditFeatureDialog
 from app.presentation.widgets.geometry_edit_toolbar import GeometryEditToolbar
 from app.presentation.widgets.layer_panel import LayerPanel
 from app.presentation.widgets.map_canvas import MapCanvas
+from app.presentation.widgets.new_layer_dialog import NewLayerDialog
+from app.presentation.widgets.overlay_analysis_dialog import OverlayAnalysisDialog
+from app.presentation.widgets.raster_calculator_dialog import RasterCalculatorDialog
 from app.presentation.widgets.ribbon_bar import RibbonBar
 from app.presentation.widgets.startup_dialog import (
     save_recent_project,
@@ -203,10 +207,21 @@ class MainWindow(QMainWindow):
         self._attribute_table_dock.setObjectName("attributeTableDock")
         self._attribute_table_dock.setWidget(self._attribute_table_panel)
         self._attribute_table_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
-        # 只允许拖动和浮动，禁用 dock 自带关闭按钮，避免误触；关闭仅用工具栏按钮。
+        # 只允许拖动和浮动，使用自绘标题栏统一控制浮动与关闭，避免系统主题干扰。
         self._attribute_table_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self._attribute_table_dock.setTitleBarWidget(
+            self._create_dock_title_bar(
+                title="属性表",
+                dock=self._attribute_table_dock,
+                title_bar_object_name="attributeTableTitleBar",
+                title_object_name="attributeTableDockTitle",
+                float_button_object_name="attributeTableFloatButton",
+                close_button_object_name="attributeTableCloseButton",
+                close_callback=self._hide_attribute_table,
+            )
         )
         self._attribute_table_dock.setMinimumWidth(400)
         self._attribute_table_dock.hide()
@@ -309,37 +324,59 @@ class MainWindow(QMainWindow):
         )
 
     def _create_panel_title_bar(self) -> QWidget:
-        """创建带有明确文字按钮的工作面板标题栏。"""
+        """创建工作面板的统一浅色标题栏。"""
+        return self._create_dock_title_bar(
+            title="工作面板",
+            dock=self._panel_dock,
+            title_bar_object_name="workspacePanelTitleBar",
+            title_object_name="workspacePanelTitle",
+            float_button_object_name="workspacePanelFloatButton",
+            close_button_object_name="workspacePanelCloseButton",
+            close_callback=self._panel_dock.hide,
+        )
+
+    def _create_dock_title_bar(
+        self,
+        title: str,
+        dock: QDockWidget,
+        title_bar_object_name: str,
+        title_object_name: str,
+        float_button_object_name: str,
+        close_button_object_name: str,
+        close_callback: Callable[[], None],
+    ) -> QWidget:
+        """创建不依赖系统主题的停靠栏标题和操作按钮。"""
         title_bar: QWidget = QWidget()
-        title_bar.setObjectName("workspacePanelTitleBar")
+        title_bar.setObjectName(title_bar_object_name)
         layout: QHBoxLayout = QHBoxLayout(title_bar)
         layout.setContentsMargins(10, 0, 4, 0)
         layout.setSpacing(3)
 
-        title: QLabel = QLabel("工作面板")
-        title.setObjectName("workspacePanelTitle")
-        layout.addWidget(title, 1)
+        title_label: QLabel = QLabel(title)
+        title_label.setObjectName(title_object_name)
+        layout.addWidget(title_label, 1)
 
         float_button: QToolButton = QToolButton()
-        float_button.setObjectName("workspacePanelFloatButton")
+        float_button.setObjectName(float_button_object_name)
         float_button.setIcon(self._panel_title_icon("float"))
         float_button.setIconSize(QSize(16, 16))
         float_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         float_button.setAccessibleName("浮动/停靠")
         float_button.setToolTip("浮动/停靠")
         float_button.clicked.connect(
-            lambda: self._panel_dock.setFloating(not self._panel_dock.isFloating())
+            lambda: dock.setFloating(not dock.isFloating())
         )
         layout.addWidget(float_button)
 
         close_button: QToolButton = QToolButton()
-        close_button.setObjectName("workspacePanelCloseButton")
+        close_button.setObjectName(close_button_object_name)
         close_button.setIcon(self._panel_title_icon("close"))
         close_button.setIconSize(QSize(16, 16))
         close_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        close_button.setAccessibleName("关闭工作面板")
-        close_button.setToolTip("关闭工作面板")
-        close_button.clicked.connect(self._panel_dock.hide)
+        close_label: str = f"关闭{title}"
+        close_button.setAccessibleName(close_label)
+        close_button.setToolTip(close_label)
+        close_button.clicked.connect(close_callback)
         layout.addWidget(close_button)
         return title_bar
 

@@ -62,6 +62,33 @@ def test_attribute_table_is_placed_below_map_and_has_visible_controls() -> None:
     window.close()
 
 
+def test_attribute_table_uses_explicit_light_title_bar_controls() -> None:
+    """属性表停靠栏应复用可控的浅色标题栏，而不是依赖系统原生按钮。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    title_bar = window._attribute_table_dock.titleBarWidget()
+    assert title_bar is not None
+    assert title_bar.objectName() == "attributeTableTitleBar"
+    title_buttons = {
+        button.objectName(): button
+        for button in title_bar.findChildren(QToolButton)
+    }
+
+    assert set(title_buttons) == {
+        "attributeTableFloatButton",
+        "attributeTableCloseButton",
+    }
+    assert all(not button.icon().isNull() for button in title_buttons.values())
+    assert title_buttons["attributeTableFloatButton"].accessibleName() == "浮动/停靠"
+    assert title_buttons["attributeTableCloseButton"].accessibleName() == "关闭属性表"
+    application.processEvents()
+    window._attribute_table_dock.show()
+    title_buttons["attributeTableCloseButton"].click()
+    assert window._attribute_table_dock.isHidden()
+    window.close()
+
+
 def test_attribute_table_toolbar_emits_crud_and_query_requests() -> None:
     """属性表工具栏应分别发出查询、新增、编辑、删除和关闭请求。"""
     application: QApplication = QApplication.instance() or QApplication([])

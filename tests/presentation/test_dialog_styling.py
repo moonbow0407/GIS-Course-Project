@@ -9,17 +9,16 @@ from pyproj import CRS
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
-    QAbstractButton,
     QAbstractItemView,
     QApplication,
     QComboBox,
-    QDockWidget,
     QFileDialog,
     QInputDialog,
     QLineEdit,
     QMenu,
     QMessageBox,
     QTableWidget,
+    QToolButton,
     QWidget,
 )
 from shapely.geometry import Point
@@ -27,6 +26,7 @@ from shapely.geometry import Point
 from app.application.results import LayerSnapshot
 from app.domain.feature import Feature
 from app.domain.vector_layer import VectorLayer
+from app.presentation.main_window import MainWindow
 from app.presentation.widgets.attribute_table import AttributeTablePanel
 from main import load_style
 
@@ -95,28 +95,40 @@ def test_layer_context_menu_keeps_light_readable_background_with_dark_system_pal
 
 
 def test_dock_title_buttons_follow_light_workspace_palette() -> None:
-    """统一工作面板停靠标题栏按钮应与浅色标题栏保持一致。"""
+    """工作面板和属性表的停靠标题栏应使用一致的浅色按钮。"""
     application: QApplication = QApplication.instance() or QApplication([])
     load_style(application)
     style_sheet: str = application.styleSheet()
 
-    assert "QDockWidget::close-button" in style_sheet
-    assert "QDockWidget::float-button" in style_sheet
-    assert "QDockWidget::close-button:hover" in style_sheet
-    assert "QDockWidget::float-button:hover" in style_sheet
+    assert "QWidget#workspacePanelTitleBar" in style_sheet
+    assert "QWidget#attributeTableTitleBar" in style_sheet
+    assert "QToolButton#workspacePanelCloseButton:hover" in style_sheet
+    assert "QToolButton#attributeTableCloseButton:hover" in style_sheet
+    assert "QDockWidget::close-button" not in style_sheet
+    assert "QDockWidget::float-button" not in style_sheet
 
-    dock: QDockWidget = QDockWidget("符号系统")
-    dock.setObjectName("workspacePanelDock")
-    dock.show()
-    application.processEvents()
-    title_buttons: list[QAbstractButton] = [
-        button
-        for button in dock.findChildren(QAbstractButton)
-        if button.objectName()
-        in {"qt_dockwidget_closebutton", "qt_dockwidget_floatbutton"}
+    window: MainWindow = MainWindow()
+    title_bars = [
+        window._panel_dock.titleBarWidget(),
+        window._attribute_table_dock.titleBarWidget(),
     ]
+    assert all(title_bar is not None for title_bar in title_bars)
 
-    assert len(title_buttons) == 2
+    expected_buttons = {
+        "workspacePanelFloatButton",
+        "workspacePanelCloseButton",
+        "attributeTableFloatButton",
+        "attributeTableCloseButton",
+    }
+    title_buttons: list[QToolButton] = [
+        button
+        for title_bar in title_bars
+        for button in title_bar.findChildren(QToolButton)
+    ]
+    application.processEvents()
+
+    assert {button.objectName() for button in title_buttons} == expected_buttons
+    assert all(not button.icon().isNull() for button in title_buttons)
     assert all(
         button.palette().color(QPalette.ColorRole.Button).name() == "#eef4fa"
         for button in title_buttons
@@ -125,7 +137,7 @@ def test_dock_title_buttons_follow_light_workspace_palette() -> None:
         button.palette().color(QPalette.ColorRole.ButtonText).lightness() < 180
         for button in title_buttons
     )
-    dock.close()
+    window.close()
 
 
 def test_workspace_panel_tabs_use_explicit_light_contrast() -> None:

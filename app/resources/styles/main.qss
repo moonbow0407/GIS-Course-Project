@@ -3,6 +3,7 @@ QMainWindow#mainWindow {
 }
 
 QDockWidget#workspacePanelDock,
+QDockWidget#attributeTableDock,
 QWidget#workspacePanelTabs,
 QWidget#attributeTablePanel,
 QWidget#analysisHistoryPanel,
@@ -11,7 +12,8 @@ QWidget#symbologyPanel {
     color: #263548;
 }
 
-QDockWidget#workspacePanelDock::title {
+QDockWidget#workspacePanelDock::title,
+QDockWidget#attributeTableDock::title {
     padding: 7px 10px;
     border-bottom: 1px solid #d9e1ea;
     background: #eef4fa;
@@ -21,20 +23,24 @@ QDockWidget#workspacePanelDock::title {
     font-weight: 600;
 }
 
-QWidget#workspacePanelTitleBar {
+QWidget#workspacePanelTitleBar,
+QWidget#attributeTableTitleBar {
     min-height: 34px;
     background: #eef4fa;
     border-bottom: 1px solid #d9e1ea;
 }
 
-QLabel#workspacePanelTitle {
+QLabel#workspacePanelTitle,
+QLabel#attributeTableDockTitle {
     color: #263548;
     font-size: 14px;
     font-weight: 600;
 }
 
 QToolButton#workspacePanelFloatButton,
-QToolButton#workspacePanelCloseButton {
+QToolButton#workspacePanelCloseButton,
+QToolButton#attributeTableFloatButton,
+QToolButton#attributeTableCloseButton {
     min-width: 30px;
     max-width: 30px;
     min-height: 28px;
@@ -50,14 +56,18 @@ QToolButton#workspacePanelCloseButton {
 }
 
 QToolButton#workspacePanelFloatButton:hover,
-QToolButton#workspacePanelCloseButton:hover {
+QToolButton#workspacePanelCloseButton:hover,
+QToolButton#attributeTableFloatButton:hover,
+QToolButton#attributeTableCloseButton:hover {
     border-color: #9dc3e3;
     background: #dcecf9;
     color: #0f5f9f;
 }
 
 QToolButton#workspacePanelFloatButton:pressed,
-QToolButton#workspacePanelCloseButton:pressed {
+QToolButton#workspacePanelCloseButton:pressed,
+QToolButton#attributeTableFloatButton:pressed,
+QToolButton#attributeTableCloseButton:pressed {
     border-color: #7eaed3;
     background: #c8e1f2;
     color: #0f4f86;
@@ -105,20 +115,14 @@ QTabBar#workspacePanelTabBar::tab:selected {
 QWidget#attributeTablePanel {
     min-height: 190px;
     background: #ffffff;
-    border-top: 1px solid #b8c9d9;
     color: #263548;
 }
 
-QLabel#attributeTableTitle {
-    color: #1e3a5f;
-    font-size: 14px;
-    font-weight: 700;
-}
-
 QLabel#attributeTableLayerLabel {
-    padding-left: 6px;
+    padding-left: 10px;
     color: #64748b;
-    font-size: 12px;
+    font-size: 13px;
+    font-weight: 600;
 }
 
 QPushButton#attributeTableQueryButton,
@@ -157,29 +161,6 @@ QPushButton#attributeTableDeleteButton:disabled {
     border-color: #e1e7ee;
     background: #f3f6f9;
     color: #9aa8b7;
-}
-
-QDockWidget::close-button,
-QDockWidget::float-button {
-    padding: 2px;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    background: #eef4fa;
-    color: #263548;
-}
-
-QDockWidget::close-button:hover,
-QDockWidget::float-button:hover {
-    border-color: #9dc3e3;
-    background: #dcecf9;
-    color: #0f6cbd;
-}
-
-QDockWidget::close-button:pressed,
-QDockWidget::float-button:pressed {
-    border-color: #7eaed3;
-    background: #c8e1f2;
-    color: #0f5f9f;
 }
 
 QWidget#analysisHistoryPanel {
