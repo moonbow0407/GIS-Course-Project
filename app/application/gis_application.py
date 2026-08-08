@@ -451,6 +451,17 @@ class GisApplication:
         self._modified = True
         return self.snapshot()
 
+    def set_layer_blend_mode(self, layer_id: str, blend_mode: str) -> WorkspaceSnapshot:
+        """设置指定图层的混合模式并返回最新快照。"""
+        try:
+            self._document.set_layer_blend_mode(layer_id, blend_mode)
+        except KeyError as error:
+            raise LayerNotFound(f"图层不存在：{layer_id}") from error
+        except ValueError as error:
+            raise ValueError(f"混合模式设置无效：{error}") from error
+        self._modified = True
+        return self.snapshot()
+
     def set_layer_scale_range(
         self,
         layer_id: str,
@@ -1364,6 +1375,10 @@ class GisApplication:
                 projected_layer.layer_id,
                 self._document.layer_opacity(old_layer.layer_id),
             )
+            replacement_document.set_layer_blend_mode(
+                projected_layer.layer_id,
+                self._document.layer_blend_mode(old_layer.layer_id),
+            )
             replacement_document.set_layer_scale_range(
                 projected_layer.layer_id,
                 old_min_scale,
@@ -1529,6 +1544,7 @@ class GisApplication:
                 visible=self._document.is_visible(layer.layer_id),
                 selected_feature_ids=self._document.selected_feature_ids(layer.layer_id),
                 opacity=self._document.layer_opacity(layer.layer_id),
+                blend_mode=self._document.layer_blend_mode(layer.layer_id),
                 min_scale_percent=self._document.layer_scale_range(layer.layer_id)[0],
                 max_scale_percent=self._document.layer_scale_range(layer.layer_id)[1],
             )

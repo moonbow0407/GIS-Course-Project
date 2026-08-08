@@ -1,11 +1,40 @@
 """将栅格领域模型转换为 Qt 图元。"""
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPixmap, QTransform
-from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene
+from PySide6.QtGui import QImage, QPainter, QPixmap, QTransform
+from PySide6.QtWidgets import QGraphicsItem, QGraphicsPixmapItem, QGraphicsScene, QWidget
 
 from app.application.results import LayerSnapshot
 from app.domain.raster_layer import RasterLayer
+
+_BLEND_MODE_MAP: dict[str, QPainter.CompositionMode] = {
+    "normal": QPainter.CompositionMode.CompositionMode_SourceOver,
+    "multiply": QPainter.CompositionMode.CompositionMode_Multiply,
+    "darken": QPainter.CompositionMode.CompositionMode_Darken,
+}
+
+
+class _BlendPixmapItem(QGraphicsPixmapItem):
+    """在绘制时应用指定合成模式的像素图元。"""
+
+    def __init__(
+        self,
+        pixmap: QPixmap,
+        composition_mode: QPainter.CompositionMode,
+    ) -> None:
+        super().__init__(pixmap)
+        self._composition_mode = composition_mode
+
+    def paint(
+        self,
+        painter: QPainter,
+        option: QGraphicsItem,
+        widget: QWidget | None = None,
+    ) -> None:
+        painter.save()
+        painter.setCompositionMode(self._composition_mode)
+        super().paint(painter, option, widget)
+        painter.restore()
 
 
 class QtRasterRenderer:
@@ -45,7 +74,17 @@ class QtRasterRenderer:
             bytes_per_line,
             QImage.Format.Format_RGBA8888,
         ).copy()
-        item: QGraphicsPixmapItem = QGraphicsPixmapItem(QPixmap.fromImage(image))
+        composition_mode = _BLEND_MODE_MAP.get(snapshot.blend_mode)
+        _needs_blend = (
+            composition_mode is not None
+            and composition_mode != QPainter.CompositionMode.CompositionMode_SourceOver
+        )
+        pixmap = QPixmap.fromImage(image)
+        item: QGraphicsPixmapItem = (
+            _BlendPixmapItem(pixmap, composition_mode)
+            if _needs_blend
+            else QGraphicsPixmapItem(pixmap)
+        )
         transform = layer.transform
         # Qt 的 Y 轴向下，地图坐标的 Y 轴通常向上，因此对 Y 方向取反。
         item.setTransform(

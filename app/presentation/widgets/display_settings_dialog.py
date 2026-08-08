@@ -32,6 +32,8 @@ class DisplaySettingsDialog(QDialog):
 
     # 请求调整图层透明度：(图层编号, 目标透明度 0 到 1)。
     opacity_requested = Signal(str, float)
+    # 请求调整图层混合模式：(图层编号, 混合模式键名)。
+    blend_mode_requested = Signal(str, str)
     # 请求调整图层显示比例范围：(图层编号, 最小比例, 最大比例)，空值表示不限。
     scale_range_requested = Signal(str, object, object)
     # 请求添加当前视图为命名书签。
@@ -59,6 +61,14 @@ class DisplaySettingsDialog(QDialog):
         self._layer_combo: QComboBox = QComboBox()
         self._opacity_slider: QSlider = QSlider(Qt.Orientation.Horizontal)
         self._opacity_value: QLabel = QLabel("100%")
+        self._blend_mode_combo: QComboBox = QComboBox()
+        self._BLEND_MODES: tuple[tuple[str, str], ...] = (
+            ("normal", "正常 (Normal)"),
+            ("multiply", "正片叠底 (Multiply)"),
+            ("darken", "变暗 (Darken)"),
+        )
+        for mode_key, mode_label in self._BLEND_MODES:
+            self._blend_mode_combo.addItem(mode_label, mode_key)
         self._opacity_slider.setRange(0, 100)
         self._opacity_slider.setValue(100)
         self._min_scale: QDoubleSpinBox = QDoubleSpinBox()
@@ -91,6 +101,11 @@ class DisplaySettingsDialog(QDialog):
         opacity_row.addWidget(self._opacity_value)
         opacity_layout.addLayout(layer_row)
         opacity_layout.addLayout(opacity_row)
+
+        blend_row: QHBoxLayout = QHBoxLayout()
+        blend_row.addWidget(QLabel("混合模式"))
+        blend_row.addWidget(self._blend_mode_combo, 1)
+        opacity_layout.addLayout(blend_row)
 
         scale_group: QGroupBox = QGroupBox("显示比例范围")
         scale_layout: QVBoxLayout = QVBoxLayout(scale_group)
@@ -141,6 +156,7 @@ class DisplaySettingsDialog(QDialog):
         self._opacity_slider.valueChanged.connect(self._schedule_opacity)
         self._min_scale.valueChanged.connect(self._schedule_scale)
         self._max_scale.valueChanged.connect(self._schedule_scale)
+        self._blend_mode_combo.currentIndexChanged.connect(self._emit_blend_mode)
         self._bookmark_list.itemDoubleClicked.connect(
             lambda _item: self._on_jump_bookmark()
         )
@@ -199,17 +215,23 @@ class DisplaySettingsDialog(QDialog):
         """将选中图层的显示属性同步到控件。"""
         with QSignalBlocker(self._opacity_slider), QSignalBlocker(
             self._min_scale
-        ), QSignalBlocker(self._max_scale):
+        ), QSignalBlocker(self._max_scale), QSignalBlocker(
+            self._blend_mode_combo
+        ):
             if layer is None:
                 self._opacity_slider.setValue(100)
                 self._min_scale.setValue(0.0)
                 self._max_scale.setValue(0.0)
                 self._opacity_value.setText("100%")
+                self._blend_mode_combo.setCurrentIndex(0)
                 return
             self._opacity_slider.setValue(int(round(layer.opacity * 100)))
             self._opacity_value.setText(f"{layer.opacity * 100:.0f}%")
             self._min_scale.setValue(layer.min_scale_percent or 0.0)
             self._max_scale.setValue(layer.max_scale_percent or 0.0)
+            blend_index: int = self._blend_mode_combo.findData(layer.blend_mode)
+            if blend_index >= 0:
+                self._blend_mode_combo.setCurrentIndex(blend_index)
 
     def _schedule_opacity(self, value: int) -> None:
         """更新百分比标签并在连续拖动停止后应用透明度。"""
@@ -223,6 +245,16 @@ class DisplaySettingsDialog(QDialog):
         if layer is None:
             return
         self.opacity_requested.emit(layer.layer_id, self._opacity_slider.value() / 100.0)
+
+    def _emit_blend_mode(self) -> None:
+        """发出当前混合模式请求。"""
+        if self._updating:
+            return
+        layer: LayerSnapshot | None = self.selected_layer()
+        if layer is None:
+            return
+        mode_key: str = self._blend_mode_combo.currentData()
+        self.blend_mode_requested.emit(layer.layer_id, mode_key)
 
     def _schedule_scale(self) -> None:
         """连续数值输入停止后应用显示比例范围。"""
@@ -270,6 +302,7 @@ class DisplaySettingsDialog(QDialog):
         """根据是否存在图层启用或禁用显示设置控件。"""
         has_layer: bool = self.selected_layer() is not None
         self._opacity_slider.setEnabled(has_layer)
+        self._blend_mode_combo.setEnabled(has_layer)
         self._min_scale.setEnabled(has_layer)
         self._max_scale.setEnabled(has_layer)
 

@@ -1,8 +1,8 @@
 """将 Shapely 矢量几何转换为 Qt 图元。"""
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QBrush, QColor, QPainterPath, QPen
-from PySide6.QtWidgets import QGraphicsItem, QGraphicsPathItem, QGraphicsScene
+from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QGraphicsItem, QGraphicsPathItem, QGraphicsScene, QWidget
 from shapely import get_num_coordinates
 from shapely.geometry import (
     GeometryCollection,
@@ -20,6 +20,35 @@ from app.application.results import LayerSnapshot
 from app.domain.feature import Feature
 from app.domain.layer_style import LayerStyle
 from app.domain.vector_layer import VectorLayer
+
+_BLEND_MODE_MAP: dict[str, QPainter.CompositionMode] = {
+    "normal": QPainter.CompositionMode.CompositionMode_SourceOver,
+    "multiply": QPainter.CompositionMode.CompositionMode_Multiply,
+    "darken": QPainter.CompositionMode.CompositionMode_Darken,
+}
+
+
+class _BlendPathItem(QGraphicsPathItem):
+    """在绘制时应用指定合成模式的路径图元。"""
+
+    def __init__(
+        self,
+        path: QPainterPath,
+        composition_mode: QPainter.CompositionMode,
+    ) -> None:
+        super().__init__(path)
+        self._composition_mode = composition_mode
+
+    def paint(
+        self,
+        painter: QPainter,
+        option: QGraphicsItem,
+        widget: QWidget | None = None,
+    ) -> None:
+        painter.save()
+        painter.setCompositionMode(self._composition_mode)
+        super().paint(painter, option, widget)
+        painter.restore()
 
 
 class QtVectorRenderer:
@@ -45,6 +74,11 @@ class QtVectorRenderer:
         """
         if not isinstance(snapshot.layer, VectorLayer):
             raise TypeError("矢量渲染器只能绘制矢量图层。")
+        composition_mode = _BLEND_MODE_MAP.get(snapshot.blend_mode)
+        _needs_blend = (
+            composition_mode is not None
+            and composition_mode != QPainter.CompositionMode.CompositionMode_SourceOver
+        )
         items: list[QGraphicsItem] = []
         feature: Feature
         for feature in snapshot.layer.features:
@@ -70,7 +104,11 @@ class QtVectorRenderer:
                 continue
             # 选中要素先绘制光晕层（宽半透明描边），再绘制主体。
             if selected:
-                halo: QGraphicsPathItem = QGraphicsPathItem(path)
+                halo: QGraphicsPathItem = (
+                    _BlendPathItem(path, composition_mode)
+                    if _needs_blend
+                    else QGraphicsPathItem(path)
+                )
                 self._apply_halo(halo, feature.geometry.geom_type)
                 halo.setData(0, snapshot.layer_id)
                 halo.setData(1, feature.fid)
@@ -80,7 +118,11 @@ class QtVectorRenderer:
                 halo.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
                 scene.addItem(halo)
                 items.append(halo)
-            item: QGraphicsPathItem = QGraphicsPathItem(path)
+            item: QGraphicsPathItem = (
+                _BlendPathItem(path, composition_mode)
+                if _needs_blend
+                else QGraphicsPathItem(path)
+            )
             self._apply_style(item, style, selected, feature.geometry.geom_type)
             # 图层级透明度乘以符号自身透明度，实现整体淡化而不破坏选择高亮。
             item.setOpacity(item.opacity() * snapshot.opacity)

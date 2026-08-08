@@ -2600,6 +2600,7 @@ class MainWindow(QMainWindow):
         """打开显示设置对话框，管理图层透明度、比例尺范围和地图书签。"""
         dialog: DisplaySettingsDialog = DisplaySettingsDialog(self)
         dialog.opacity_requested.connect(self._change_layer_opacity)
+        dialog.blend_mode_requested.connect(self._change_layer_blend_mode)
         dialog.scale_range_requested.connect(self._change_layer_scale_range)
         dialog.bookmark_add_requested.connect(self._add_bookmark)
         dialog.bookmark_jump_requested.connect(self._jump_to_bookmark)
@@ -2628,6 +2629,29 @@ class MainWindow(QMainWindow):
             ),
             redo_action=partial(
                 self._application.set_layer_opacity, layer_id, opacity
+            ),
+        )
+        self._schedule_workspace_refresh()
+
+    def _change_layer_blend_mode(self, layer_id: str, blend_mode: str) -> None:
+        """应用指定图层的新混合模式，并刷新工作区。"""
+        before: str = "normal"
+        for layer in self._application.snapshot().layers:
+            if layer.layer_id == layer_id:
+                before = layer.blend_mode
+                break
+        try:
+            self._application.set_layer_blend_mode(layer_id, blend_mode)
+        except (ApplicationError, ValueError) as error:
+            self.statusBar().showMessage(f"混合模式设置失败：{error}", 4000)
+            return
+        self._push_undo(
+            "调整图层混合模式",
+            undo_action=partial(
+                self._application.set_layer_blend_mode, layer_id, before
+            ),
+            redo_action=partial(
+                self._application.set_layer_blend_mode, layer_id, blend_mode
             ),
         )
         self._schedule_workspace_refresh()

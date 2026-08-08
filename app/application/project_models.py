@@ -52,6 +52,8 @@ class LayerReference:
     symbology: Mapping[str, object] | None = None
     # 图层显示透明度；缺失于旧工程时使用默认值 1.0。
     opacity: float = 1.0
+    # 图层混合模式；缺失于旧工程时使用默认值 normal。
+    blend_mode: str = "normal"
     # 图层显示比例范围；空值表示不限制。
     min_scale_percent: float | None = None
     max_scale_percent: float | None = None

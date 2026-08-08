@@ -21,6 +21,9 @@ class MapDocument:
         # 图层次级透明度：按图层编号保存显示透明度，取值范围为零到一。
         self._opacity: dict[str, float] = {}
 
+        # 图层混合模式：按图层编号保存合成模式键，默认值为 normal。
+        self._blend_mode: dict[str, str] = {}
+
         # 图层显示比例尺范围：按图层编号保存 (最小比例, 最大比例)，空值表示不限。
         self._scale_range: dict[str, tuple[float | None, float | None]] = {}
 
@@ -66,6 +69,7 @@ class MapDocument:
         self._layers.append(layer)
         self._visibility[layer.layer_id] = True
         self._opacity[layer.layer_id] = 1.0
+        self._blend_mode[layer.layer_id] = "normal"
         self._scale_range[layer.layer_id] = (None, None)
         self._selection[layer.layer_id] = ()
         if self._active_layer_id is None:
@@ -79,6 +83,7 @@ class MapDocument:
         removed_layer: SpatialLayer = self._layers.pop(current_index)
         self._visibility.pop(layer_id, None)
         self._opacity.pop(layer_id, None)
+        self._blend_mode.pop(layer_id, None)
         self._scale_range.pop(layer_id, None)
         self._selection.pop(layer_id, None)
 
@@ -137,6 +142,24 @@ class MapDocument:
         """返回指定图层的显示透明度。"""
         self._require_layer(layer_id)
         return self._opacity[layer_id]
+
+    def set_layer_blend_mode(self, layer_id: str, blend_mode: str) -> None:
+        """设置指定图层的混合模式，取值必须为已支持的七个模式之一。"""
+        self._require_layer(layer_id)
+        valid_modes = frozenset({
+            "normal", "multiply", "darken",
+        })
+        if blend_mode not in valid_modes:
+            raise ValueError(
+                f"不支持的混合模式：{blend_mode}。"
+                f"可用模式：{', '.join(sorted(valid_modes))}"
+            )
+        self._blend_mode[layer_id] = blend_mode
+
+    def layer_blend_mode(self, layer_id: str) -> str:
+        """返回指定图层的混合模式。"""
+        self._require_layer(layer_id)
+        return self._blend_mode[layer_id]
 
     def set_layer_scale_range(
         self,

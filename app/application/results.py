@@ -30,6 +30,9 @@ class LayerSnapshot:
     # 显示透明度：界面用于整体淡化图层，取值范围为零到一。
     opacity: float = 1.0
 
+    # 显示混合模式：控制图层像素与下方图层的合成方式，默认 normal（正常）。
+    blend_mode: str = "normal"
+
     # 显示比例范围：视图比例低于最小值或高于最大值时不绘制该图层。
     min_scale_percent: float | None = None
     max_scale_percent: float | None = None

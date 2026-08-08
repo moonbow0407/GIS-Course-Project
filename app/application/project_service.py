@@ -100,6 +100,10 @@ class ProjectService:
                     restored_layer.layer_id,
                     layer_reference.opacity,
                 )
+                document.set_layer_blend_mode(
+                    restored_layer.layer_id,
+                    layer_reference.blend_mode,
+                )
                 document.set_layer_scale_range(
                     restored_layer.layer_id,
                     layer_reference.min_scale_percent,
@@ -209,6 +213,7 @@ class ProjectService:
                         else None
                     ),
                     opacity=document.layer_opacity(layer.layer_id),
+                    blend_mode=document.layer_blend_mode(layer.layer_id),
                     min_scale_percent=document.layer_scale_range(layer.layer_id)[0],
                     max_scale_percent=document.layer_scale_range(layer.layer_id)[1],
                 )
