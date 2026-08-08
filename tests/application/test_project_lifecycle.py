@@ -3,15 +3,20 @@
 from pathlib import Path
 
 import fiona
+import numpy as np
 import pytest
+from affine import Affine
 from pyproj import CRS
 from shapely.geometry import Point
 
 from app.application.buffer_analysis import BufferRequest
 from app.application.errors import InvalidBufferParameters
 from app.application.gis_application import GisApplication
-from app.application.project_models import MapViewState
+from app.application.project_models import LayerReference, MapViewState
+from app.application.project_service import ProjectService
 from app.domain.feature import Feature
+from app.domain.raster_layer import RasterLayer
+from app.domain.symbology import RasterRendererType, RasterSymbology, symbology_to_dict
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
@@ -38,6 +43,47 @@ def make_application() -> GisApplication:
         AutoDataWriter(),
         project_store=JsonProjectStore(),
     )
+
+
+def test_restoring_lazy_raster_symbology_does_not_load_full_analysis_data() -> None:
+    """打开工程恢复栅格符号时不应因重建显示图像而读取完整像元。"""
+
+    def fail_if_loaded() -> tuple[np.ndarray, np.ndarray]:
+        raise AssertionError("恢复工程不应触发完整栅格分析数据加载")
+
+    symbology = RasterSymbology(
+        renderer_type=RasterRendererType.STRETCH,
+        color_scheme="terrain",
+    )
+    layer = RasterLayer.create_lazy(
+        name="dem",
+        image_data=np.zeros((2, 2, 4), dtype=np.uint8),
+        transform=Affine.identity(),
+        display_transform=Affine.identity(),
+        crs=CRS.from_epsg(4549),
+        bounds=(0, 0, 2, 2),
+        raster_shape=(10000, 10000),
+        band_count=1,
+        analysis_loader=fail_if_loaded,
+    )
+    reference = LayerReference(
+        layer_id="stable-dem",
+        name="工程中的 DEM",
+        source_path="dem.tif",
+        source_layer_name=None,
+        layer_kind="raster",
+        visible=True,
+        selected_feature_ids=(),
+        fingerprint=None,
+        symbology=symbology_to_dict(symbology),
+    )
+
+    restored = ProjectService._restore_layer_identity(layer, reference, Path("dem.tif"))
+
+    assert restored.layer_id == "stable-dem"
+    assert restored.name == "工程中的 DEM"
+    assert restored.symbology == symbology
+    assert restored.analysis_data_loaded is False
 
 
 def test_project_round_trip_restores_workspace_and_relative_source_path(

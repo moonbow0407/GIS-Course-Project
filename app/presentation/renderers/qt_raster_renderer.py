@@ -85,7 +85,8 @@ class QtRasterRenderer:
             if _needs_blend
             else QGraphicsPixmapItem(pixmap)
         )
-        transform = layer.transform
+        # 预览像元可能是降采样结果，使用其独立变换仍覆盖完整栅格范围。
+        transform = layer.display_transform or layer.transform
         # Qt 的 Y 轴向下，地图坐标的 Y 轴通常向上，因此对 Y 方向取反。
         item.setTransform(
             QTransform(

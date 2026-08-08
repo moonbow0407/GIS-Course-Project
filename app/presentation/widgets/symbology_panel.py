@@ -865,8 +865,7 @@ class SymbologyPanel(QWidget):
                 f"矢量 · {geometry_name} · {len(layer.features)} 个要素"
             )
             return
-        height: int = int(layer.raster_data.shape[1])
-        width: int = int(layer.raster_data.shape[2])
+        height, width = layer.raster_shape
         self._metadata.setText(
             f"栅格 · {layer.band_count} 个波段 · {width} × {height}"
         )

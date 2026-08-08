@@ -1472,16 +1472,9 @@ class GisApplication:
                 symbology=layer.symbology,
             )
         if isinstance(layer, RasterLayer) and isinstance(projected, RasterLayer):
-            restored_raster = RasterLayer.create(
+            restored_raster = projected.with_identity(
                 layer_id=layer.layer_id,
                 name=projected.name,
-                raster_data=projected.raster_data,
-                image_data=projected.image_data,
-                valid_mask=projected.valid_mask,
-                transform=projected.transform,
-                crs=projected.crs,
-                bounds=projected.bounds,
-                nodata=projected.nodata,
                 source_path=projected.source_path,
                 symbology=layer.symbology,
             )

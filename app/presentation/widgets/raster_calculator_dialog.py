@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -119,6 +118,7 @@ class RasterCalculatorDialog(QDialog):
         expr_group: QGroupBox = QGroupBox("表达式")
         expr_layout: QVBoxLayout = QVBoxLayout(expr_group)
         self._expr_edit: QTextEdit = QTextEdit()
+        self._expr_edit.setObjectName("rasterCalculatorExpression")
         self._expr_edit.setPlaceholderText(
             '例如: ("dem" > 200) & ("slope" < 15)\n'
             '      "dem" * 3.28084\n'

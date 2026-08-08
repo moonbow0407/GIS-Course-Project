@@ -20,7 +20,6 @@ from app.application.project_models import (
     ProjectManifest,
     SourceFingerprint,
 )
-from app.application.symbology_service import apply_raster_symbology
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
@@ -294,24 +293,20 @@ class ProjectService:
                 symbology=symbology,
             )
         if reference.layer_kind == "raster" and isinstance(layer, RasterLayer):
-            restored = RasterLayer.create(
-                name=reference.name,
-                raster_data=layer.raster_data,
-                image_data=layer.image_data,
-                valid_mask=layer.valid_mask,
-                transform=layer.transform,
-                crs=layer.crs,
-                bounds=layer.bounds,
-                nodata=layer.nodata,
-                source_path=source_path,
+            restored_raster_symbology = (
+                raster_symbology_from_dict(dict(reference.symbology))
+                if reference.symbology is not None
+                else None
+            )
+            restored = layer.with_identity(
                 layer_id=reference.layer_id,
+                name=reference.name,
+                source_path=source_path,
+                symbology=restored_raster_symbology,
             )
-            if reference.symbology is None:
-                return restored
-            return apply_raster_symbology(
-                restored,
-                raster_symbology_from_dict(dict(reference.symbology)),
-            )
+            # 大栅格首读只保留显示预览；工程恢复阶段仅恢复符号参数，
+            # 不应为重新生成全分辨率 RGBA 图像而强制加载完整分析像元。
+            return restored
         raise ProjectReadFailed(
             f"工程图层“{reference.name}”的数据类型与记录不一致。"
         )

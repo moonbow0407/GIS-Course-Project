@@ -27,12 +27,11 @@ from PySide6.QtWidgets import (
 from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
-from app.presentation.global_display_settings import sketch_color
-
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.raster_layer import RasterLayer
 from app.domain.vector_layer import Bounds, VectorLayer
+from app.presentation.global_display_settings import sketch_color
 from app.presentation.renderers.qt_raster_renderer import QtRasterRenderer
 from app.presentation.renderers.qt_vector_renderer import QtVectorRenderer
 
@@ -200,16 +199,10 @@ class MapCanvas(QGraphicsView):
             # 否则这里仍沿用空画布的 1000×700 场景变换，导致小范围经纬度点被巨幅放大。
             self.fitInView(map_scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
             self._reset_view_scale()
-        viewport_width: int = max(self.viewport().width(), 1)
-        viewport_height: int = max(self.viewport().height(), 1)
-        # 将屏幕像素尺寸换算为地图单位，使点符号保持稳定的视觉大小。
-        visible_rect: QRectF = self._visible_scene_rect()
-        map_units_per_pixel: float = max(
-            visible_rect.width() / viewport_width,
-            visible_rect.height() / viewport_height,
-        )
-        self._map_units_per_pixel = map_units_per_pixel
         # 快照按底到顶排列，枚举值可直接作为 Qt 图元的叠放顺序。
+        # 先扩展可平移场景，再测量当前视野，保证点符号尺寸和最终视口一致。
+        self._ensure_pan_area()
+        self._update_map_units_per_pixel()
         for z_value, current_layer in enumerate(layer_snapshot):
             if isinstance(current_layer.layer, RasterLayer):
                 raster_item = self._raster_renderer.render_layer(
@@ -221,10 +214,9 @@ class MapCanvas(QGraphicsView):
                     self._scene,
                     current_layer,
                     float(z_value),
-                    map_units_per_pixel,
+                    self._map_units_per_pixel,
                 )
                 self._layer_items[current_layer.layer_id] = vector_items
-        self._ensure_pan_area()
         self._build_snap_index(snapshot)
         self._last_snapshot = snapshot
         # 更新选中要素集合。
@@ -256,6 +248,9 @@ class MapCanvas(QGraphicsView):
         self._zoom_percent = view_state.zoom_percent
         self._ensure_pan_area()
         self.centerOn(QPointF(view_state.center_x, -view_state.center_y))
+        # 工程恢复会改变视图变换；必须按恢复后的视野重建点符号，
+        # 否则点符号仍沿用全图适配时的地图单位尺寸，可能铺满整个画布。
+        self._refresh_rendering_for_current_view()
         self._emit_view_scale()
 
     def set_pan_tool(self) -> None:
@@ -964,6 +959,7 @@ class MapCanvas(QGraphicsView):
         )
         self.fitInView(fit_rect, Qt.AspectRatioMode.KeepAspectRatio)
         self._ensure_pan_area()
+        self._refresh_rendering_for_current_view()
         self._reset_view_scale()
 
     def zoom_to_layer(self, bounds: Bounds) -> None:
@@ -984,6 +980,7 @@ class MapCanvas(QGraphicsView):
             layer_scale / full_scale * 100.0 if full_scale > 0.0 else 100.0
         )
         self._ensure_pan_area()
+        self._refresh_rendering_for_current_view()
         self._emit_view_scale()
 
     def zoom_to_feature(self, bounds: Bounds) -> None:
@@ -1037,6 +1034,7 @@ class MapCanvas(QGraphicsView):
             feature_scale / full_scale * 100.0 if full_scale > 0.0 else 100.0
         )
         self._ensure_pan_area()
+        self._refresh_rendering_for_current_view()
         self._emit_view_scale()
 
     # ── 缩放 ────────────────────────────────────────────────
@@ -1568,7 +1566,12 @@ class MapCanvas(QGraphicsView):
         old_size: QSize = event.oldSize()
         new_size: QSize = event.size()
         center_before: QPointF | None = None
-        if self._map_scene_rect is not None and old_size != new_size:
+        if (
+            self._map_scene_rect is not None
+            and old_size.width() > 0
+            and old_size.height() > 0
+            and old_size != new_size
+        ):
             center_before = self.mapToScene(
                 QPoint(old_size.width() // 2, old_size.height() // 2)
             )
@@ -1594,6 +1597,25 @@ class MapCanvas(QGraphicsView):
         top: int = max((self.viewport().height() - overlay_height) // 2, 0)
         self._empty_overlay.setGeometry(left, top, overlay_width, overlay_height)
         self._ensure_pan_area()
+
+    def _update_map_units_per_pixel(self) -> None:
+        """按当前视野更新屏幕像素对应的地图单位。"""
+        viewport_width: int = max(self.viewport().width(), 1)
+        viewport_height: int = max(self.viewport().height(), 1)
+        visible_rect: QRectF = self._visible_scene_rect()
+        if visible_rect.width() <= 0.0 or visible_rect.height() <= 0.0:
+            return
+        self._map_units_per_pixel = max(
+            visible_rect.width() / viewport_width,
+            visible_rect.height() / viewport_height,
+        )
+
+    def _refresh_rendering_for_current_view(self) -> None:
+        """在视图变换改变后按当前分辨率重建图元。"""
+        if self._last_snapshot is None:
+            self._update_map_units_per_pixel()
+            return
+        self.set_snapshot(self._last_snapshot)
 
     def _create_empty_overlay(self) -> QFrame:
         """创建不含测试图形的空地图操作引导面板。"""

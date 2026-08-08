@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QTreeWidget, QTreeWidgetIte
 from shapely.geometry import Point, Polygon
 
 from app.application.gis_application import GisApplication
+from app.application.project_models import MapViewState
 from app.domain.feature import Feature
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
@@ -116,6 +117,36 @@ def test_workspace_refresh_preserves_zoom_after_buffer_layer_is_added() -> None:
     # QGraphicsView 的滚动条使用整数像素，中心点允许最多约一个屏幕像素的舍入差。
     assert after_refresh.center_x == pytest.approx(before_refresh.center_x, abs=5.0)
     assert after_refresh.center_y == pytest.approx(before_refresh.center_y, abs=5.0)
+    window.close()
+
+
+def test_project_view_restoration_survives_initial_window_resize() -> None:
+    """工程在主窗口首次显示后，恢复的视图中心不能被初次布局覆盖。"""
+    qt_application: QApplication = QApplication.instance() or QApplication([])
+    crs: CRS = CRS.from_epsg(4326)
+    layer: VectorLayer = VectorLayer.create(
+        layer_id="startup-points",
+        name="启动点图层",
+        features=(
+            Feature(fid=1, geometry=Point(0, 0), attributes={}),
+            Feature(fid=2, geometry=Point(10, 10), attributes={}),
+        ),
+        crs=crs,
+    )
+    document: MapDocument = MapDocument()
+    document.add_layer(layer)
+    window: MainWindow = MainWindow()
+    window._application = GisApplication(AutoDataReader(), AutoDataWriter(), document)
+    window._refresh_workspace(MapViewState(center_x=5.0, center_y=5.0, zoom_percent=5000.0))
+    canvas = window._map_canvas
+    before_show = canvas.mapToScene(canvas.viewport().rect().center())
+
+    window.show()
+    qt_application.processEvents()
+    after_show = canvas.mapToScene(canvas.viewport().rect().center())
+
+    assert after_show.x() == pytest.approx(before_show.x(), abs=1.0)
+    assert after_show.y() == pytest.approx(before_show.y(), abs=1.0)
     window.close()
 
 

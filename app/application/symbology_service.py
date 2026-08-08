@@ -131,7 +131,13 @@ def apply_raster_symbology(layer: RasterLayer, symbology: RasterSymbology) -> Ra
         rgb = _apply_color_ramp(normalized, COLOR_RAMPS[symbology.color_scheme])
     alpha: NDArray[np.uint8] = np.where(layer.valid_mask, 255, 0).astype(np.uint8)
     image_data = np.ascontiguousarray(np.dstack((rgb, alpha)).astype(np.uint8))
-    return replace(layer, image_data=image_data, symbology=symbology)
+    # 符号化会使用完整分析数组生成全分辨率图像，因此恢复完整像元变换。
+    return replace(
+        layer,
+        image_data=image_data,
+        display_transform=layer.transform,
+        symbology=symbology,
+    )
 
 
 def sample_color_ramp(name: str, count: int) -> tuple[str, ...]:

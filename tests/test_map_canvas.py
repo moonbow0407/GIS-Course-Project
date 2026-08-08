@@ -16,6 +16,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QGraphicsPathItem
 from shapely.geometry import LineString, Point, Polygon
 
+from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.feature import Feature
 from app.domain.raster_layer import RasterLayer
@@ -297,6 +298,51 @@ def test_first_small_geographic_point_layer_uses_fitted_view_scale() -> None:
     ]
     assert max(item.path().boundingRect().width() for item in point_items) < (
         canvas._map_scene_rect.width() * 0.1
+    )
+
+
+def test_restoring_view_recalculates_point_symbol_scale() -> None:
+    """恢复工程视图后，点符号应按恢复后的屏幕比例重新计算尺寸。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    point_layer = VectorLayer.create(
+        layer_id="restored-points",
+        name="恢复视图点图层",
+        features=(
+            Feature(fid=1, geometry=Point(0, 0), attributes={}),
+            Feature(fid=2, geometry=Point(10, 10), attributes={}),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    snapshot = WorkspaceSnapshot(
+        layers=(LayerSnapshot(layer=point_layer, visible=True, selected_feature_ids=()),),
+        active_layer_id=point_layer.layer_id,
+        display_crs=point_layer.crs,
+    )
+    canvas.set_snapshot(snapshot)
+    canvas.restore_view_state(
+        MapViewState(center_x=5.0, center_y=5.0, zoom_percent=5000.0)
+    )
+    application.processEvents()
+
+    visible_rect = canvas._visible_scene_rect()
+    expected_units_per_pixel = max(
+        visible_rect.width() / canvas.viewport().width(),
+        visible_rect.height() / canvas.viewport().height(),
+    )
+    assert canvas._map_units_per_pixel == pytest.approx(
+        expected_units_per_pixel, rel=1e-4
+    )
+    point_items = [
+        item
+        for item in canvas.scene().items()
+        if isinstance(item, QGraphicsPathItem) and item.data(0) == point_layer.layer_id
+    ]
+    assert point_items
+    assert max(item.path().boundingRect().width() for item in point_items) < (
+        visible_rect.width() * 0.25
     )
 
 
