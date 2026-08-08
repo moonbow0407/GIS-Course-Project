@@ -88,20 +88,19 @@ def test_main_window_toggles_analysis_history_tab() -> None:
     window.close()
 
 
-def test_main_window_switches_workspace_tabs_without_stacking_docks() -> None:
-    """分析记录和符号系统应复用一个 dock 并可连续切换。"""
+def test_main_window_workspace_dock_has_only_analysis_tab() -> None:
+    """右侧工作面板应仅包含分析记录标签（符号系统已集成到显示设置）。"""
     qt_application: QApplication = QApplication.instance() or QApplication([])
     window = MainWindow()
     window.show()
 
     window._show_workspace_panel(window._ANALYSIS_TAB_INDEX)
-    window._show_workspace_panel(window._SYMBOLOGY_TAB_INDEX)
     qt_application.processEvents()
 
     assert window._panel_dock.isVisible()
     assert window._panel_dock.widget() is window._panel_tabs
-    assert window._panel_tabs.count() == 2
-    assert window._panel_tabs.currentIndex() == window._SYMBOLOGY_TAB_INDEX
+    assert window._panel_tabs.count() == 1
+    assert window._panel_tabs.currentIndex() == window._ANALYSIS_TAB_INDEX
     assert len(window.findChildren(QDockWidget)) == 2
     window.close()
 

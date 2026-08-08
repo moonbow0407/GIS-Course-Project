@@ -8,7 +8,7 @@ import numpy as np
 from affine import Affine
 from pyproj import CRS
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QCheckBox, QFrame, QLabel, QPushButton
 from shapely.geometry import LineString, Point
 
 from app.application.results import LayerSnapshot
@@ -56,7 +56,7 @@ def test_panel_follows_vector_layer_and_auto_requests_unique_values() -> None:
     assert panel._field.currentText() == "类型"
     assert requests[-1] == ("landuse", "类型", "standard")
     assert all(
-        button.text() not in {"应用", "确定"}
+        button.text() not in {"应用", "确定"} or button.isHidden()
         for button in panel.findChildren(QPushButton)
     )
 
@@ -107,7 +107,7 @@ def test_color_controls_show_visual_swatch_and_chinese_mapping() -> None:
     )
     color_item = panel._classes.item(0, 2)
 
-    assert not panel._simple_color.itemIcon(0).isNull()
+    assert not panel._simple_color_button.icon().isNull()
     assert not panel._scheme.itemIcon(0).isNull()
     assert color_item is not None
     assert not color_item.text().startswith("#")
@@ -183,14 +183,14 @@ def test_simple_color_control_follows_each_active_layers_actual_symbol() -> None
     panel.set_layer(
         LayerSnapshot(layer=purple_layer, visible=True, selected_feature_ids=())
     )
-    assert QColor(str(panel._simple_color.currentData())).name() == "#8b5cf6"
+    assert QColor(panel._current_simple_color).name() == "#8b5cf6"
 
     panel.set_layer(
         LayerSnapshot(layer=green_layer, visible=True, selected_feature_ids=())
     )
-    assert QColor(str(panel._simple_color.currentData())).name() == "#39a96b"
-    assert panel._simple_color.currentText() == "绿色"
-    assert not panel._simple_color.itemIcon(panel._simple_color.currentIndex()).isNull()
+    assert QColor(panel._current_simple_color).name() == "#39a96b"
+    assert not panel._simple_color_button.icon().isNull()
+    assert panel._simple_color_button.text() == "颜色 ▾"
     assert application is not None
 
 
@@ -259,14 +259,14 @@ def test_panel_uses_layer_header_preview_cards_and_auto_apply_status() -> None:
     classes = panel.findChild(QFrame, "symbologyClassesCard")
     preview = panel.findChild(QLabel, "symbologyPreview")
     metadata = panel.findChild(QLabel, "symbologyLayerMetadata")
-    status = panel.findChild(QLabel, "symbologyAutoApplyStatus")
+    auto_apply = panel.findChild(QCheckBox, "symbologyAutoApplyCheck")
 
     assert header is not None
     assert settings is not None
     assert classes is not None and not classes.isHidden()
     assert preview is not None and preview.pixmap() is not None
     assert metadata is not None and "矢量" in metadata.text() and "2 个要素" in metadata.text()
-    assert status is not None and "自动应用" in status.text()
+    assert auto_apply is not None and auto_apply.isChecked()
     assert panel._classes.verticalHeader().isHidden()
     assert panel._classes.alternatingRowColors()
     assert panel._scheme.iconSize().width() >= 80

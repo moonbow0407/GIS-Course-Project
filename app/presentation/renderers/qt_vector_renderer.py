@@ -16,6 +16,8 @@ from shapely.geometry import (
 )
 from shapely.geometry.base import BaseGeometry
 
+from app.presentation.global_display_settings import selection_color
+
 from app.application.results import LayerSnapshot
 from app.domain.feature import Feature
 from app.domain.layer_style import LayerStyle
@@ -216,8 +218,9 @@ class QtVectorRenderer:
             item: 光晕层 Qt 图元。
             geom_type: Shapely 几何类型名称。
         """
-        # 光晕色：荧光青，自然界中几乎不出现的颜色。
-        halo_color: QColor = QColor(0, 255, 255, 80)  # 半透明 cyan
+        # 光晕色：基于全局选择高亮的半透明派生色。
+        halo_color: QColor = QColor(selection_color())
+        halo_color.setAlpha(80)
         halo_width: float = 8.0
         halo_pen: QPen = QPen(halo_color, halo_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
         halo_pen.setCosmetic(True)
@@ -258,7 +261,7 @@ class QtVectorRenderer:
 
         # ── 选中高亮策略 ──
         # 主体色：荧光青，与光晕同色系但完全不透明。
-        highlight_color: QColor = QColor("#00E5FF")
+        highlight_color: QColor = selection_color()
 
         # 面要素：填充大幅加深，配醒目青绿色粗边界线。
         if geom_type in ("Polygon", "MultiPolygon"):
@@ -284,7 +287,7 @@ class QtVectorRenderer:
 
         # 点要素：亮青填充 + 深蓝描边，配合 2.5× 放大符号。
         else:
-            highlight_pen = QPen(QColor("#0055AA"), style.line_width + 2.0)
+            highlight_pen = QPen(selection_color().darker(200), style.line_width + 2.0)
             highlight_pen.setCosmetic(True)
             highlight_brush: QBrush = QBrush(highlight_color)
             item.setPen(highlight_pen)

@@ -84,7 +84,6 @@ from app.presentation.widgets.ribbon_bar import RibbonBar
 from app.presentation.widgets.startup_dialog import (
     save_recent_project,
 )
-from app.presentation.widgets.symbology_panel import SymbologyPanel
 from app.presentation.widgets.target_layer_dialog import (
     TargetLayerDialog,
     TargetLayerOption,
@@ -95,7 +94,6 @@ class MainWindow(QMainWindow):
     """组装功能区、图层面板、地图画布和状态栏的 GIS 工作台。"""
 
     _ANALYSIS_TAB_INDEX: int = 0
-    _SYMBOLOGY_TAB_INDEX: int = 1
 
     def __init__(self, project_path: Path | None = None) -> None:
         """创建 GIS 工作区，可选自动加载指定工程。
@@ -118,9 +116,7 @@ class MainWindow(QMainWindow):
         self._layer_panel: LayerPanel = LayerPanel()
         # 地图画布：显示矢量与栅格图层并提供基础导航能力。
         self._map_canvas: MapCanvas = MapCanvas()
-        # 三个工具面板共用一个右侧停靠容器，通过标签页切换，避免多个 dock
-        # 在同一侧堆叠后出现焦点丢失或点击落到不可见面板的问题。
-        self._symbology_panel: SymbologyPanel = SymbologyPanel()
+        # 右侧停靠面板：分析历史记录。
         self._analysis_history_panel: AnalysisHistoryPanel = AnalysisHistoryPanel()
         self._attribute_table_panel: AttributeTablePanel = AttributeTablePanel()
         self._attribute_table_dock: QDockWidget = QDockWidget("属性表", self)
@@ -243,7 +239,6 @@ class MainWindow(QMainWindow):
         self._panel_tabs.tabBar().setObjectName("workspacePanelTabBar")
         self._panel_tabs.tabBar().setMovable(False)
         self._panel_tabs.addTab(self._analysis_history_panel, "分析记录")
-        self._panel_tabs.addTab(self._symbology_panel, "符号系统")
         self._panel_dock.setObjectName("workspacePanelDock")
         self._panel_dock.setWidget(self._panel_tabs)
         self._panel_dock.setTitleBarWidget(self._create_panel_title_bar())
@@ -285,9 +280,6 @@ class MainWindow(QMainWindow):
         )
         self._layer_panel.layer_move_requested.connect(self._move_layer)
         self._layer_panel.selection_cleared.connect(self._clear_active_layer)
-        self._symbology_panel.symbology_changed.connect(self._apply_symbology)
-        self._symbology_panel.unique_requested.connect(self._apply_unique_symbology)
-        self._symbology_panel.graduated_requested.connect(self._apply_graduated_symbology)
         self._analysis_history_panel.clear_requested.connect(self._clear_analysis_history)
         self._map_canvas.coordinate_changed.connect(self._coordinate_label.setText)
         self._map_canvas.view_scale_changed.connect(self._scale_label.setText)
@@ -891,17 +883,6 @@ class MainWindow(QMainWindow):
             if layer.layer_id == snapshot.active_layer_id:
                 active_name = layer.name
         self._layer_label.setText(f"当前图层  {active_name}")
-        # 符号系统面板若已打开需跟随活动图层切换。
-        if self._workspace_panel_is_visible():
-            active_snapshot: LayerSnapshot | None = next(
-                (
-                    layer
-                    for layer in snapshot.layers
-                    if layer.layer_id == snapshot.active_layer_id
-                ),
-                None,
-            )
-            self._symbology_panel.set_layer(active_snapshot)
 
     def _clear_active_layer(self) -> None:
         """点击图层面板空白处时清除活动图层。"""
@@ -910,7 +891,6 @@ class MainWindow(QMainWindow):
         except ApplicationError:
             pass
         self._layer_label.setText("当前图层  无")
-        self._symbology_panel.set_layer(None)
 
     def _on_canvas_clicked(self) -> None:
         """点击地图画布时取消图层面板选中。"""
@@ -1118,13 +1098,13 @@ class MainWindow(QMainWindow):
         self._ready_label.setText(f"已缩放至图层  {layer_snapshot.name}")
 
     def _show_symbology(self, layer_id: str) -> None:
-        """激活图层并显示跟随活动图层的右侧符号系统面板。"""
+        """激活图层并打开含符号系统的显示设置对话框。"""
         try:
             self._application.set_active_layer(layer_id)
         except ApplicationError:
             return
-        self._show_workspace_panel(self._SYMBOLOGY_TAB_INDEX)
         self._refresh_workspace()
+        self._show_display_settings(active_tab=0)
 
     def _current_symbology(
         self, layer_id: str
@@ -2660,8 +2640,12 @@ class MainWindow(QMainWindow):
         """切换左侧图层管理面板的显示状态。"""
         self._layer_panel.setVisible(not self._layer_panel.isVisible())
 
-    def _show_display_settings(self) -> None:
-        """打开显示设置对话框，管理图层透明度、比例尺范围和地图书签。"""
+    def _show_display_settings(self, active_tab: int = 1) -> None:
+        """打开显示设置对话框，管理图层属性、符号系统、比例尺、全局显示和书签。
+
+        参数:
+            active_tab: 对话框打开时激活的标签页（0=符号系统，1=显示设置）。
+        """
         dialog: DisplaySettingsDialog = DisplaySettingsDialog(self)
         dialog.opacity_requested.connect(self._change_layer_opacity)
         dialog.blend_mode_requested.connect(self._change_layer_blend_mode)
@@ -2669,9 +2653,20 @@ class MainWindow(QMainWindow):
         dialog.bookmark_add_requested.connect(self._add_bookmark)
         dialog.bookmark_jump_requested.connect(self._jump_to_bookmark)
         dialog.bookmark_delete_requested.connect(self._delete_bookmark)
+        dialog.symbology_changed.connect(self._apply_symbology)
+        dialog.unique_requested.connect(self._apply_unique_symbology)
+        dialog.graduated_requested.connect(self._apply_graduated_symbology)
+        dialog.global_display_changed.connect(self._map_canvas.viewport().update)
         snapshot: WorkspaceSnapshot = self._application.snapshot()
         dialog.set_layers(snapshot.layers, snapshot.active_layer_id)
         dialog.set_bookmarks(self._application.bookmarks())
+        dialog._tabs.setCurrentIndex(active_tab)
+        # 居中于主窗口，避免贴靠屏幕顶端。
+        dialog.resize(520, 680)
+        parent_geo = self.frameGeometry()
+        dialog_geo = dialog.frameGeometry()
+        dialog_geo.moveCenter(parent_geo.center())
+        dialog.move(dialog_geo.topLeft())
         dialog.exec()
 
     def _change_layer_opacity(self, layer_id: str, opacity: float) -> None:
@@ -2841,16 +2836,6 @@ class MainWindow(QMainWindow):
         crs_name: str = self._format_crs(snapshot.display_crs)
         self._crs_label.setText(f"坐标系  {crs_name}")
         self._refresh_analysis_history(snapshot)
-        if self._workspace_panel_is_visible():
-            active_snapshot: LayerSnapshot | None = next(
-                (
-                    layer
-                    for layer in snapshot.layers
-                    if layer.layer_id == snapshot.active_layer_id
-                ),
-                None,
-            )
-            self._symbology_panel.set_layer(active_snapshot)
         if self._attribute_table_panel.isVisible():
             table_layer_snapshot: LayerSnapshot | None = next(
                 (
