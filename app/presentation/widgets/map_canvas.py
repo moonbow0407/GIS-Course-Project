@@ -1554,15 +1554,36 @@ class MapCanvas(QGraphicsView):
             self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
-        """在画布尺寸变化时保持空状态引导居中。
+        """画布尺寸变化时保持视图中心不变，避免偏移。
 
-        参数:
-            event: 包含画布新旧尺寸的 Qt 调整事件。
-
-        状态变化:
-            重新计算空状态面板的居中位置和自适应宽度。
+        说明:
+            Qt 的 centerOn 只是设置标记而非立即生效，在 resizeEvent
+            中调用会产生时间差导致画面跳动。这里改为直接操作滚动条，
+            像素级别的补偿即刻生效，不会产生中间帧。
         """
+        old_size: QSize = event.oldSize()
+        new_size: QSize = event.size()
+        center_before: QPointF | None = None
+        if self._map_scene_rect is not None and old_size != new_size:
+            center_before = self.mapToScene(
+                QPoint(old_size.width() // 2, old_size.height() // 2)
+            )
         super().resizeEvent(event)
+        if center_before is not None:
+            current_pos: QPoint = self.mapFromScene(center_before)
+            target_center: QPoint = QPoint(
+                new_size.width() // 2, new_size.height() // 2
+            )
+            dx: int = current_pos.x() - target_center.x()
+            dy: int = current_pos.y() - target_center.y()
+            if dx != 0:
+                self.horizontalScrollBar().setValue(
+                    self.horizontalScrollBar().value() + dx
+                )
+            if dy != 0:
+                self.verticalScrollBar().setValue(
+                    self.verticalScrollBar().value() + dy
+                )
         overlay_width: int = min(420, max(self.viewport().width() - 48, 220))
         overlay_height: int = 170
         left: int = max((self.viewport().width() - overlay_width) // 2, 0)

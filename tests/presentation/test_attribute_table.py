@@ -36,21 +36,19 @@ def _make_snapshot(field_count: int = 13) -> LayerSnapshot:
 
 
 def test_attribute_table_is_placed_below_map_and_has_visible_controls() -> None:
-    """属性表应位于主地图工作区下方，右侧工作面板标题按钮必须清晰可见。"""
+    """属性表应作为可停靠窗口浮动显示，右侧工作面板标题按钮必须清晰可见。"""
     application: QApplication = QApplication.instance() or QApplication([])
     window = MainWindow()
 
-    assert window._workspace_splitter.orientation() == Qt.Orientation.Vertical
-    assert window._workspace_splitter.widget(1) is window._attribute_table_panel
-    assert window._attribute_table_panel.isHidden()
+    assert window._attribute_table_dock.widget() is window._attribute_table_panel
+    assert window._attribute_table_dock.isHidden()
 
     window._attribute_table_panel.set_layer(_make_snapshot())
     window._show_attribute_table_panel()
     window.show()
     application.processEvents()
 
-    assert window._attribute_table_panel.isVisible()
-    assert window._workspace_splitter.sizes()[1] >= 200
+    assert window._attribute_table_dock.isVisible()
     title_buttons = {
         button.objectName(): button
         for button in window.findChildren(QToolButton)

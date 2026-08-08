@@ -102,7 +102,7 @@ def test_main_window_switches_workspace_tabs_without_stacking_docks() -> None:
     assert window._panel_dock.widget() is window._panel_tabs
     assert window._panel_tabs.count() == 2
     assert window._panel_tabs.currentIndex() == window._SYMBOLOGY_TAB_INDEX
-    assert len(window.findChildren(QDockWidget)) == 1
+    assert len(window.findChildren(QDockWidget)) == 2
     window.close()
 
 

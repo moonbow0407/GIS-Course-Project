@@ -119,9 +119,9 @@ class MainWindow(QMainWindow):
         self._symbology_panel: SymbologyPanel = SymbologyPanel()
         self._analysis_history_panel: AnalysisHistoryPanel = AnalysisHistoryPanel()
         self._attribute_table_panel: AttributeTablePanel = AttributeTablePanel()
+        self._attribute_table_dock: QDockWidget = QDockWidget("属性表", self)
         self._panel_tabs: QTabWidget = QTabWidget()
         self._panel_dock: QDockWidget = QDockWidget("工作面板", self)
-        self._workspace_splitter: QSplitter
         # 状态提示标签：显示就绪状态和最近一次操作反馈。
         self._ready_label: QLabel = QLabel("就绪")
         # 坐标标签：实时显示鼠标对应的地图坐标。
@@ -152,6 +152,7 @@ class MainWindow(QMainWindow):
         self._snapping_enabled: bool = False
         # 当前持续激活的查询入口，用于同步三种查询按钮的互斥高亮状态。
         self._active_query_action: str | None = None
+        self._active_digitize_action: str | None = None
         # 编辑几何悬浮工具栏。
         self._geom_edit_toolbar: GeometryEditToolbar = GeometryEditToolbar()
         self._geom_edit_toolbar.mode_changed.connect(self._on_geom_edit_mode)
@@ -197,20 +198,27 @@ class MainWindow(QMainWindow):
         map_workspace.setObjectName("mapWorkspaceSplitter")
         map_workspace.setChildrenCollapsible(False)
 
-        # 左侧图层面板独立占据整列；只有右侧地图区域参与地图/属性表上下分割，
-        # 避免属性表横向覆盖图层列表。
-        self._workspace_splitter = QSplitter(Qt.Orientation.Vertical)
-        self._workspace_splitter.setObjectName("mainWorkspaceSplitter")
-        self._workspace_splitter.setChildrenCollapsible(False)
-        self._workspace_splitter.addWidget(self._map_canvas)
-        self._workspace_splitter.addWidget(self._attribute_table_panel)
-        self._workspace_splitter.setSizes([720, 0])
-        self._workspace_splitter.setStretchFactor(0, 1)
-        self._workspace_splitter.setStretchFactor(1, 0)
-        self._attribute_table_panel.hide()
+        # 左侧图层面板独立占据整列；右侧地图区域使用可停靠属性表窗口，
+        # 不再固定嵌入到地图下方。
+        self._attribute_table_dock.setObjectName("attributeTableDock")
+        self._attribute_table_dock.setWidget(self._attribute_table_panel)
+        self._attribute_table_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
+        # 只允许拖动和浮动，禁用 dock 自带关闭按钮，避免误触；关闭仅用工具栏按钮。
+        self._attribute_table_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self._attribute_table_dock.setMinimumWidth(400)
+        self._attribute_table_dock.hide()
+        self._attribute_table_dock.topLevelChanged.connect(
+            self._on_attribute_table_top_level_changed
+        )
+        self.addDockWidget(
+            Qt.DockWidgetArea.BottomDockWidgetArea, self._attribute_table_dock
+        )
 
         map_workspace.addWidget(self._layer_panel)
-        map_workspace.addWidget(self._workspace_splitter)
+        map_workspace.addWidget(self._map_canvas)
         map_workspace.setSizes([300, 1380])
         map_workspace.setStretchFactor(0, 0)
         map_workspace.setStretchFactor(1, 1)
@@ -364,18 +372,23 @@ class MainWindow(QMainWindow):
         self._panel_dock.activateWindow()
 
     def _show_attribute_table_panel(self) -> None:
-        """显示地图下方属性表，并恢复一个可用的初始高度。"""
-        self._attribute_table_panel.show()
-        available_height: int = max(self._workspace_splitter.height(), 720)
-        table_height: int = min(320, max(220, available_height // 3))
-        self._workspace_splitter.setSizes(
-            [max(360, available_height - table_height), table_height]
-        )
+        """显示可停靠属性表窗口。"""
+        self._attribute_table_dock.show()
 
     def _hide_attribute_table(self) -> None:
-        """隐藏地图下方属性表，保留当前图层和选择状态。"""
-        self._attribute_table_panel.hide()
-        self._workspace_splitter.setSizes([self._workspace_splitter.height(), 0])
+        """隐藏可停靠属性表窗口，保留当前图层和选择状态。"""
+        self._attribute_table_dock.hide()
+
+    def _on_attribute_table_top_level_changed(self, floating: bool) -> None:
+        """属性表浮动/停靠时调整窗口尺寸和位置。"""
+        if floating:
+            self._attribute_table_dock.resize(680, 480)
+            # 浮动窗口居中于主窗口。
+            geo = self._attribute_table_dock.frameGeometry()
+            geo.moveCenter(self.mapToGlobal(self.rect().center()))
+            self._attribute_table_dock.move(geo.topLeft())
+            self._attribute_table_dock.raise_()
+            self._attribute_table_dock.activateWindow()
 
     def _workspace_panel_is_visible(self) -> bool:
         """返回统一工具面板是否处于可见状态。"""
@@ -861,8 +874,6 @@ class MainWindow(QMainWindow):
             pass
         self._layer_label.setText("当前图层  无")
         self._symbology_panel.set_layer(None)
-        self._attribute_table_panel.set_layer(None)
-        self._hide_attribute_table()
 
     def _on_canvas_clicked(self) -> None:
         """点击地图画布时取消图层面板选中。"""
@@ -1262,6 +1273,8 @@ class MainWindow(QMainWindow):
             feature_ids: 用户在表中选中的要素编号元组。
         """
         try:
+            # 恢复属性表对应图层为活动图层，确保图层面板重新选中该图层。
+            self._application.set_active_layer(layer_id)
             self._application.set_selection(layer_id, feature_ids)
         except ApplicationError:
             return
@@ -1356,13 +1369,27 @@ class MainWindow(QMainWindow):
         for query_action in ("point_query", "rectangle_query", "attribute_query"):
             self._ribbon.set_action_checked(query_action, query_action == action_id)
 
+    def _set_active_digitize_action(self, action_id: str | None) -> None:
+        """同步当前数字化模式和三个功能区按钮的互斥高亮状态。"""
+        self._active_digitize_action = action_id
+        for digitize_action in ("add_point_feature", "add_line_feature", "add_polygon_feature"):
+            self._ribbon.set_action_checked(
+                digitize_action, digitize_action == action_id
+            )
+
     def _on_map_tool_changed(self, tool_id: str) -> None:
-        """地图工具变化时同步查询按钮，Esc 和其他工具切换也能取消高亮。"""
+        """地图工具变化时同步查询/数字化按钮，Esc 和其他工具切换也能取消高亮。"""
         query_action: str | None = {
             "point_query": "point_query",
             "rectangle_query": "rectangle_query",
         }.get(tool_id)
         self._set_active_query_action(query_action)
+        digitize_action: str | None = {
+            "digitize_point": "add_point_feature",
+            "digitize_line": "add_line_feature",
+            "digitize_polygon": "add_polygon_feature",
+        }.get(tool_id)
+        self._set_active_digitize_action(digitize_action)
 
     def _exit_query_mode(self) -> None:
         """退出当前查询模式并恢复默认平移工具。"""
