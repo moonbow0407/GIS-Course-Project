@@ -1614,7 +1614,7 @@ class MapCanvas(QGraphicsView):
         )
         queryable_ids: set[str] = set(queryable_layer_ids)
         for layer in self._last_snapshot.layers:
-            layer_visible: bool = layer.layer_id in queryable_ids
+            layer_visible: bool = layer.visible and layer.layer_id in queryable_ids
             items: list[QGraphicsItem] | None = self._layer_items.get(layer.layer_id)
             if not items:
                 continue
