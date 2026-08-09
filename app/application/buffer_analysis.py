@@ -118,6 +118,9 @@ def buffer_features(
     """按输入点、线或面图层的专用参数计算缓冲区并保留属性。"""
     resolved_distance: float = request.distance if distance is None else distance
     _validate_geometry_parameters(layer, request, resolved_distance)
+    family: GeometryFamily | None = layer.geometry_family
+    if family is None:
+        raise InvalidBufferParameters(f"输入图层“{layer.name}”无法确定几何类型。")
     buffered_features: list[Feature] = []
     feature: Feature
     for feature in layer.features:
@@ -126,7 +129,7 @@ def buffer_features(
         try:
             buffered_geometry: BaseGeometry = _buffer_geometry(
                 feature.geometry,
-                layer.geometry_family,
+                family,
                 request,
                 resolved_distance,
             )
@@ -254,7 +257,9 @@ def _validate_geometry_parameters(
     distance: float,
 ) -> None:
     """校验只有特定几何类别才支持的缓冲区参数。"""
-    family: GeometryFamily = layer.geometry_family
+    family: GeometryFamily | None = layer.geometry_family
+    if family is None:
+        raise InvalidBufferParameters(f"输入图层“{layer.name}”无法确定几何类型。")
     if family is GeometryFamily.MIXED:
         raise InvalidBufferParameters(
             f"输入图层“{layer.name}”包含点、线或面混合几何，无法自动确定缓冲区参数。"

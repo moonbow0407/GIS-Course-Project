@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from affine import Affine
 from numpy.typing import NDArray
 
 # ---------------------------------------------------------------------------
@@ -103,7 +104,7 @@ class RasterCalculatorRequest:
 
 
 def validate_band_alignment(
-    transforms: tuple[object, ...],
+    transforms: tuple[Affine, ...],
     crss: tuple[object | None, ...],
     shapes: tuple[tuple[int, int], ...],
     layer_names: tuple[str, ...],

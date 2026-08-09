@@ -8,7 +8,6 @@ from typing import Any, Literal, cast
 
 import geopandas as gpd
 import pandas as pd
-from pyproj import CRS
 from shapely.geometry.base import BaseGeometry
 
 from app.application.errors import (
@@ -16,7 +15,7 @@ from app.application.errors import (
     InvalidOverlayParameters,
     OverlayAnalysisFailed,
 )
-from app.domain.feature import AttributeValue, Feature, FeatureId
+from app.domain.feature import AttributeValue, Feature
 from app.domain.layer_style import GeometryFamily
 from app.domain.vector_layer import VectorLayer
 
@@ -202,33 +201,41 @@ def _validate_geometry_compatibility(
     异常:
         InvalidOverlayParameters: 几何类型不兼容时抛出。
     """
+    input_family_name: str = _geometry_family_name(input_layer)
+    overlay_family_name: str = _geometry_family_name(overlay_layer)
     if operation in _GEOMETRIC_OVERLAY_OPS:
         if input_layer.geometry_family != GeometryFamily.POLYGON:
             raise InvalidOverlayParameters(
-                f"几何叠加要求主输入图层为面图层，当前为“{input_layer.geometry_family.value}”。"
+                f"几何叠加要求主输入图层为面图层，当前为“{input_family_name}”。"
             )
         if overlay_layer.geometry_family != GeometryFamily.POLYGON:
             raise InvalidOverlayParameters(
-                f"几何叠加要求叠加图层为面图层，当前为“{overlay_layer.geometry_family.value}”。"
+                f"几何叠加要求叠加图层为面图层，当前为“{overlay_family_name}”。"
             )
     elif operation == "point_in_polygon":
         if input_layer.geometry_family != GeometryFamily.POINT:
             raise InvalidOverlayParameters(
-                f"点面叠置要求输入图层为点图层，当前为“{input_layer.geometry_family.value}”。"
+                f"点面叠置要求输入图层为点图层，当前为“{input_family_name}”。"
             )
         if overlay_layer.geometry_family != GeometryFamily.POLYGON:
             raise InvalidOverlayParameters(
-                f"点面叠置要求叠加图层为面图层，当前为“{overlay_layer.geometry_family.value}”。"
+                f"点面叠置要求叠加图层为面图层，当前为“{overlay_family_name}”。"
             )
     elif operation == "line_in_polygon":
         if input_layer.geometry_family != GeometryFamily.LINE:
             raise InvalidOverlayParameters(
-                f"线面叠置要求输入图层为线图层，当前为“{input_layer.geometry_family.value}”。"
+                f"线面叠置要求输入图层为线图层，当前为“{input_family_name}”。"
             )
         if overlay_layer.geometry_family != GeometryFamily.POLYGON:
             raise InvalidOverlayParameters(
-                f"线面叠置要求叠加图层为面图层，当前为“{overlay_layer.geometry_family.value}”。"
+                f"线面叠置要求叠加图层为面图层，当前为“{overlay_family_name}”。"
             )
+
+
+def _geometry_family_name(layer: VectorLayer) -> str:
+    """返回图层几何类别名称，无法确定时使用明确的占位文本。"""
+    family = layer.geometry_family
+    return family.value if family is not None else "未知"
 
 
 # ---------------------------------------------------------------------------

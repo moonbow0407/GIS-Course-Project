@@ -803,9 +803,12 @@ class MainWindow(QMainWindow):
 
         self._push_undo(
             description=f"新建空白图层“{name}”",
-            undo_action=lambda layer_id=result.layer_id: self._application.remove_layer(layer_id),
-            redo_action=lambda n=name, gf=geometry_family, c=crs: self._application.create_empty_layer(
-                name=n, geometry_family=gf, crs=c,
+            undo_action=partial(self._application.remove_layer, result.layer_id),
+            redo_action=partial(
+                self._application.create_empty_layer,
+                name=name,
+                geometry_family=geometry_family,
+                crs=crs,
             ),
         )
         self._refresh_workspace()
@@ -1450,6 +1453,13 @@ class MainWindow(QMainWindow):
             GeometryFamily.POLYGON: ("polygon", "面"),
         }
         family = layer_snapshot.layer.geometry_family
+        if family is None:
+            QMessageBox.information(
+                self,
+                "新增要素",
+                "当前图层无法确定几何类型，请先补充有效空间要素。",
+            )
+            return
         mode_label: tuple[str, str] | None = mode_by_family.get(family)
         if mode_label is None:
             QMessageBox.information(

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
+    QWidget,
 )
 
 from app.application.raster_calculator import (
@@ -34,13 +35,13 @@ class RasterCalculatorDialog(QDialog):
     def __init__(
         self,
         layers: tuple[LayerSnapshot, ...],
-        parent: QDialog | None = None,
+        parent: QWidget | None = None,
     ) -> None:
         """初始化栅格计算器对话框。
 
         参数:
             layers: 当前工作区的所有图层快照。
-            parent: 父对话框。
+            parent: 父控件。
 
         异常:
             ValueError: 当前工作区没有栅格图层。

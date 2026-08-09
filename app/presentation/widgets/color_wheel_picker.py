@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from typing import ClassVar
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import (
@@ -80,11 +79,11 @@ def _load_recent_colors() -> list[str]:
     """从 QSettings 加载最近使用的颜色列表。"""
     settings = QSettings()
     settings.beginGroup(_QSETTINGS_GROUP)
-    raw: str = settings.value(_QSETTINGS_KEY, "")
+    raw_value: object = settings.value(_QSETTINGS_KEY, "")
     settings.endGroup()
-    if not raw or not isinstance(raw, str):
+    if not isinstance(raw_value, str) or not raw_value:
         return []
-    return [c.strip() for c in raw.split(",") if QColor(c.strip()).isValid()]
+    return [c.strip() for c in raw_value.split(",") if QColor(c.strip()).isValid()]
 
 
 def _save_recent_colors(colors: list[str]) -> None:

@@ -30,13 +30,12 @@ from shapely.geometry import (
 )
 from shapely.geometry.base import BaseGeometry
 
-from app.presentation.global_display_settings import selection_color
-
 from app.application.results import LayerSnapshot
 from app.domain.feature import Feature
 from app.domain.labeling import LabelClass, LabelPlacement
 from app.domain.layer_style import LayerStyle
 from app.domain.vector_layer import VectorLayer
+from app.presentation.global_display_settings import selection_color
 
 def _simplify_polygon_exteriors_only(
     geometry: BaseGeometry,
@@ -89,7 +88,7 @@ class _BlendPathItem(QGraphicsPathItem):
     def paint(
         self,
         painter: QPainter,
-        option: QGraphicsItem,
+        option: QStyleOptionGraphicsItem,
         widget: QWidget | None = None,
     ) -> None:
         painter.save()
@@ -296,11 +295,11 @@ class QtVectorRenderer:
         """
         if not isinstance(snapshot.layer, VectorLayer):
             raise TypeError("矢量渲染器只能绘制矢量图层。")
-        composition_mode = _BLEND_MODE_MAP.get(snapshot.blend_mode)
-        _needs_blend = (
-            composition_mode is not None
-            and composition_mode != QPainter.CompositionMode.CompositionMode_SourceOver
+        composition_mode = _BLEND_MODE_MAP.get(
+            snapshot.blend_mode,
+            QPainter.CompositionMode.CompositionMode_SourceOver,
         )
+        _needs_blend = composition_mode != QPainter.CompositionMode.CompositionMode_SourceOver
         items: list[QGraphicsItem] = []
         feature: Feature
         for feature in snapshot.layer.features:

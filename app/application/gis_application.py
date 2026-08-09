@@ -7,6 +7,7 @@ from time import perf_counter
 from uuid import uuid4
 
 import numpy as np
+from affine import Affine
 from pyproj import CRS
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
@@ -20,11 +21,6 @@ from app.application.buffer_analysis import (
     reproject_features,
     reproject_vector_layer,
     resolve_buffer_analysis_crs,
-)
-from app.application.overlay_analysis import (
-    OverlayRequest,
-    operation_label,
-    overlay_features,
 )
 from app.application.database_models import (
     DatabaseConnectionConfig,
@@ -53,12 +49,10 @@ from app.application.errors import (
     UnsupportedBufferInput,
     UnsupportedOverlayInput,
 )
-from app.application.raster_calculator import (
-    BandMapping,
-    RasterCalculatorRequest,
-    compute_raster_expression,
-    generate_display_image,
-    validate_band_alignment,
+from app.application.overlay_analysis import (
+    OverlayRequest,
+    operation_label,
+    overlay_features,
 )
 from app.application.ports import DataReader, DataWriter, ProjectStore
 from app.application.project_models import (
@@ -68,6 +62,12 @@ from app.application.project_models import (
     MapViewState,
 )
 from app.application.project_service import ProjectService
+from app.application.raster_calculator import (
+    RasterCalculatorRequest,
+    compute_raster_expression,
+    generate_display_image,
+    validate_band_alignment,
+)
 from app.application.results import (
     AnalysisResultPersisted,
     BufferAnalysisResult,
@@ -1116,8 +1116,13 @@ class GisApplication:
 
     def clear_selection(self) -> SelectionResult:
         """清除全部图层选择并返回空选择结果。"""
+        had_selection: bool = any(
+            self._document.selected_feature_ids(layer.layer_id)
+            for layer in self._document.layers
+        )
         self._document.clear_selection()
-        self._modified = True
+        if had_selection:
+            self._modified = True
         return SelectionResult(features=(), snapshot=self.snapshot())
 
     def new_project(self) -> WorkspaceSnapshot:
@@ -1337,7 +1342,7 @@ class GisApplication:
             algorithm_id="buffer",
             input_layer_ids=(input_layer.layer_id,),
             parameters={
-                "geometry_family": input_layer.geometry_family.value,
+                "geometry_family": self._geometry_family_value(input_layer),
                 "distance": request.distance,
                 "distance_unit": request.distance_unit,
                 "distance_meters": distance_to_meters(
@@ -1633,7 +1638,7 @@ class GisApplication:
             None,
         )
         if isinstance(input_layer, VectorLayer):
-            parameters["geometry_family"] = input_layer.geometry_family.value
+            parameters["geometry_family"] = self._geometry_family_value(input_layer)
         run: AnalysisRun = self._create_analysis_run(
             algorithm_id="buffer",
             input_layer_ids=(request.input_layer_id,),
@@ -1847,7 +1852,7 @@ class GisApplication:
             None,
         )
         if isinstance(input_layer, VectorLayer):
-            parameters["input_geometry_family"] = input_layer.geometry_family.value
+            parameters["input_geometry_family"] = self._geometry_family_value(input_layer)
         overlay_ref: SpatialLayer | None = next(
             (
                 layer
@@ -1857,7 +1862,7 @@ class GisApplication:
             None,
         )
         if isinstance(overlay_ref, VectorLayer):
-            parameters["overlay_geometry_family"] = overlay_ref.geometry_family.value
+            parameters["overlay_geometry_family"] = self._geometry_family_value(overlay_ref)
         run: AnalysisRun = self._create_analysis_run(
             algorithm_id="overlay",
             input_layer_ids=(request.input_layer_id, request.overlay_layer_id),
@@ -1911,7 +1916,7 @@ class GisApplication:
 
         # 1. 查找所有引用的栅格图层并提取数据。
         band_arrays: dict[str, np.ndarray] = {}
-        transforms: list[object] = []
+        transforms: list[Affine] = []
         crss: list[object | None] = []
         shapes: list[tuple[int, int]] = []
         layer_names: list[str] = []
@@ -2065,6 +2070,12 @@ class GisApplication:
         )
         self._analysis_runs = self._analysis_runs + (run,)
         self._modified = True
+
+    @staticmethod
+    def _geometry_family_value(layer: VectorLayer) -> str:
+        """返回图层几何类别的持久化名称，无法确定时保留明确占位值。"""
+        family = layer.geometry_family
+        return family.value if family is not None else "unknown"
 
     @staticmethod
     def _buffer_request_parameters(request: BufferRequest) -> dict[str, object]:

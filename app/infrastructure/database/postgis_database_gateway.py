@@ -187,6 +187,9 @@ class PostgisDatabaseGateway:
         """将图层及全部要素放入一个原子事务。"""
         if not layer.features:
             raise DatabaseImportFailed("不能导入不包含要素的矢量图层。")
+        family = layer.geometry_family
+        if family is None:
+            raise DatabaseImportFailed("不能导入无法确定几何类型的矢量图层。")
 
         self.ensure_schema()
         srid: int = self._resolve_srid(layer.crs)
@@ -211,7 +214,7 @@ class PostgisDatabaseGateway:
                         ),
                         {
                             "name": layer.name,
-                            "geometry_type": layer.geometry_family.value,
+                            "geometry_type": family.value,
                             "crs": crs_text,
                             "srid": srid,
                         },
@@ -248,7 +251,7 @@ class PostgisDatabaseGateway:
         return DatabaseLayerInfo(
             layer_id=database_layer_id,
             name=layer.name,
-            geometry_type=layer.geometry_family.value,
+            geometry_type=family.value,
             crs=crs_text,
             srid=srid,
             feature_count=len(layer.features),

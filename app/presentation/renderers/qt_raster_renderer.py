@@ -1,8 +1,15 @@
 """将栅格领域模型转换为 Qt 图元。"""
 
+from typing import cast
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QPainter, QPixmap, QTransform
-from PySide6.QtWidgets import QGraphicsItem, QGraphicsPixmapItem, QGraphicsScene, QWidget
+from PySide6.QtWidgets import (
+    QGraphicsPixmapItem,
+    QGraphicsScene,
+    QStyleOptionGraphicsItem,
+    QWidget,
+)
 
 from app.application.results import LayerSnapshot
 from app.domain.raster_layer import RasterLayer
@@ -28,12 +35,12 @@ class _BlendPixmapItem(QGraphicsPixmapItem):
     def paint(
         self,
         painter: QPainter,
-        option: QGraphicsItem,
+        option: QStyleOptionGraphicsItem,
         widget: QWidget | None = None,
     ) -> None:
         painter.save()
         painter.setCompositionMode(self._composition_mode)
-        super().paint(painter, option, widget)
+        super().paint(painter, option, cast(QWidget, widget))
         painter.restore()
 
 
@@ -74,11 +81,11 @@ class QtRasterRenderer:
             bytes_per_line,
             QImage.Format.Format_RGBA8888,
         ).copy()
-        composition_mode = _BLEND_MODE_MAP.get(snapshot.blend_mode)
-        _needs_blend = (
-            composition_mode is not None
-            and composition_mode != QPainter.CompositionMode.CompositionMode_SourceOver
+        composition_mode = _BLEND_MODE_MAP.get(
+            snapshot.blend_mode,
+            QPainter.CompositionMode.CompositionMode_SourceOver,
         )
+        _needs_blend = composition_mode != QPainter.CompositionMode.CompositionMode_SourceOver
         pixmap = QPixmap.fromImage(image)
         item: QGraphicsPixmapItem = (
             _BlendPixmapItem(pixmap, composition_mode)

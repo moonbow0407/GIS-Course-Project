@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
 from app.domain.layer_style import GeometryFamily
 from app.presentation.widgets.crs_select_widget import CrsSelectWidget
 
-
 _GEOMETRY_ITEMS: tuple[tuple[str, GeometryFamily], ...] = (
     ("点 (Point)", GeometryFamily.POINT),
     ("线 (Polyline)", GeometryFamily.LINE),

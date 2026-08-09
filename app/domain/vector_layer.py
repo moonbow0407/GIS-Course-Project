@@ -90,15 +90,17 @@ class VectorLayer:
         """
         # 显式指定几何类型时允许空图层（新建空白图层场景）。
         if self.geometry_family is not None and not self.features:
-            bounds: Bounds = (0.0, 0.0, 0.0, 0.0)
-            object.__setattr__(self, "bounds", bounds)
-            default_style: LayerStyle = LayerStyle.for_geometry_family(self.geometry_family)
-            resolved_symbology: VectorSymbology = self.symbology or VectorSymbology(
-                renderer_type=VectorRendererType.SIMPLE,
-                base_symbol=default_style,
+            empty_bounds: Bounds = (0.0, 0.0, 0.0, 0.0)
+            object.__setattr__(self, "bounds", empty_bounds)
+            empty_default_style: LayerStyle = LayerStyle.for_geometry_family(
+                self.geometry_family
             )
-            object.__setattr__(self, "symbology", resolved_symbology)
-            object.__setattr__(self, "style", resolved_symbology.base_symbol)
+            empty_resolved_symbology: VectorSymbology = self.symbology or VectorSymbology(
+                renderer_type=VectorRendererType.SIMPLE,
+                base_symbol=empty_default_style,
+            )
+            object.__setattr__(self, "symbology", empty_resolved_symbology)
+            object.__setattr__(self, "style", empty_resolved_symbology.base_symbol)
             return
 
         if not self.features:
@@ -134,7 +136,7 @@ class VectorLayer:
         geometry_family: GeometryFamily = (
             next(iter(families)) if len(families) == 1 else GeometryFamily.MIXED
         )
-        bounds: Bounds = (
+        computed_bounds: Bounds = (
             min(minimum_x_values),
             min(minimum_y_values),
             max(maximum_x_values),
@@ -142,14 +144,14 @@ class VectorLayer:
         )
         # frozen 数据类的派生字段只能在初始化阶段通过底层接口写入。
         object.__setattr__(self, "geometry_family", geometry_family)
-        object.__setattr__(self, "bounds", bounds)
-        default_style: LayerStyle = LayerStyle.for_geometry_family(geometry_family)
-        resolved_symbology: VectorSymbology = self.symbology or VectorSymbology(
+        object.__setattr__(self, "bounds", computed_bounds)
+        computed_default_style: LayerStyle = LayerStyle.for_geometry_family(geometry_family)
+        computed_resolved_symbology: VectorSymbology = self.symbology or VectorSymbology(
             renderer_type=VectorRendererType.SIMPLE,
-            base_symbol=default_style,
+            base_symbol=computed_default_style,
         )
-        object.__setattr__(self, "symbology", resolved_symbology)
-        object.__setattr__(self, "style", resolved_symbology.base_symbol)
+        object.__setattr__(self, "symbology", computed_resolved_symbology)
+        object.__setattr__(self, "style", computed_resolved_symbology.base_symbol)
 
     @classmethod
     def create(

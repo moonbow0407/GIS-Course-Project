@@ -22,12 +22,12 @@ from PySide6.QtWidgets import (
 
 from app.application.errors import ApplicationError
 from app.application.overlay_analysis import (
+    _GEOMETRIC_OVERLAY_OPS,
+    _SPATIAL_JOIN_OPS,
     OverlayOperationName,
     OverlayRequest,
     SJoinHowName,
     SJoinPredicateName,
-    _GEOMETRIC_OVERLAY_OPS,
-    _SPATIAL_JOIN_OPS,
     operation_label,
 )
 from app.application.results import LayerSnapshot
@@ -308,27 +308,27 @@ class OverlayAnalysisDialog(QDialog):
 
         if operation in _GEOMETRIC_OVERLAY_OPS:
             input_candidates = [
-                l for l in self._vector_layers
-                if l.geometry_family == GeometryFamily.POLYGON
+                layer for layer in self._vector_layers
+                if layer.geometry_family == GeometryFamily.POLYGON
             ]
             overlay_candidates = input_candidates
         elif operation == "point_in_polygon":
             input_candidates = [
-                l for l in self._vector_layers
-                if l.geometry_family == GeometryFamily.POINT
+                layer for layer in self._vector_layers
+                if layer.geometry_family == GeometryFamily.POINT
             ]
             overlay_candidates = [
-                l for l in self._vector_layers
-                if l.geometry_family == GeometryFamily.POLYGON
+                layer for layer in self._vector_layers
+                if layer.geometry_family == GeometryFamily.POLYGON
             ]
         elif operation == "line_in_polygon":
             input_candidates = [
-                l for l in self._vector_layers
-                if l.geometry_family == GeometryFamily.LINE
+                layer for layer in self._vector_layers
+                if layer.geometry_family == GeometryFamily.LINE
             ]
             overlay_candidates = [
-                l for l in self._vector_layers
-                if l.geometry_family == GeometryFamily.POLYGON
+                layer for layer in self._vector_layers
+                if layer.geometry_family == GeometryFamily.POLYGON
             ]
         else:
             input_candidates = list(self._vector_layers)
@@ -343,7 +343,7 @@ class OverlayAnalysisDialog(QDialog):
             )
             self._input_layer_combo.addItem(f"{layer.name}  [{geom_label}]", layer.layer_id)
         if prev_input_id and any(
-            str(l.layer_id) == prev_input_id for l in input_candidates
+            str(layer.layer_id) == prev_input_id for layer in input_candidates
         ):
             for i in range(self._input_layer_combo.count()):
                 if str(self._input_layer_combo.itemData(i)) == prev_input_id:
@@ -359,7 +359,7 @@ class OverlayAnalysisDialog(QDialog):
             )
             self._overlay_layer_combo.addItem(f"{layer.name}  [{geom_label}]", layer.layer_id)
         if prev_overlay_id and any(
-            str(l.layer_id) == prev_overlay_id for l in overlay_candidates
+            str(layer.layer_id) == prev_overlay_id for layer in overlay_candidates
         ):
             for i in range(self._overlay_layer_combo.count()):
                 if str(self._overlay_layer_combo.itemData(i)) == prev_overlay_id:

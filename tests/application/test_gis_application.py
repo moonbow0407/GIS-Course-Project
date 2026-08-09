@@ -180,6 +180,18 @@ def test_clear_selection_returns_empty_result() -> None:
     assert selection.snapshot.selection_count == 0
 
 
+def test_clear_selection_without_selection_does_not_mark_project_modified() -> None:
+    """重复清空空选择集不应把未修改工程标记为脏。"""
+    reader: InMemoryVectorReader = InMemoryVectorReader(make_layer("points"))
+    application: GisApplication = GisApplication(data_reader=reader)
+    application.open_vector(Path("points.geojson"))
+    application._modified = False
+
+    application.clear_selection()
+
+    assert application.is_modified is False
+
+
 def test_export_active_vector_uses_selection_when_present(tmp_path: Path) -> None:
     """活动矢量图层存在选择集时应只把选中要素交给写入端口。"""
     reader: InMemoryVectorReader = InMemoryVectorReader(make_layer("points"))

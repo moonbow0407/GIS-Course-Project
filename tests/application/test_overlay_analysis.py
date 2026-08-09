@@ -7,18 +7,15 @@ from shapely.geometry import LineString, Point, Polygon
 from app.application.errors import (
     EmptyOverlayResult,
     InvalidOverlayParameters,
-    OverlayAnalysisFailed,
 )
 from app.application.overlay_analysis import (
     OverlayRequest,
-    _GEOMETRIC_OVERLAY_OPS,
     _validate_geometry_compatibility,
     operation_label,
     overlay_features,
 )
 from app.domain.feature import Feature
 from app.domain.vector_layer import VectorLayer
-
 
 # ---------------------------------------------------------------------------
 # 测试辅助：构造图层

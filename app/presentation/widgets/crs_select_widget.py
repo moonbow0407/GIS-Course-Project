@@ -2,7 +2,7 @@
 
 from pyproj import CRS
 from pyproj.exceptions import CRSError
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,

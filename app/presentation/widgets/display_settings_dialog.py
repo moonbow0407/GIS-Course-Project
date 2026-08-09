@@ -9,7 +9,6 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
-    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -23,9 +22,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import app.presentation.global_display_settings as global_display_settings
 from app.application.project_models import MapBookmark
 from app.application.results import LayerSnapshot
-import app.presentation.global_display_settings as global_display_settings
 from app.presentation.widgets.color_wheel_picker import ColorWheelPicker
 from app.presentation.widgets.symbology_panel import SymbologyPanel
 

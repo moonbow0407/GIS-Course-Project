@@ -34,8 +34,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.presentation.widgets.color_wheel_picker import ColorWheelPicker
-
 from app.application.results import LayerSnapshot
 from app.domain.layer_style import GeometryFamily, LayerStyle
 from app.domain.raster_layer import RasterLayer
@@ -51,6 +49,8 @@ from app.domain.symbology import (
     VectorSymbology,
 )
 from app.domain.vector_layer import VectorLayer
+from app.presentation.widgets.color_wheel_picker import ColorWheelPicker
+
 
 class SymbologyPanel(QWidget):
     """编辑活动图层符号并通过信号请求自动应用。"""
@@ -384,12 +384,13 @@ class SymbologyPanel(QWidget):
         """按当前图层类型自动生成或应用主符号。"""
         if self._updating or self._snapshot is None:
             return
+        snapshot: LayerSnapshot = self._snapshot
         self._update_control_visibility()
-        if isinstance(self._snapshot.layer, RasterLayer):
+        if isinstance(snapshot.layer, RasterLayer):
             self._emit_raster()
             return
         renderer = VectorRendererType(str(self._renderer.currentData()))
-        layer = self._snapshot.layer
+        layer = snapshot.layer
         if isinstance(layer, VectorLayer) and renderer is not VectorRendererType.SIMPLE:
             all_fields = sorted(
                 {name for feature in layer.features for name in feature.attributes}
@@ -434,13 +435,13 @@ class SymbologyPanel(QWidget):
         if renderer is VectorRendererType.UNIQUE:
             self._emit_or_defer(
                 lambda: self.unique_requested.emit(
-                    self._snapshot.layer_id, field_name, scheme
+                    snapshot.layer_id, field_name, scheme
                 )
             )
         else:
             self._emit_or_defer(
                 lambda: self.graduated_requested.emit(
-                    self._snapshot.layer_id,
+                    snapshot.layer_id,
                     field_name,
                     scheme,
                     str(self._method.currentData()),
@@ -855,12 +856,16 @@ class SymbologyPanel(QWidget):
     def _update_layer_summary(self, layer: VectorLayer | RasterLayer) -> None:
         """在面板标题下显示图层类型和数据规模。"""
         if isinstance(layer, VectorLayer):
-            geometry_name = {
-                GeometryFamily.POINT: "点",
-                GeometryFamily.LINE: "线",
-                GeometryFamily.POLYGON: "面",
-                GeometryFamily.MIXED: "混合几何",
-            }[layer.geometry_family]
+            family = layer.geometry_family
+            if family is None:
+                geometry_name = "未知几何"
+            else:
+                geometry_name = {
+                    GeometryFamily.POINT: "点",
+                    GeometryFamily.LINE: "线",
+                    GeometryFamily.POLYGON: "面",
+                    GeometryFamily.MIXED: "混合几何",
+                }[family]
             self._metadata.setText(
                 f"矢量 · {geometry_name} · {len(layer.features)} 个要素"
             )
