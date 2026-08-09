@@ -23,6 +23,36 @@ from app.domain.feature import Feature
 from app.domain.layer_style import LayerStyle
 from app.domain.vector_layer import VectorLayer
 
+def _simplify_polygon_exteriors_only(
+    geometry: BaseGeometry,
+    tolerance: float,
+) -> BaseGeometry:
+    """对 Polygon/MultiPolygon 仅简化外环，保留内环原样。
+
+    内环（岛洞）通常顶点数少、面积小，简化收益可忽略不计；
+    且内环经过拓扑保持简化后容易与简化后的外环产生细微错位，
+    在特定缩放级别下形成不美观的裂隙。仅简化外环可避免此问题。
+    """
+    if geometry.geom_type == "Polygon":
+        poly: Polygon = geometry  # type: ignore[assignment]
+        # 对整个 polygon 做拓扑保持简化后再提取外环，
+        # 避免独立简化外环导致相邻面要素之间出现缝隙。
+        simplified_poly: Polygon = poly.simplify(tolerance, preserve_topology=True)
+        if simplified_poly.is_empty:
+            return geometry
+        return Polygon(simplified_poly.exterior, list(poly.interiors))
+    if geometry.geom_type == "MultiPolygon":
+        simplified_polys: list[Polygon] = []
+        for sub_poly in geometry.geoms:  # type: ignore[union-attr]
+            simplified_sub = _simplify_polygon_exteriors_only(sub_poly, tolerance)
+            if not simplified_sub.is_empty:
+                simplified_polys.append(simplified_sub)  # type: ignore[arg-type]
+        if not simplified_polys:
+            return geometry
+        return MultiPolygon(simplified_polys)
+    return geometry
+
+
 _BLEND_MODE_MAP: dict[str, QPainter.CompositionMode] = {
     "normal": QPainter.CompositionMode.CompositionMode_SourceOver,
     "multiply": QPainter.CompositionMode.CompositionMode_Multiply,
@@ -151,13 +181,19 @@ class QtVectorRenderer:
         返回:
             适合当前视图绘制的几何；小图层或低复杂度几何保持原样。
         """
-        if map_units_per_pixel <= 0.0 or get_num_coordinates(geometry) < 64:
+        if map_units_per_pixel <= 0.0 or get_num_coordinates(geometry) < 16:
             return geometry
-        tolerance: float = map_units_per_pixel * 0.5
-        simplified: BaseGeometry = geometry.simplify(
-            tolerance,
-            preserve_topology=geometry.geom_type in {"Polygon", "MultiPolygon"},
-        )
+        # 容差设置为 1 像素：亚像素级别细节在屏幕上不可见，
+        # 1 像素容差在简化收益和避免相邻面要素缝隙之间取得平衡。
+        tolerance: float = map_units_per_pixel * 1.0
+        # 面要素仅对外环做简化（内环通常是简单空洞，简化收益极小
+        # 且额外 topology 检查对空心岛之类场景容易引入伪影）。
+        if geometry.geom_type in ("Polygon", "MultiPolygon"):
+            simplified: BaseGeometry = _simplify_polygon_exteriors_only(
+                geometry, tolerance
+            )
+        else:
+            simplified = geometry.simplify(tolerance, preserve_topology=False)
         return geometry if simplified.is_empty else simplified
 
     def _append_geometry(
