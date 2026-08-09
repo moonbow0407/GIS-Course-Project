@@ -91,6 +91,7 @@ from app.application.symbology_service import (
 from app.domain.feature import AttributeValue, Feature, FeatureId
 from app.domain.labeling import LabelingConfig
 from app.domain.layer_style import GeometryFamily
+from app.domain.layout import LayoutDocument
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
@@ -1154,12 +1155,14 @@ class GisApplication:
             view_state=loaded.manifest.view_state,
             analysis_runs=self._analysis_runs,
             warnings=loaded.warnings,
+            layout_state=loaded.manifest.layout_state,
         )
 
     def save_project(
         self,
         path: Path | None = None,
         view_state: MapViewState | None = None,
+        layout_document: LayoutDocument | None = None,
     ) -> ProjectSaveResult:
         """保存当前工程快照；未传路径时使用当前工程路径。"""
         target_path: Path | None = path or self._project_path
@@ -1178,6 +1181,7 @@ class GisApplication:
             created_at=self._project_created_at,
             analysis_runs=self._analysis_runs,
             view_state=view_state,
+            layout_document=layout_document,
         )
         project_store.save(resolved_path, manifest)
         self._project_path = resolved_path

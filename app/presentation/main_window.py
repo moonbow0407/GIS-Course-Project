@@ -1,6 +1,6 @@
 """GIS 桌面通用平台主窗口。"""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -56,7 +56,7 @@ from app.application.results import (
 from app.domain.feature import AttributeValue, Feature, FeatureId
 from app.domain.labeling import LabelingConfig, default_labeling_for_features
 from app.domain.layer_style import GeometryFamily
-from app.domain.layout import LayoutDocument
+from app.domain.layout import LayoutDocument, layout_from_dict
 from app.domain.symbology import RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.database.postgis_database_gateway import PostgisDatabaseGateway
@@ -125,17 +125,22 @@ class MainWindow(QMainWindow):
         # 布局视图：制图排版与打印预览。
         self._layout_view: LayoutView = LayoutView()
         # 布局工具栏：浮动在布局视图上方。
-        self._layout_toolbar: LayoutToolbar = LayoutToolbar()
-        self._layout_toolbar.setWindowFlags(
-            Qt.WindowType.Tool
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-        )
+        self._layout_toolbar: LayoutToolbar = LayoutToolbar(self)
         self._layout_toolbar.add_map_frame.connect(self._layout_view.add_map_frame)
+        self._layout_toolbar.add_scale_bar.connect(self._layout_view.add_scale_bar)
+        self._layout_toolbar.add_legend.connect(self._layout_view.add_legend)
+        self._layout_toolbar.add_north_arrow.connect(self._layout_view.add_north_arrow)
+        self._layout_toolbar.add_text.connect(self._layout_view.add_text_element)
+        self._layout_toolbar.page_setup.connect(self._on_page_setup)
+        self._layout_toolbar.edit_properties.connect(self._on_edit_properties)
+        self._layout_toolbar.export_layout.connect(self._export_layout)
         self._layout_toolbar.delete_selected.connect(self._layout_view._delete_selected)
         self._layout_toolbar.undo.connect(self._layout_view._undo)
         self._layout_toolbar.redo.connect(self._layout_view._redo)
-        self._layout_view.element_selected.connect(self._layout_toolbar.set_delete_enabled)
+        self._layout_toolbar.close_requested.connect(self._exit_layout_mode)
+        self._layout_view.element_selected.connect(
+            lambda eid: self._layout_toolbar.set_delete_enabled(eid is not None)
+        )
         self._layout_toolbar.hide()  # 初始隐藏，进入布局视图时才显示
         # 视图栈：在数据视图和布局视图之间切换。
         self._view_stack: QStackedWidget = QStackedWidget()
@@ -862,6 +867,7 @@ class MainWindow(QMainWindow):
         self._refresh_workspace(
             view_state=result.view_state, preserve_view=False
         )
+        self._restore_layout(result.layout_state)
         for warning in result.warnings:
             self.statusBar().showMessage(warning, 5000)
         self._ready_label.setText(f"已打开工程  {path.name}")
@@ -886,6 +892,7 @@ class MainWindow(QMainWindow):
             return
         self._clear_undo_history()
         self._refresh_workspace(result.view_state)
+        self._restore_layout(result.layout_state)
         self._ready_label.setText(f"已打开工程  {result.path.name}")
         save_recent_project(Path(path_string))
         if result.warnings:
@@ -910,6 +917,7 @@ class MainWindow(QMainWindow):
             result = self._application.save_project(
                 project_path,
                 self._map_canvas.capture_view_state(),
+                self._layout_view.document(),
             )
         except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "保存工程失败", str(error))
@@ -2791,6 +2799,110 @@ class MainWindow(QMainWindow):
         self._view_stack.setCurrentWidget(self._map_canvas)
         self._ribbon.set_action_checked("toggle_layout_view", False)
 
+    def _restore_layout(
+        self, layout_state: "Mapping[str, object] | None"
+    ) -> None:
+        """从工程状态恢复布局文档。"""
+        if layout_state is None:
+            return
+        try:
+            document = layout_from_dict(dict(layout_state))
+            self._layout_view.set_document(document)
+        except Exception:
+            pass
+
+    def _on_page_setup(self) -> None:
+        """打开页面设置对话框并应用新纸张规格。"""
+        document = self._layout_view.document()
+        if document is None:
+            return
+        from app.presentation.widgets.page_setup_dialog import PageSetupDialog
+
+        dialog = PageSetupDialog(document.page, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_page = dialog.page()
+        if new_page is None:
+            return
+        old_page = document.page
+        old_elements = document.elements
+        new_document = LayoutDocument(page=new_page, elements=old_elements)
+        self._layout_view.set_document(new_document)
+        self._layout_view._push_undo(
+            "页面设置",
+            undo_action=lambda: self._layout_view.set_document(
+                LayoutDocument(page=old_page, elements=old_elements)
+            ),
+            redo_action=lambda: self._layout_view.set_document(new_document),
+        )
+
+    def _on_edit_properties(self) -> None:
+        """打开元素属性编辑对话框。"""
+        element_id = self._layout_view.selected_element_id
+        if element_id is None:
+            return
+        element = self._layout_view.find_element(element_id)
+        if element is None:
+            return
+        from app.presentation.widgets.element_properties_dialog import (
+            ElementPropertiesDialog,
+        )
+
+        dialog = ElementPropertiesDialog(self)
+        dialog.set_element(element)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        changes = dialog.changes()
+        if changes:
+            self._layout_view.apply_element_changes(element_id, changes)
+            self._layout_toolbar.set_undo_enabled(self._layout_view.can_undo())
+            self._layout_toolbar.set_redo_enabled(self._layout_view.can_redo())
+
+    def _export_layout(self) -> None:
+        """导出布局为 PDF 或图片文件。"""
+        document = self._layout_view.document()
+        if document is None:
+            return
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "导出布局",
+            "",
+            "PDF 文件 (*.pdf);;PNG 图片 (*.png);;JPEG 图片 (*.jpg *.jpeg)",
+        )
+        if not file_path:
+            return
+        from app.presentation.renderers.layout_renderer import render_full_page
+
+        snapshot = self._application.snapshot()
+        page = document.page
+
+        if selected_filter.startswith("PDF"):
+            from PySide6.QtGui import QPageSize
+            from PySide6.QtPrintSupport import QPrinter
+
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+            printer.setOutputFileName(file_path)
+            from PySide6.QtCore import QSizeF
+            printer.setPageSize(
+                QPageSize(
+                    QSizeF(page.width_mm, page.height_mm),
+                    QPageSize.Unit.Millimeter,
+                )
+            )
+            painter = QPainter(printer)
+            pixmap = render_full_page(document, snapshot)
+            painter.drawPixmap(0, 0, pixmap)
+            painter.end()
+        else:
+            pixmap = render_full_page(document, snapshot)
+            fmt = "JPEG" if "JPEG" in selected_filter or file_path.lower().endswith(
+                (".jpg", ".jpeg")
+            ) else "PNG"
+            pixmap.save(file_path, fmt)
+
+        self._ready_label.setText(f"已导出布局  {Path(file_path).name}")
+
     def _toggle_layout_view(self) -> None:
         """在数据视图与布局视图之间切换。"""
         if self._layout_mode:
@@ -2803,8 +2915,11 @@ class MainWindow(QMainWindow):
         if not self._layout_view.has_content():
             doc = LayoutDocument.create_default()
             self._layout_view.set_document(doc)
+        else:
+            self._layout_view.refresh_map_frames()
         self._view_stack.setCurrentWidget(self._layout_view)
         self._layout_toolbar.show()
+        self._layout_toolbar.raise_()
         self._layout_toolbar.set_delete_enabled(
             self._layout_view.selected_element_id is not None
         )
@@ -2814,18 +2929,17 @@ class MainWindow(QMainWindow):
         self._ribbon.set_action_checked("toggle_layout_view", True)
 
     def _position_layout_toolbar(self) -> None:
-        """将布局工具栏定位在布局视图顶部居中。"""
+        """将布局工具栏定位在布局视图顶部居中（相对于主窗口）。"""
         if not self._layout_toolbar.isVisible():
             return
         toolbar_w: int = self._layout_toolbar.sizeHint().width()
         toolbar_h: int = self._layout_toolbar.sizeHint().height()
-        # 获取 _view_stack 在屏幕上的位置
-        view_global = self._view_stack.mapToGlobal(
-            self._view_stack.rect().topLeft()
-        )
-        x: int = view_global.x() + max(0, (self._view_stack.width() - toolbar_w) // 2)
-        y: int = view_global.y() + 10
-        self._layout_toolbar.setGeometry(x, y, toolbar_w, toolbar_h)
+        # 计算 _view_stack 在主窗口中的位置
+        view_pos = self._view_stack.mapTo(self, self._view_stack.rect().topLeft())
+        x: int = view_pos.x() + max(0, (self._view_stack.width() - toolbar_w) // 2)
+        y: int = view_pos.y() + 10
+        self._layout_toolbar.move(x, y)
+        self._layout_toolbar.resize(toolbar_w, toolbar_h)
 
     def _show_display_settings(self, active_tab: int = 1) -> None:
         """打开显示设置对话框，管理图层属性、符号系统、比例尺、全局显示和书签。
@@ -3014,6 +3128,9 @@ class MainWindow(QMainWindow):
         self._map_canvas.set_snapshot(snapshot)
         if view_state is not None:
             self._map_canvas.restore_view_state(view_state)
+        if self._layout_mode:
+            self._layout_view.set_snapshot(snapshot)
+            self._layout_view.refresh_map_frames()
         active_name: str = "无"
         for layer in snapshot.layers:
             if layer.layer_id == snapshot.active_layer_id:
@@ -3193,6 +3310,16 @@ class MainWindow(QMainWindow):
             event.accept()
         else:
             event.ignore()
+
+    def resizeEvent(self, event) -> None:
+        """主窗口缩放时重新定位布局工具栏。"""
+        super().resizeEvent(event)
+        self._position_layout_toolbar()
+
+    def moveEvent(self, event) -> None:
+        """主窗口移动时重新定位布局工具栏。"""
+        super().moveEvent(event)
+        self._position_layout_toolbar()
 
     @staticmethod
     def _crs_unit_name(crs: CRS | None) -> str:

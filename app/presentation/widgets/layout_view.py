@@ -7,7 +7,6 @@ LayoutView 是一个独立的 QGraphicsView，与 MapCanvas 平级。
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
@@ -27,13 +26,27 @@ from PySide6.QtWidgets import (
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
+    QInputDialog,
     QMenu,
 )
 
 from app.application.results import WorkspaceSnapshot
-from app.domain.layout import LayoutDocument, MapFrameElement
-from app.presentation.renderers.layout_renderer import render_map_frame
-
+from app.domain.layout import (
+    LayoutDocument,
+    LayoutElement,
+    LegendElement,
+    MapFrameElement,
+    NorthArrowElement,
+    ScaleBarElement,
+    TextElement,
+)
+from app.presentation.renderers.layout_renderer import (
+    render_legend,
+    render_map_frame,
+    render_north_arrow,
+    render_scale_bar,
+    render_text,
+)
 
 # ---------------------------------------------------------------------------
 # 颜色常量
@@ -56,6 +69,64 @@ _SELECTION_COLOR: QColor = QColor("#2563eb")
 def _mm_to_px(mm: float, dpi: float) -> float:
     """毫米转像素（基于 DPI）。"""
     return mm / 25.4 * dpi
+
+
+def _snapshot_element(elem, eid: str):
+    """创建元素的轻量快照，用于撤销栈的恢复。"""
+    common = {
+        "element_id": eid,
+        "x_mm": elem.x_mm,
+        "y_mm": elem.y_mm,
+        "width_mm": elem.width_mm,
+        "height_mm": elem.height_mm,
+        "rotation": elem.rotation,
+    }
+    if isinstance(elem, MapFrameElement):
+        return MapFrameElement(
+            **common,
+            map_center_x=elem.map_center_x,
+            map_center_y=elem.map_center_y,
+            map_units_per_pixel=elem.map_units_per_pixel,
+            border_color=elem.border_color,
+            border_width_mm=elem.border_width_mm,
+            background_color=elem.background_color,
+        )
+    elif isinstance(elem, ScaleBarElement):
+        return ScaleBarElement(
+            **common,
+            linked_frame_id=elem.linked_frame_id,
+            style=elem.style,
+            unit=elem.unit,
+            num_segments=elem.num_segments,
+            label_font_size_mm=elem.label_font_size_mm,
+            color=elem.color,
+        )
+    elif isinstance(elem, LegendElement):
+        return LegendElement(
+            **common,
+            linked_frame_id=elem.linked_frame_id,
+            title=elem.title,
+            title_font_size_mm=elem.title_font_size_mm,
+            item_font_size_mm=elem.item_font_size_mm,
+            column_count=elem.column_count,
+        )
+    elif isinstance(elem, NorthArrowElement):
+        return NorthArrowElement(
+            **common,
+            style=elem.style,
+            color=elem.color,
+        )
+    elif isinstance(elem, TextElement):
+        return TextElement(
+            **common,
+            text=elem.text,
+            font_size_mm=elem.font_size_mm,
+            color=elem.color,
+            bold=elem.bold,
+            italic=elem.italic,
+            alignment=elem.alignment,
+        )
+    return elem
 
 
 # ---------------------------------------------------------------------------
@@ -104,9 +175,11 @@ class LayoutView(QGraphicsView):
         self._grid_items: list[QGraphicsItem] = []
         self._margin_items: list[QGraphicsItem] = []
 
-        # 元素渲染缓存：{element_id: (QPixmap, QGraphicsPixmapItem, QGraphicsRectItem)}
+        # 元素渲染缓存：{element_id: (list[QGraphicsItem], QGraphicsRectItem)}
+        #   - list[QGraphicsItem]: 所有渲染内容图元
+        #   - QGraphicsRectItem: 边界矩形（命中检测 + 选中高亮）
         self._element_items: dict[
-            str, tuple[QPixmap, QGraphicsPixmapItem, QGraphicsRectItem]
+            str, tuple[list[QGraphicsItem], QGraphicsRectItem]
         ] = {}
         self._needs_initial_fit: bool = True
 
@@ -121,6 +194,12 @@ class LayoutView(QGraphicsView):
         # 撤销栈：每项 (描述, 撤销函数, 重做函数)
         self._undo_stack: list[tuple[str, Callable[[], object], Callable[[], object]]] = []
         self._redo_stack: list[tuple[str, Callable[[], object], Callable[[], object]]] = []
+
+        # 缩放手柄状态
+        self._resize_handles: list[QGraphicsRectItem] = []
+        self._resizing_handle_index: int | None = None
+        self._resize_start_pos: QPointF | None = None
+        self._resize_start_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
         # 快捷键
         QShortcut(QKeySequence.StandardKey.Delete, self, self._delete_selected)
@@ -206,13 +285,196 @@ class LayoutView(QGraphicsView):
         )
         return frame.element_id
 
+    def add_scale_bar(self) -> str | None:
+        """在页面底部添加比例尺。
+
+        返回:
+            新元素的 ID，若文档未设置则返回 None。
+        """
+        if self._document is None:
+            return None
+        page = self._document.page
+
+        # 查找第一个地图框来关联并定位
+        linked_id: str = ""
+        pos_x: float = page.margin_mm
+        pos_y: float = page.height_mm - page.margin_mm - 8
+        for e in self._document.elements:
+            if isinstance(e, MapFrameElement):
+                linked_id = e.element_id
+                pos_x = e.x_mm
+                pos_y = e.y_mm + e.height_mm + 5
+                break
+
+        element = ScaleBarElement(
+            x_mm=pos_x,
+            y_mm=pos_y,
+            width_mm=80,
+            height_mm=8,
+            linked_frame_id=linked_id,
+        )
+        self._add_element(element)
+        self._push_undo(
+            "添加比例尺",
+            undo_action=lambda eid=element.element_id: self.remove_element(eid),
+            redo_action=lambda el=element: self._add_element(el),
+        )
+        return element.element_id
+
+    def add_legend(self) -> str | None:
+        """在页面右侧添加图例。
+
+        返回:
+            新元素的 ID，若文档未设置则返回 None。
+        """
+        if self._document is None:
+            return None
+        page = self._document.page
+
+        linked_id: str = ""
+        pos_x: float = page.margin_mm
+        pos_y: float = page.margin_mm
+        for e in self._document.elements:
+            if isinstance(e, MapFrameElement):
+                linked_id = e.element_id
+                pos_x = e.x_mm + e.width_mm + 5
+                pos_y = e.y_mm
+                break
+
+        element = LegendElement(
+            x_mm=pos_x,
+            y_mm=pos_y,
+            width_mm=50,
+            height_mm=5,
+            linked_frame_id=linked_id,
+        )
+        self._add_element(element)
+        self._push_undo(
+            "添加图例",
+            undo_action=lambda eid=element.element_id: self.remove_element(eid),
+            redo_action=lambda el=element: self._add_element(el),
+        )
+        return element.element_id
+
+    def add_north_arrow(self) -> str | None:
+        """在页面右上方添加指北针。
+
+        返回:
+            新元素的 ID，若文档未设置则返回 None。
+        """
+        if self._document is None:
+            return None
+        page = self._document.page
+
+        pos_x: float = page.width_mm - page.margin_mm - 20
+        pos_y: float = page.margin_mm + 5
+        # 如果有地图框，放在地图框右上方
+        for e in self._document.elements:
+            if isinstance(e, MapFrameElement):
+                pos_x = e.x_mm + e.width_mm - 20
+                pos_y = e.y_mm + 5
+                break
+
+        element = NorthArrowElement(
+            x_mm=pos_x,
+            y_mm=pos_y,
+            width_mm=15,
+            height_mm=20,
+        )
+        self._add_element(element)
+        self._push_undo(
+            "添加指北针",
+            undo_action=lambda eid=element.element_id: self.remove_element(eid),
+            redo_action=lambda el=element: self._add_element(el),
+        )
+        return element.element_id
+
+    def add_text_element(self) -> str | None:
+        """弹出输入框让用户输入文本，然后在页面中心添加文本元素。
+
+        返回:
+            新元素的 ID，若用户取消或文档未设置则返回 None。
+        """
+        if self._document is None:
+            return None
+        text, ok = QInputDialog.getText(
+            self, "添加文本", "请输入文本内容:",
+            text="文本",
+        )
+        if not ok or not text:
+            return None
+        page = self._document.page
+        pos_x: float = page.width_mm / 2 - 20
+        pos_y: float = page.height_mm / 2
+
+        element = TextElement(
+            x_mm=pos_x,
+            y_mm=pos_y,
+            width_mm=60,
+            height_mm=12,
+            text=text,
+            font_size_mm=5.0,
+        )
+        self._add_element(element)
+        self._push_undo(
+            "添加文本",
+            undo_action=lambda eid=element.element_id: self.remove_element(eid),
+            redo_action=lambda el=element: self._add_element(el),
+        )
+        return element.element_id
+
     def refresh_map_frames(self) -> None:
-        """重绘所有地图框（数据变化后调用）。"""
+        """重绘所有地图框及关联的装饰元素（数据变化后调用）。"""
         if self._document is None:
             return
         for elem in self._document.elements:
             if isinstance(elem, MapFrameElement):
                 self._render_element(elem)
+        # 刷新关联到地图框的装饰元素
+        for elem in self._document.elements:
+            if isinstance(elem, (ScaleBarElement, LegendElement)):
+                self._render_element(elem)
+
+    def find_element(self, element_id: str) -> LayoutElement | None:
+        """按 ID 查找布局元素（公开接口）。"""
+        return self._find_element(element_id)
+
+    def apply_element_changes(
+        self, element_id: str, changes: dict[str, object]
+    ) -> None:
+        """应用属性对话框返回的修改。
+
+        参数:
+            element_id: 目标元素 ID。
+            changes: 属性名到新值的映射。
+        """
+        elem = self._find_element(element_id)
+        if elem is None:
+            return
+        old_values: dict[str, object] = {
+            k: getattr(elem, k) for k in changes if hasattr(elem, k)
+        }
+        for key, value in changes.items():
+            if hasattr(elem, key):
+                setattr(elem, key, value)
+        self._render_element(elem)
+        if self._selected_element_id == element_id:
+            self._select_element(element_id)
+        self._push_undo(
+            "修改元素属性",
+            undo_action=lambda e=elem, ov=old_values: self._restore_props(e, ov),
+            redo_action=lambda e=elem, nv=changes: self._restore_props(e, nv),
+        )
+
+    def _restore_props(
+        self, element: LayoutElement, values: dict[str, object]
+    ) -> None:
+        """恢复元素属性（用于撤销/重做）。"""
+        for key, value in values.items():
+            setattr(element, key, value)
+        self._render_element(element)
+        if self._selected_element_id == element.element_id:
+            self._select_element(element.element_id)
 
     # ------------------------------------------------------------------
     # 内部：元素管理
@@ -239,12 +501,32 @@ class LayoutView(QGraphicsView):
         # 移除旧图元
         old = self._element_items.pop(element.element_id, None)
         if old is not None:
-            _pix, pix_item, border_item = old
-            self._scene.removeItem(pix_item)
-            self._scene.removeItem(border_item)
+            items_list, bounds_rect = old
+            for item in items_list:
+                self._scene.removeItem(item)
+            self._scene.removeItem(bounds_rect)
 
         if isinstance(element, MapFrameElement):
             self._render_map_frame_element(element, dpi)
+        elif isinstance(element, ScaleBarElement):
+            self._render_scale_bar_element(element, dpi)
+        elif isinstance(element, LegendElement):
+            self._render_legend_element(element, dpi)
+        elif isinstance(element, NorthArrowElement):
+            self._render_north_arrow_element(element, dpi)
+        elif isinstance(element, TextElement):
+            self._render_text_element(element, dpi)
+
+        # 应用旋转
+        if element.rotation != 0:
+            cached = self._element_items.get(element.element_id)
+            if cached is not None:
+                items_list, bounds_rect = cached
+                cx = bounds_rect.rect().center().x()
+                cy = bounds_rect.rect().center().y()
+                for item in items_list:
+                    item.setTransformOriginPoint(cx, cy)
+                    item.setRotation(element.rotation)
 
     def _render_map_frame_element(
         self, frame: MapFrameElement, dpi: float
@@ -273,24 +555,178 @@ class LayoutView(QGraphicsView):
         pix_item.setData(0, frame.element_id)
         pix_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
 
-        # 边框图元
-        border_item: QGraphicsRectItem = QGraphicsRectItem(
-            QRectF(px, py, pw, ph)
-        )
+        # 可见边框
         border_pen: QPen = QPen(
             QColor(frame.border_color),
             _mm_to_px(frame.border_width_mm, dpi),
         )
         border_pen.setCosmetic(True)
+        border_item: QGraphicsRectItem = QGraphicsRectItem(
+            QRectF(px, py, pw, ph)
+        )
         border_item.setPen(border_pen)
         border_item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
         border_item.setZValue(11)
         border_item.setData(0, frame.element_id)
         border_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
 
+        # 边界矩形（透明，用于命中检测 + 选中高亮）
+        bounds_rect: QGraphicsRectItem = QGraphicsRectItem(
+            QRectF(px, py, pw, ph)
+        )
+        bounds_rect.setPen(QPen(Qt.PenStyle.NoPen))
+        bounds_rect.setZValue(15)
+        bounds_rect.setData(0, frame.element_id)
+        bounds_rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+
         self._scene.addItem(pix_item)
         self._scene.addItem(border_item)
-        self._element_items[frame.element_id] = (pixmap, pix_item, border_item)
+        self._scene.addItem(bounds_rect)
+        self._element_items[frame.element_id] = (
+            [pix_item, border_item], bounds_rect,
+        )
+
+    # ------------------------------------------------------------------
+    # 比例尺 / 图例 / 指北针 渲染
+    # ------------------------------------------------------------------
+
+    def _render_scale_bar_element(
+        self, element: ScaleBarElement, dpi: float
+    ) -> None:
+        """渲染比例尺。"""
+        if self._document is None:
+            return
+
+        # 查找关联的地图框
+        linked_frame: MapFrameElement | None = None
+        if element.linked_frame_id:
+            found = self._find_element(element.linked_frame_id)
+            if isinstance(found, MapFrameElement):
+                linked_frame = found
+        if linked_frame is None:
+            # 自动关联到第一个地图框
+            for e in self._document.elements:
+                if isinstance(e, MapFrameElement):
+                    linked_frame = e
+                    element.linked_frame_id = e.element_id
+                    break
+
+        items: list[QGraphicsItem] = render_scale_bar(
+            element, self._scene, dpi, linked_frame,
+        )
+
+        # 边界矩形
+        px: float = _mm_to_px(element.x_mm, dpi)
+        py: float = _mm_to_px(element.y_mm, dpi)
+        pw: float = _mm_to_px(element.width_mm, dpi) if element.width_mm > 0 else 120
+        ph: float = _mm_to_px(element.height_mm, dpi) if element.height_mm > 0 else 8
+        bounds_rect: QGraphicsRectItem = QGraphicsRectItem(
+            QRectF(px, py, pw, ph),
+        )
+        bounds_rect.setPen(QPen(Qt.PenStyle.NoPen))
+        bounds_rect.setZValue(15)
+        bounds_rect.setData(0, element.element_id)
+        bounds_rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self._scene.addItem(bounds_rect)
+
+        self._element_items[element.element_id] = (items, bounds_rect)
+
+    def _render_legend_element(
+        self, element: LegendElement, dpi: float
+    ) -> None:
+        """渲染图例。"""
+        if self._document is None:
+            return
+
+        # 查找关联的地图框
+        if element.linked_frame_id:
+            found = self._find_element(element.linked_frame_id)
+            if not isinstance(found, MapFrameElement):
+                element.linked_frame_id = ""
+        if not element.linked_frame_id:
+            for e in self._document.elements:
+                if isinstance(e, MapFrameElement):
+                    element.linked_frame_id = e.element_id
+                    break
+
+        items: list[QGraphicsItem] = render_legend(
+            element, self._scene, dpi, self._snapshot,
+        )
+
+        # 边界矩形 —— 图例高度由渲染函数自动更新
+        px: float = _mm_to_px(element.x_mm, dpi)
+        py: float = _mm_to_px(element.y_mm, dpi)
+        pw: float = _mm_to_px(element.width_mm, dpi) if element.width_mm > 0 else 80
+        ph: float = _mm_to_px(element.height_mm, dpi) if element.height_mm > 0 else 20
+        bounds_rect: QGraphicsRectItem = QGraphicsRectItem(
+            QRectF(px, py, pw, ph),
+        )
+        bounds_rect.setPen(QPen(Qt.PenStyle.NoPen))
+        bounds_rect.setZValue(15)
+        bounds_rect.setData(0, element.element_id)
+        bounds_rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self._scene.addItem(bounds_rect)
+
+        self._element_items[element.element_id] = (items, bounds_rect)
+
+    def _render_north_arrow_element(
+        self, element: NorthArrowElement, dpi: float
+    ) -> None:
+        """渲染指北针。"""
+        if self._document is None:
+            return
+
+        items: list[QGraphicsItem] = render_north_arrow(
+            element, self._scene, dpi,
+        )
+
+        px: float = _mm_to_px(element.x_mm, dpi)
+        py: float = _mm_to_px(element.y_mm, dpi)
+        pw: float = _mm_to_px(element.width_mm, dpi) if element.width_mm > 0 else 15
+        ph: float = _mm_to_px(element.height_mm, dpi) if element.height_mm > 0 else 20
+        bounds_rect: QGraphicsRectItem = QGraphicsRectItem(
+            QRectF(px, py, pw, ph),
+        )
+        bounds_rect.setPen(QPen(Qt.PenStyle.NoPen))
+        bounds_rect.setZValue(15)
+        bounds_rect.setData(0, element.element_id)
+        bounds_rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self._scene.addItem(bounds_rect)
+
+        self._element_items[element.element_id] = (items, bounds_rect)
+
+    def _render_text_element(
+        self, element: TextElement, dpi: float
+    ) -> None:
+        """渲染文本元素。"""
+        if self._document is None:
+            return
+
+        items: list[QGraphicsItem] = render_text(
+            element, self._scene, dpi,
+        )
+
+        # 使用实际文本图元的包围盒计算命中检测区域
+        if items:
+            combined = items[0].sceneBoundingRect()
+            for it in items[1:]:
+                combined = combined.united(it.sceneBoundingRect())
+            # 添加一点内边距便于点击
+            combined.adjust(-4, -4, 4, 4)
+            bounds_rect: QGraphicsRectItem = QGraphicsRectItem(combined)
+        else:
+            px: float = _mm_to_px(element.x_mm, dpi)
+            py: float = _mm_to_px(element.y_mm, dpi)
+            pw: float = _mm_to_px(element.width_mm, dpi) if element.width_mm > 0 else 40
+            ph: float = _mm_to_px(element.height_mm, dpi) if element.height_mm > 0 else 8
+            bounds_rect = QGraphicsRectItem(QRectF(px, py, pw, ph))
+        bounds_rect.setPen(QPen(Qt.PenStyle.NoPen))
+        bounds_rect.setZValue(15)
+        bounds_rect.setData(0, element.element_id)
+        bounds_rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self._scene.addItem(bounds_rect)
+
+        self._element_items[element.element_id] = (items, bounds_rect)
 
     # ------------------------------------------------------------------
     # 场景重建
@@ -410,11 +846,16 @@ class LayoutView(QGraphicsView):
     # ------------------------------------------------------------------
 
     def _element_at(self, scene_pos: QPointF) -> str | None:
-        """返回场景坐标处的元素 ID，未命中返回 None。"""
-        for elem_id, (_pix, _pix_item, border_item) in self._element_items.items():
-            if border_item.contains(scene_pos):
-                return elem_id
-        return None
+        """返回场景坐标处最上层的元素 ID，未命中返回 None。
+
+        遍历全部元素并返回最后命中者（后添加的元素在上层），
+        避免大尺寸地图框拦截对小元素的点击。
+        """
+        hit: str | None = None
+        for elem_id, (_items, bounds_rect) in self._element_items.items():
+            if bounds_rect.contains(scene_pos):
+                hit = elem_id
+        return hit
 
     # ------------------------------------------------------------------
     # Qt 事件
@@ -439,6 +880,18 @@ class LayoutView(QGraphicsView):
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             scene_pos: QPointF = self.mapToScene(event.pos())
+            # 先检查是否点击了缩放手柄
+            handle_idx = self._handle_at(scene_pos)
+            if handle_idx is not None and self._selected_element_id is not None:
+                self._resizing_handle_index = handle_idx
+                self._resize_start_pos = scene_pos
+                elem = self._find_element(self._selected_element_id)
+                if elem is not None:
+                    self._resize_start_rect = (
+                        elem.x_mm, elem.y_mm, elem.width_mm, elem.height_mm,
+                    )
+                event.accept()
+                return
             elem_id: str | None = self._element_at(scene_pos)
             if elem_id is not None:
                 # 点击元素：选中并准备拖拽移动
@@ -458,6 +911,10 @@ class LayoutView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if self._resizing_handle_index is not None:
+            self._do_resize(event)
+            event.accept()
+            return
         if self._dragging_element_id is not None:
             scene_pos: QPointF = self.mapToScene(event.pos())
             if self._drag_start_pos is None:
@@ -476,6 +933,10 @@ class LayoutView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._resizing_handle_index is not None:
+            self._finish_resize()
+            event.accept()
+            return
         if self._dragging_element_id is not None:
             eid = self._dragging_element_id
             old_x, old_y = self._drag_start_mm
@@ -484,7 +945,7 @@ class LayoutView(QGraphicsView):
             new_y = elem.y_mm if elem else old_y
             if (old_x, old_y) != (new_x, new_y) and elem is not None:
                 self._push_undo(
-                    "移动地图框",
+                    "移动元素",
                     undo_action=lambda e= elem, ox=old_x, oy=old_y: self._move_element_to(e, ox, oy),
                     redo_action=lambda e= elem, nx=new_x, ny=new_y: self._move_element_to(e, nx, ny),
                 )
@@ -507,6 +968,36 @@ class LayoutView(QGraphicsView):
         delete_action: QAction = menu.addAction("删除")
         delete_action.triggered.connect(self._delete_selected)
         menu.exec(event.globalPos())
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        """双击元素打开属性编辑对话框。"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            scene_pos: QPointF = self.mapToScene(event.pos())
+            elem_id: str | None = self._element_at(scene_pos)
+            if elem_id is not None:
+                self._select_element(elem_id)
+                self.element_selected.emit(elem_id)
+                self._open_properties_dialog(elem_id)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+    def _open_properties_dialog(self, element_id: str) -> None:
+        """打开元素属性编辑对话框。"""
+        element = self._find_element(element_id)
+        if element is None:
+            return
+        from app.presentation.widgets.element_properties_dialog import (
+            ElementPropertiesDialog,
+        )
+
+        dialog = ElementPropertiesDialog(self)
+        dialog.set_element(element)
+        if dialog.exec() != ElementPropertiesDialog.DialogCode.Accepted:
+            return
+        changes = dialog.changes()
+        if changes:
+            self.apply_element_changes(element_id, changes)
 
     def wheelEvent(self, event) -> None:
         factor: float = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
@@ -536,28 +1027,24 @@ class LayoutView(QGraphicsView):
     # ------------------------------------------------------------------
 
     def _select_element(self, element_id: str | None) -> None:
-        """选中或取消选中元素，更新视觉高亮。"""
+        """选中或取消选中元素，更新视觉高亮和缩放手柄。"""
+        self._remove_resize_handles()
         # 取消旧选择的高亮
         if self._selected_element_id is not None:
             old = self._element_items.get(self._selected_element_id)
             if old is not None:
-                _pix, _pix_item, border_item = old
-                elem = self._find_element(self._selected_element_id)
-                if elem is not None and isinstance(elem, MapFrameElement):
-                    border_item.setPen(
-                        QPen(QColor(elem.border_color), 0)
-                    )
-                else:
-                    border_item.setPen(QPen(Qt.PenStyle.NoPen))
+                _items, bounds_rect = old
+                bounds_rect.setPen(QPen(Qt.PenStyle.NoPen))
         self._selected_element_id = element_id
         # 应用新选择高亮
         if element_id is not None:
             new = self._element_items.get(element_id)
             if new is not None:
-                _pix, _pix_item, border_item = new
+                _items, bounds_rect = new
                 highlight_pen: QPen = QPen(_SELECTION_COLOR, 2.0)
                 highlight_pen.setCosmetic(True)
-                border_item.setPen(highlight_pen)
+                bounds_rect.setPen(highlight_pen)
+                self._create_resize_handles(bounds_rect.rect())
 
     def remove_element(self, element_id: str) -> None:
         """从文档和场景中移除指定元素。"""
@@ -573,9 +1060,10 @@ class LayoutView(QGraphicsView):
         # 从场景中移除
         old = self._element_items.pop(element_id, None)
         if old is not None:
-            _pix, pix_item, border_item = old
-            self._scene.removeItem(pix_item)
-            self._scene.removeItem(border_item)
+            items_list, bounds_rect = old
+            for item in items_list:
+                self._scene.removeItem(item)
+            self._scene.removeItem(bounds_rect)
         if self._selected_element_id == element_id:
             self._selected_element_id = None
 
@@ -588,19 +1076,13 @@ class LayoutView(QGraphicsView):
         if elem is None:
             return
         # 快照元素状态用于撤销
-        elem_snapshot = MapFrameElement(
-            x_mm=elem.x_mm, y_mm=elem.y_mm,
-            width_mm=elem.width_mm, height_mm=elem.height_mm,
-            map_center_x=getattr(elem, "map_center_x", 0.0),
-            map_center_y=getattr(elem, "map_center_y", 0.0),
-            map_units_per_pixel=getattr(elem, "map_units_per_pixel", 1.0),
-            element_id=eid,
-        ) if isinstance(elem, MapFrameElement) else elem
+        elem_snapshot = _snapshot_element(elem, eid)
+        elem_type_name: str = type(elem).__name__
         self.remove_element(eid)
         self._push_undo(
-            "删除地图框",
+            f"删除{elem_type_name}",
             undo_action=lambda es=elem_snapshot: self._add_element(es),
-            redo_action=lambda eid=eid: self.remove_element(eid),
+            redo_action=lambda eid2=eid: self.remove_element(eid2),
         )
 
     def _move_element_to(self, element, x_mm: float, y_mm: float) -> None:
@@ -669,18 +1151,191 @@ class LayoutView(QGraphicsView):
         return None
 
     def _update_element_position(self, element) -> None:
-        """更新元素在场景中的位置（用于拖拽移动）。"""
+        """更新元素在场景中的位置（用于拖拽移动）。
+        注意：非地图框元素拖拽后需要重新渲染以更新内部布局。
+        """
         if self._document is None:
             return
         dpi = self._document.page.dpi
+
+        # 对于非地图框的装饰元素，重新渲染以更新内部坐标
+        if not isinstance(element, MapFrameElement):
+            self._render_element(element)
+            # 更新缩放手柄到新位置
+            if (self._selected_element_id == element.element_id
+                    and self._selected_element_id in self._element_items):
+                _items, br = self._element_items[self._selected_element_id]
+                self._create_resize_handles(br.rect())
+            self.viewport().update()
+            return
+
         old = self._element_items.get(element.element_id)
         if old is None:
             return
-        _pix, pix_item, border_item = old
+        items_list, bounds_rect = old
         px: float = _mm_to_px(element.x_mm, dpi)
         py: float = _mm_to_px(element.y_mm, dpi)
         pw: float = _mm_to_px(element.width_mm, dpi)
         ph: float = _mm_to_px(element.height_mm, dpi)
 
-        pix_item.setPos(px, py)
-        border_item.setRect(QRectF(px, py, pw, ph))
+        # 像素图层
+        if items_list:
+            items_list[0].setPos(px, py)
+        # 边框
+        if len(items_list) > 1:
+            items_list[1].setRect(QRectF(px, py, pw, ph))
+        # 边界矩形
+        bounds_rect.setRect(QRectF(px, py, pw, ph))
+
+        # 同步更新缩放手柄位置
+        if self._selected_element_id == element.element_id:
+            self._create_resize_handles(bounds_rect.rect())
+
+        # 强制刷新避免拖拽残影
+        self.viewport().update()
+
+    # ------------------------------------------------------------------
+    # 缩放手柄
+    # ------------------------------------------------------------------
+
+    _HANDLE_SIZE: float = 8.0
+
+    def _create_resize_handles(self, rect: QRectF) -> None:
+        """在元素边界矩形的 8 个位置创建缩放手柄。"""
+        self._remove_resize_handles()
+        hs = self._HANDLE_SIZE
+        positions = [
+            (rect.left(), rect.top()),
+            (rect.center().x(), rect.top()),
+            (rect.right(), rect.top()),
+            (rect.left(), rect.center().y()),
+            (rect.right(), rect.center().y()),
+            (rect.left(), rect.bottom()),
+            (rect.center().x(), rect.bottom()),
+            (rect.right(), rect.bottom()),
+        ]
+        for sx, sy in positions:
+            handle = QGraphicsRectItem(QRectF(-hs / 2, -hs / 2, hs, hs))
+            handle.setPos(sx, sy)
+            handle.setBrush(QBrush(QColor("#ffffff")))
+            handle.setPen(QPen(_SELECTION_COLOR, 1.0))
+            handle.setZValue(100)
+            handle.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+            handle.setFlag(
+                QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True,
+            )
+            self._scene.addItem(handle)
+            self._resize_handles.append(handle)
+
+    def _remove_resize_handles(self) -> None:
+        """移除所有缩放手柄。"""
+        for handle in self._resize_handles:
+            self._scene.removeItem(handle)
+        self._resize_handles.clear()
+
+    def _handle_at(self, scene_pos: QPointF) -> int | None:
+        """检查场景坐标是否命中某个缩放手柄，返回手柄索引或 None。"""
+        for i, handle in enumerate(self._resize_handles):
+            local_pos = handle.mapFromScene(scene_pos)
+            if handle.rect().contains(local_pos):
+                return i
+        return None
+
+    def _do_resize(self, event) -> None:
+        """根据手柄索引和鼠标位移更新元素尺寸。"""
+        if (
+            self._selected_element_id is None
+            or self._resizing_handle_index is None
+            or self._resize_start_pos is None
+            or self._document is None
+        ):
+            return
+        elem = self._find_element(self._selected_element_id)
+        if elem is None:
+            return
+        dpi = self._document.page.dpi
+        scene_pos = self.mapToScene(event.pos())
+        dx_mm = (scene_pos.x() - self._resize_start_pos.x()) / dpi * 25.4
+        dy_mm = (scene_pos.y() - self._resize_start_pos.y()) / dpi * 25.4
+
+        ox, oy, ow, oh = self._resize_start_rect
+        idx = self._resizing_handle_index
+        new_x, new_y, new_w, new_h = ox, oy, ow, oh
+        min_size = 5.0
+
+        # 水平方向
+        if idx in (0, 3, 5):  # 左侧
+            new_x = ox + dx_mm
+            new_w = ow - dx_mm
+        elif idx in (2, 4, 7):  # 右侧
+            new_w = ow + dx_mm
+        # 垂直方向
+        if idx in (0, 1, 2):  # 顶部
+            new_y = oy + dy_mm
+            new_h = oh - dy_mm
+        elif idx in (5, 6, 7):  # 底部
+            new_h = oh + dy_mm
+
+        # 最小尺寸约束
+        if new_w < min_size:
+            if idx in (0, 3, 5):
+                new_x = ox + ow - min_size
+            new_w = min_size
+        if new_h < min_size:
+            if idx in (0, 1, 2):
+                new_y = oy + oh - min_size
+            new_h = min_size
+
+        elem.x_mm = new_x
+        elem.y_mm = new_y
+        elem.width_mm = new_w
+        elem.height_mm = new_h
+        self._render_element(elem)
+        # 更新选中高亮和手柄位置
+        if self._selected_element_id is not None:
+            old = self._element_items.get(self._selected_element_id)
+            if old is not None:
+                _items, bounds_rect = old
+                highlight_pen = QPen(_SELECTION_COLOR, 2.0)
+                highlight_pen.setCosmetic(True)
+                bounds_rect.setPen(highlight_pen)
+                self._create_resize_handles(bounds_rect.rect())
+
+    def _finish_resize(self) -> None:
+        """完成缩放操作，推入撤销栈。"""
+        if (
+            self._selected_element_id is None
+            or self._resizing_handle_index is None
+        ):
+            self._resizing_handle_index = None
+            self._resize_start_pos = None
+            return
+        elem = self._find_element(self._selected_element_id)
+        if elem is not None:
+            old_rect = self._resize_start_rect
+            new_rect = (elem.x_mm, elem.y_mm, elem.width_mm, elem.height_mm)
+            if old_rect != new_rect:
+                self._push_undo(
+                    "调整元素大小",
+                    undo_action=lambda e=elem, r=old_rect: self._set_rect(e, r),
+                    redo_action=lambda e=elem, r=new_rect: self._set_rect(e, r),
+                )
+        self._resizing_handle_index = None
+        self._resize_start_pos = None
+
+    def _set_rect(
+        self,
+        element: LayoutElement,
+        rect: tuple[float, float, float, float],
+    ) -> None:
+        """设置元素的位置和尺寸（用于撤销/重做）。"""
+        element.x_mm, element.y_mm, element.width_mm, element.height_mm = rect
+        self._render_element(element)
+        if self._selected_element_id == element.element_id:
+            old = self._element_items.get(element.element_id)
+            if old is not None:
+                _items, bounds_rect = old
+                highlight_pen = QPen(_SELECTION_COLOR, 2.0)
+                highlight_pen.setCosmetic(True)
+                bounds_rect.setPen(highlight_pen)
+                self._create_resize_handles(bounds_rect.rect())

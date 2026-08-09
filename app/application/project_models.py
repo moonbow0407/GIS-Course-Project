@@ -107,3 +107,4 @@ class ProjectManifest:
     layers: tuple[LayerReference, ...]
     view_state: MapViewState | None
     analysis_runs: tuple[AnalysisRun, ...]
+    layout_state: Mapping[str, object] | None = None

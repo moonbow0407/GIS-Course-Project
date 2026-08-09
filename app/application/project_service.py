@@ -21,6 +21,7 @@ from app.application.project_models import (
     SourceFingerprint,
 )
 from app.domain.labeling import labeling_from_dict, labeling_to_dict
+from app.domain.layout import LayoutDocument, layout_to_dict
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
@@ -176,6 +177,7 @@ class ProjectService:
         created_at: str,
         analysis_runs: tuple[AnalysisRun, ...],
         view_state: MapViewState | None,
+        layout_document: LayoutDocument | None = None,
     ) -> ProjectManifest:
         """从当前地图文档构建待保存的工程快照。"""
         resolved_project_path: Path = project_path.expanduser().resolve()
@@ -237,6 +239,11 @@ class ProjectService:
             layers=tuple(layer_references),
             view_state=view_state,
             analysis_runs=analysis_runs,
+            layout_state=(
+                layout_to_dict(layout_document)
+                if layout_document is not None
+                else None
+            ),
         )
 
     @staticmethod

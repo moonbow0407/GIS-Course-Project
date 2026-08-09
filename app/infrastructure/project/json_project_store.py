@@ -97,6 +97,7 @@ class JsonProjectStore:
                 self._decode_analysis_run(item, index)
                 for index, item in enumerate(analysis_history)
             ),
+            layout_state=self._decode_layout(root.get("layout")),
         )
 
     def _decode_layer(self, value: object, index: int) -> LayerReference:
@@ -224,9 +225,18 @@ class JsonProjectStore:
             mtime_ns=self._integer(fingerprint.get("mtime_ns"), "fingerprint.mtime_ns"),
         )
 
+    @staticmethod
+    def _decode_layout(value: object) -> Mapping[str, object] | None:
+        """解析可选布局状态。"""
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            return None
+        return cast(Mapping[str, object], value)
+
     def _encode_manifest(self, manifest: ProjectManifest) -> dict[str, object]:
         """将工程模型转换为稳定的 JSON 对象。"""
-        return {
+        result: dict[str, object] = {
             "format": self.FORMAT,
             "schema_version": manifest.schema_version,
             "project": {
@@ -244,6 +254,9 @@ class JsonProjectStore:
                 self._encode_analysis_run(run) for run in manifest.analysis_runs
             ],
         }
+        if manifest.layout_state is not None:
+            result["layout"] = dict(manifest.layout_state)
+        return result
 
     @staticmethod
     def _encode_layer(layer: LayerReference) -> dict[str, object]:

@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from uuid import uuid4
 
-
 # ---------------------------------------------------------------------------
 # 纸张规格
 # ---------------------------------------------------------------------------
@@ -166,8 +165,80 @@ class MapFrameElement(LayoutElement):
         return max(1, round(self.map_units_per_pixel * 96.0 / 0.0254))
 
 
-# ---------------------------------------------------------------------------
-# 布局文档
+@dataclass(frozen=False, slots=True)
+class ScaleBarElement(LayoutElement):
+    """比例尺 —— 根据关联地图框自动计算地面距离。
+
+    属性:
+        linked_frame_id: 关联的地图框元素 ID，用于获取比例。
+        style: 样式 "alternating"（黑白交替）。
+        unit: 显示单位 "km" / "m"。
+        num_segments: 分段数量（默认 4）。
+        label_font_size_mm: 标签字号（毫米）。
+        color: 线条/文字颜色。
+    """
+
+    linked_frame_id: str = ""
+    style: str = "alternating"
+    unit: str = "km"
+    num_segments: int = 4
+    label_font_size_mm: float = 2.5
+    color: str = "#000000"
+
+
+@dataclass(frozen=False, slots=True)
+class LegendElement(LayoutElement):
+    """图例 —— 显示可见图层的符号和名称。
+
+    属性:
+        linked_frame_id: 关联的地图框元素 ID。
+        title: 图例标题。
+        title_font_size_mm: 标题字号（毫米）。
+        item_font_size_mm: 条目字号（毫米）。
+        column_count: 列数。
+    """
+
+    linked_frame_id: str = ""
+    title: str = "图例"
+    title_font_size_mm: float = 3.0
+    item_font_size_mm: float = 2.5
+    column_count: int = 1
+
+
+@dataclass(frozen=False, slots=True)
+class NorthArrowElement(LayoutElement):
+    """指北针 —— 指示地图北方向。
+
+    属性:
+        style: "simple" / "compass" / "arrow"。
+        color: 填充颜色。
+    """
+
+    style: str = "compass"
+    color: str = "#333333"
+
+
+@dataclass(frozen=False, slots=True)
+class TextElement(LayoutElement):
+    """文本元素 —— 在纸张上放置自由文本标注。
+
+    属性:
+        text: 文本内容。
+        font_size_mm: 字号（毫米）。
+        color: 文字颜色。
+        bold: 是否粗体。
+        italic: 是否斜体。
+        alignment: 对齐方式 "left" / "center" / "right"。
+    """
+
+    text: str = "文本"
+    font_size_mm: float = 5.0
+    color: str = "#000000"
+    bold: bool = False
+    italic: bool = False
+    alignment: str = "left"
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -187,3 +258,163 @@ class LayoutDocument:
     def create_default(cls, page_name: str = "A4") -> "LayoutDocument":
         """创建一个空 A4 纵向布局文档。"""
         return cls(page=LayoutPage.from_preset(page_name))
+
+
+# ---------------------------------------------------------------------------
+# 序列化
+# ---------------------------------------------------------------------------
+
+
+def layout_to_dict(document: LayoutDocument) -> dict[str, object]:
+    """把布局文档转换为可写入工程 JSON 的字典。"""
+    page = document.page
+    return {
+        "page": {
+            "name": page.name,
+            "width_mm": page.width_mm,
+            "height_mm": page.height_mm,
+            "dpi": page.dpi,
+            "orientation": page.orientation.value,
+            "margin_mm": page.margin_mm,
+        },
+        "elements": [_element_to_dict(e) for e in document.elements],
+    }
+
+
+def layout_from_dict(payload: dict[str, object]) -> LayoutDocument:
+    """从工程字典恢复布局文档。"""
+    page_data = payload.get("page", {})
+    orientation_str = page_data.get("orientation", "portrait")
+    try:
+        orientation = PageOrientation(orientation_str)
+    except ValueError:
+        orientation = PageOrientation.PORTRAIT
+    page = LayoutPage(
+        name=str(page_data.get("name", "A4")),
+        width_mm=float(page_data.get("width_mm", 210.0)),
+        height_mm=float(page_data.get("height_mm", 297.0)),
+        dpi=float(page_data.get("dpi", 300.0)),
+        orientation=orientation,
+        margin_mm=float(page_data.get("margin_mm", 10.0)),
+    )
+    raw_elements = payload.get("elements", [])
+    elements: list[LayoutElement] = []
+    for item in raw_elements:
+        if isinstance(item, dict):
+            elem = _element_from_dict(item)
+            if elem is not None:
+                elements.append(elem)
+    return LayoutDocument(page=page, elements=tuple(elements))
+
+
+def _element_to_dict(element: LayoutElement) -> dict[str, object]:
+    """把单个布局元素转换为字典。"""
+    base: dict[str, object] = {
+        "type": element.element_type,
+        "element_id": element.element_id,
+        "x_mm": element.x_mm,
+        "y_mm": element.y_mm,
+        "width_mm": element.width_mm,
+        "height_mm": element.height_mm,
+        "rotation": element.rotation,
+    }
+    if isinstance(element, MapFrameElement):
+        base.update({
+            "map_center_x": element.map_center_x,
+            "map_center_y": element.map_center_y,
+            "map_units_per_pixel": element.map_units_per_pixel,
+            "border_color": element.border_color,
+            "border_width_mm": element.border_width_mm,
+            "background_color": element.background_color,
+        })
+    elif isinstance(element, ScaleBarElement):
+        base.update({
+            "linked_frame_id": element.linked_frame_id,
+            "style": element.style,
+            "unit": element.unit,
+            "num_segments": element.num_segments,
+            "label_font_size_mm": element.label_font_size_mm,
+            "color": element.color,
+        })
+    elif isinstance(element, LegendElement):
+        base.update({
+            "linked_frame_id": element.linked_frame_id,
+            "title": element.title,
+            "title_font_size_mm": element.title_font_size_mm,
+            "item_font_size_mm": element.item_font_size_mm,
+            "column_count": element.column_count,
+        })
+    elif isinstance(element, NorthArrowElement):
+        base.update({
+            "style": element.style,
+            "color": element.color,
+        })
+    elif isinstance(element, TextElement):
+        base.update({
+            "text": element.text,
+            "font_size_mm": element.font_size_mm,
+            "color": element.color,
+            "bold": element.bold,
+            "italic": element.italic,
+            "alignment": element.alignment,
+        })
+    return base
+
+
+def _element_from_dict(data: dict[str, object]) -> LayoutElement | None:
+    """从字典恢复单个布局元素。"""
+    type_name = data.get("type", "")
+    common = {
+        "element_id": str(data.get("element_id", _new_element_id())),
+        "x_mm": float(data.get("x_mm", 10.0)),
+        "y_mm": float(data.get("y_mm", 10.0)),
+        "width_mm": float(data.get("width_mm", 80.0)),
+        "height_mm": float(data.get("height_mm", 60.0)),
+        "rotation": float(data.get("rotation", 0.0)),
+    }
+    if type_name == "MapFrameElement":
+        return MapFrameElement(
+            **common,
+            map_center_x=float(data.get("map_center_x", 0.0)),
+            map_center_y=float(data.get("map_center_y", 0.0)),
+            map_units_per_pixel=float(data.get("map_units_per_pixel", 1.0)),
+            border_color=str(data.get("border_color", "#333333")),
+            border_width_mm=float(data.get("border_width_mm", 0.5)),
+            background_color=str(data.get("background_color", "#ffffff")),
+        )
+    if type_name == "ScaleBarElement":
+        return ScaleBarElement(
+            **common,
+            linked_frame_id=str(data.get("linked_frame_id", "")),
+            style=str(data.get("style", "alternating")),
+            unit=str(data.get("unit", "km")),
+            num_segments=int(data.get("num_segments", 4)),
+            label_font_size_mm=float(data.get("label_font_size_mm", 2.5)),
+            color=str(data.get("color", "#000000")),
+        )
+    if type_name == "LegendElement":
+        return LegendElement(
+            **common,
+            linked_frame_id=str(data.get("linked_frame_id", "")),
+            title=str(data.get("title", "图例")),
+            title_font_size_mm=float(data.get("title_font_size_mm", 3.0)),
+            item_font_size_mm=float(data.get("item_font_size_mm", 2.5)),
+            column_count=int(data.get("column_count", 1)),
+        )
+    if type_name == "NorthArrowElement":
+        return NorthArrowElement(
+            **common,
+            style=str(data.get("style", "compass")),
+            color=str(data.get("color", "#333333")),
+        )
+    if type_name == "TextElement":
+        return TextElement(
+            **common,
+            text=str(data.get("text", "文本")),
+            font_size_mm=float(data.get("font_size_mm", 3.0)),
+            color=str(data.get("color", "#000000")),
+            bold=bool(data.get("bold", False)),
+            italic=bool(data.get("italic", False)),
+            alignment=str(data.get("alignment", "left")),
+        )
+    return None

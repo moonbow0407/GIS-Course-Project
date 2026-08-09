@@ -1,5 +1,6 @@
 """应用层命令返回的不可变结果对象。"""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
@@ -203,6 +204,7 @@ class ProjectOpenResult:
     view_state: MapViewState | None
     analysis_runs: tuple[AnalysisRun, ...]
     warnings: tuple[str, ...]
+    layout_state: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
