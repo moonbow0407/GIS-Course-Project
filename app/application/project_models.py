@@ -50,6 +50,8 @@ class LayerReference:
     selected_feature_ids: tuple[FeatureId, ...]
     fingerprint: SourceFingerprint | None
     symbology: Mapping[str, object] | None = None
+    # 矢量图层动态标注配置；缺失时兼容旧版工程并视为未配置。
+    labeling: Mapping[str, object] | None = None
     # 图层显示透明度；缺失于旧工程时使用默认值 1.0。
     opacity: float = 1.0
     # 图层混合模式；缺失于旧工程时使用默认值 normal。

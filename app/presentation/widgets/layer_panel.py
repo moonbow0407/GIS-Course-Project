@@ -1,7 +1,7 @@
 """真实地图文档对应的图层管理控件。"""
 
 from PySide6.QtCore import QModelIndex, QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QDropEvent, QMouseEvent
+from PySide6.QtGui import QAction, QColor, QDropEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.application.results import WorkspaceSnapshot
+from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.layer_style import LayerStyle
 from app.domain.raster_layer import RasterLayer
 from app.domain.symbology import GraduatedClass, UniqueValueClass, VectorRendererType
@@ -102,6 +102,10 @@ class LayerPanel(QWidget):
     layer_zoom_requested = Signal(str)
     # 符号系统信号：请求打开指定图层的符号编辑面板。
     layer_symbology_requested = Signal(str)
+    # 标注开关信号：携带图层编号和用户选择的启用状态。
+    layer_labeling_changed = Signal(str, bool)
+    # 标注分类信号：请求打开指定图层的标注分类配置对话框。
+    layer_labeling_requested = Signal(str)
     # 类别显隐信号：携带图层编号、类别索引和目标状态。
     category_visibility_changed = Signal(str, int, bool)
     # 选择清除信号：点击图层树空白区域时发出，请求取消活动图层。
@@ -121,6 +125,8 @@ class LayerPanel(QWidget):
         self._tree: _LayerTreeWidget = _LayerTreeWidget()
         # 快照更新标记：防止程序刷新控件时反向触发业务信号。
         self._updating: bool = False
+        # 最近一次工作区快照：右键菜单需要据此显示标注开关和当前状态。
+        self._snapshot: WorkspaceSnapshot | None = None
         # 图层搜索框：根据名称即时筛选当前真实图层，不创建额外数据。
         self._search_input: QLineEdit = QLineEdit()
         self._create_ui()
@@ -140,6 +146,7 @@ class LayerPanel(QWidget):
             原子替换图层树节点，并保持已有搜索条件继续生效。
         """
         self._updating = True
+        self._snapshot = snapshot
         self._tree.clear()
         # 地图文档按底到顶保存，图层面板按用户习惯将最顶层显示在列表最上方。
         for layer_snapshot in reversed(snapshot.layers):
@@ -271,6 +278,24 @@ class LayerPanel(QWidget):
         menu: QMenu = QMenu(self)
         zoom_action = menu.addAction("缩放至图层")
         symbology_action = menu.addAction("符号系统")
+        label_action: QAction | None = None
+        label_settings_action: QAction | None = None
+        layer_snapshot: LayerSnapshot | None = self._layer_snapshot(layer_id=item.data(0, Qt.ItemDataRole.UserRole))
+        if layer_snapshot is not None and isinstance(layer_snapshot.layer, VectorLayer):
+            field_names = {
+                field_name
+                for feature in layer_snapshot.layer.features
+                for field_name in feature.attributes
+            }
+            if field_names:
+                menu.addSeparator()
+                label_action = menu.addAction("标注")
+                label_action.setCheckable(True)
+                current_labeling = layer_snapshot.layer.labeling
+                label_action.setChecked(
+                    current_labeling is not None and current_labeling.enabled
+                )
+                label_settings_action = menu.addAction("标注分类…")
         attribute_action = menu.addAction("打开属性表")
         open_folder_action = menu.addAction("打开文件夹")
         remove_action = menu.addAction("删除图层")
@@ -280,12 +305,30 @@ class LayerPanel(QWidget):
             self.layer_zoom_requested.emit(layer_id)
         elif selected_action is symbology_action:
             self.layer_symbology_requested.emit(layer_id)
+        elif selected_action is label_action and label_action is not None:
+            self.layer_labeling_changed.emit(layer_id, label_action.isChecked())
+        elif selected_action is label_settings_action:
+            self.layer_labeling_requested.emit(layer_id)
         elif selected_action is attribute_action:
             self.layer_attribute_requested.emit(layer_id)
         elif selected_action is open_folder_action:
             self.layer_folder_requested.emit(layer_id)
         elif selected_action is remove_action:
             self.layer_removed.emit(layer_id)
+
+    def _layer_snapshot(self, layer_id: object) -> LayerSnapshot | None:
+        """按图层编号返回当前快照中的图层状态。"""
+        if self._snapshot is None:
+            return None
+        normalized_layer_id: str = str(layer_id)
+        return next(
+            (
+                layer
+                for layer in self._snapshot.layers
+                if layer.layer_id == normalized_layer_id
+            ),
+            None,
+        )
 
     def _execute_context_menu(self, menu: QMenu, position: QPoint) -> object | None:
         """在图层树请求位置显示上下文菜单并返回所选操作。"""

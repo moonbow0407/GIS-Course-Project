@@ -129,3 +129,45 @@ def test_layer_context_menu_can_request_zoom_to_layer(monkeypatch) -> None:
 
     assert requested_layer_ids == ["target"]
     panel.close()
+
+
+def test_layer_context_menu_exposes_labeling_actions_for_attribute_layer(monkeypatch) -> None:
+    """含属性字段的矢量图层右键菜单应提供标注开关和分类入口。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer: VectorLayer = VectorLayer.create(
+        layer_id="cities",
+        name="城市",
+        features=(
+            Feature(
+                fid=1,
+                geometry=Point(10, 20),
+                attributes={"name": "合肥"},
+            ),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    panel: LayerPanel = LayerPanel()
+    panel.apply_snapshot(
+        WorkspaceSnapshot(
+            layers=(LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),),
+            active_layer_id=layer.layer_id,
+            display_crs=layer.crs,
+        )
+    )
+    tree: QTreeWidget | None = panel.findChild(QTreeWidget, "layerTree")
+    assert tree is not None
+    item = tree.topLevelItem(0)
+    changes: list[tuple[str, bool]] = []
+    panel.layer_labeling_changed.connect(lambda layer_id, enabled: changes.append((layer_id, enabled)))
+
+    def select_label_action(menu: QMenu, *args) -> object:
+        action = next(action for action in menu.actions() if action.text() == "标注")
+        action.setChecked(True)
+        return action
+
+    monkeypatch.setattr(panel, "_execute_context_menu", select_label_action)
+    panel._on_context_menu_requested(tree.visualItemRect(item).center())
+
+    assert changes == [("cities", True)]
+    assert application is not None
+    panel.close()

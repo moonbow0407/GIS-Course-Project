@@ -642,6 +642,83 @@ QMessageBox {
     color: #263548;
 }
 
+QDialog#labelingDialog {
+    background: #ffffff;
+    color: #263548;
+}
+
+QDialog#labelingDialog QLabel,
+QDialog#labelingDialog QCheckBox {
+    background: #ffffff;
+    color: #263548;
+}
+
+QFrame#labelingHeaderCard,
+QFrame#labelingClassCard,
+QFrame#labelingSettingsCard {
+    border: 1px solid #d9e1ea;
+    border-radius: 8px;
+    background: #f8fafc;
+    color: #263548;
+}
+
+QLabel#labelingTitle {
+    background: #f8fafc;
+    color: #17263b;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+QLabel#labelingSectionTitle {
+    background: #f8fafc;
+    color: #22344a;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QLabel#labelingHint {
+    background: #f8fafc;
+    color: #526277;
+}
+
+QDialog#labelingDialog QListWidget,
+QDialog#labelingDialog QLineEdit,
+QDialog#labelingDialog QComboBox,
+QDialog#labelingDialog QDoubleSpinBox {
+    border: 1px solid #bfcbd8;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #263548;
+    selection-background-color: #dcecf9;
+    selection-color: #0f5f9f;
+}
+
+QDialog#labelingDialog QListWidget::item {
+    min-height: 28px;
+    padding: 4px 6px;
+    background: #ffffff;
+    color: #263548;
+}
+
+QDialog#labelingDialog QListWidget::item:selected {
+    background: #dcecf9;
+    color: #0f5f9f;
+}
+
+QDialog#labelingDialog QPushButton {
+    min-height: 28px;
+    border: 1px solid #bfcbd8;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #263548;
+}
+
+QDialog#labelingDialog QPushButton:hover {
+    border-color: #0f6cbd;
+    background: #edf5fc;
+    color: #0f5f9f;
+}
+
 QDialog QLabel,
 QMessageBox QLabel {
     background: transparent;

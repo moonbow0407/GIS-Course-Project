@@ -123,6 +123,11 @@ class JsonProjectStore:
                 if layer.get("symbology") is not None
                 else None
             ),
+            labeling=(
+                self._mapping(layer.get("labeling"), "workspace.layers[].labeling")
+                if layer.get("labeling") is not None
+                else None
+            ),
             opacity=self._number(
                 layer.get("opacity", 1.0), f"图层 {index}.opacity"
             ),
@@ -259,6 +264,7 @@ class JsonProjectStore:
             "selected_feature_ids": list(layer.selected_feature_ids),
             "fingerprint": fingerprint,
             "symbology": dict(layer.symbology) if layer.symbology is not None else None,
+            "labeling": dict(layer.labeling) if layer.labeling is not None else None,
             "opacity": layer.opacity,
             "min_scale_percent": layer.min_scale_percent,
             "max_scale_percent": layer.max_scale_percent,

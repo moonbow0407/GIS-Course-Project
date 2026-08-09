@@ -89,6 +89,7 @@ from app.application.symbology_service import (
     create_unique_value_symbology,
 )
 from app.domain.feature import AttributeValue, Feature, FeatureId
+from app.domain.labeling import LabelingConfig
 from app.domain.layer_style import GeometryFamily
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
@@ -510,6 +511,31 @@ class GisApplication:
             source_layer_name=layer.source_layer_name,
             database_layer_id=layer.database_layer_id,
             symbology=symbology,
+            labeling=layer.labeling,
+        )
+        self._document.replace_layer(updated_layer)
+        self._modified = True
+        return self.snapshot()
+
+    def set_layer_labeling(
+        self,
+        layer_id: str,
+        labeling: LabelingConfig | None,
+    ) -> WorkspaceSnapshot:
+        """替换矢量图层标注配置并保留图层身份和其他样式。"""
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ValueError("标注只能应用到矢量图层。")
+        updated_layer = VectorLayer.create(
+            layer_id=layer.layer_id,
+            name=layer.name,
+            features=layer.features,
+            crs=layer.crs,
+            source_path=layer.source_path,
+            source_layer_name=layer.source_layer_name,
+            database_layer_id=layer.database_layer_id,
+            symbology=layer.symbology,
+            labeling=labeling,
         )
         self._document.replace_layer(updated_layer)
         self._modified = True
@@ -837,6 +863,7 @@ class GisApplication:
             source_layer_name=layer.source_layer_name,
             database_layer_id=layer.database_layer_id,
             symbology=layer.symbology,
+            labeling=layer.labeling,
         )
         self._document.replace_layer(updated)
         self._write_layer_to_source(updated)
@@ -865,6 +892,7 @@ class GisApplication:
             source_layer_name=layer.source_layer_name,
             database_layer_id=layer.database_layer_id,
             symbology=layer.symbology,
+            labeling=layer.labeling,
         )
         self._document.replace_layer(updated)
         self._document.clear_selection()
@@ -897,6 +925,7 @@ class GisApplication:
             source_layer_name=layer.source_layer_name,
             database_layer_id=layer.database_layer_id,
             symbology=layer.symbology,
+            labeling=layer.labeling,
         )
         self._document.replace_layer(updated_layer)
         self._write_layer_to_source(updated_layer)
@@ -925,6 +954,7 @@ class GisApplication:
             source_layer_name=layer.source_layer_name,
             database_layer_id=layer.database_layer_id,
             symbology=layer.symbology,
+            labeling=layer.labeling,
         )
         self._document.replace_layer(updated_layer)
         self._write_layer_to_source(updated_layer)
@@ -991,6 +1021,7 @@ class GisApplication:
             source_layer_name=layer.source_layer_name,
             database_layer_id=layer.database_layer_id,
             symbology=layer.symbology,
+            labeling=layer.labeling,
         )
         self._document.replace_layer(updated)
         self._write_layer_to_source(updated)
@@ -1443,6 +1474,7 @@ class GisApplication:
                 source_layer_name=projected_database_layer.source_layer_name,
                 database_layer_id=layer.database_layer_id,
                 symbology=layer.symbology,
+                labeling=layer.labeling,
             )
         if layer.source_path is None:
             raise LayerReprojectionFailed(
@@ -1470,6 +1502,7 @@ class GisApplication:
                 source_path=projected.source_path,
                 source_layer_name=projected.source_layer_name,
                 symbology=layer.symbology,
+                labeling=layer.labeling,
             )
         if isinstance(layer, RasterLayer) and isinstance(projected, RasterLayer):
             restored_raster = projected.with_identity(

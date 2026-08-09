@@ -9,6 +9,7 @@ from pyproj import CRS
 from shapely.geometry.base import BaseGeometry
 
 from app.domain.feature import Feature
+from app.domain.labeling import LabelingConfig
 from app.domain.layer_style import GeometryFamily, LayerStyle
 from app.domain.symbology import VectorRendererType, VectorSymbology
 
@@ -68,6 +69,9 @@ class VectorLayer:
 
     # 符号系统：为空时按几何类型生成单一符号。
     symbology: VectorSymbology | None = None
+
+    # 动态标注配置：为空表示该图层尚未配置标注。
+    labeling: LabelingConfig | None = None
 
     # 图层范围：根据全部有效几何计算得到的最小包围矩形。
     bounds: Bounds = field(init=False)
@@ -158,6 +162,7 @@ class VectorLayer:
         database_layer_id: int | None = None,
         layer_id: str | None = None,
         symbology: VectorSymbology | None = None,
+        labeling: LabelingConfig | None = None,
         geometry_family: GeometryFamily | None = None,
     ) -> "VectorLayer":
         """创建矢量图层，并在未提供编号时生成稳定的随机编号。
@@ -175,5 +180,6 @@ class VectorLayer:
             source_layer_name=source_layer_name,
             database_layer_id=database_layer_id,
             symbology=symbology,
+            labeling=labeling,
             geometry_family=geometry_family,
         )

@@ -20,6 +20,7 @@ from app.application.project_models import (
     ProjectManifest,
     SourceFingerprint,
 )
+from app.domain.labeling import labeling_from_dict, labeling_to_dict
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
@@ -211,6 +212,11 @@ class ProjectService:
                         if layer.symbology is not None
                         else None
                     ),
+                    labeling=(
+                        labeling_to_dict(layer.labeling)
+                        if isinstance(layer, VectorLayer)
+                        else None
+                    ),
                     opacity=document.layer_opacity(layer.layer_id),
                     blend_mode=document.layer_blend_mode(layer.layer_id),
                     min_scale_percent=document.layer_scale_range(layer.layer_id)[0],
@@ -283,6 +289,11 @@ class ProjectService:
                 if reference.symbology is not None
                 else None
             )
+            labeling = (
+                labeling_from_dict(dict(reference.labeling))
+                if reference.labeling is not None
+                else None
+            )
             return VectorLayer.create(
                 layer_id=reference.layer_id,
                 name=reference.name,
@@ -291,6 +302,7 @@ class ProjectService:
                 source_path=source_path,
                 source_layer_name=reference.source_layer_name,
                 symbology=symbology,
+                labeling=labeling,
             )
         if reference.layer_kind == "raster" and isinstance(layer, RasterLayer):
             restored_raster_symbology = (

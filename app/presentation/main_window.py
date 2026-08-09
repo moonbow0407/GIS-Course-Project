@@ -53,6 +53,7 @@ from app.application.results import (
     WorkspaceSnapshot,
 )
 from app.domain.feature import AttributeValue, Feature, FeatureId
+from app.domain.labeling import LabelingConfig, default_labeling_for_features
 from app.domain.layer_style import GeometryFamily
 from app.domain.symbology import RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
@@ -75,6 +76,7 @@ from app.presentation.widgets.database_dialogs import (
 from app.presentation.widgets.display_settings_dialog import DisplaySettingsDialog
 from app.presentation.widgets.edit_feature_dialog import EditFeatureDialog
 from app.presentation.widgets.geometry_edit_toolbar import GeometryEditToolbar
+from app.presentation.widgets.labeling_dialog import LabelingDialog
 from app.presentation.widgets.layer_panel import LayerPanel
 from app.presentation.widgets.map_canvas import MapCanvas
 from app.presentation.widgets.new_layer_dialog import NewLayerDialog
@@ -275,6 +277,8 @@ class MainWindow(QMainWindow):
         self._layer_panel.layer_attribute_requested.connect(self._show_attribute_table)
         self._layer_panel.layer_zoom_requested.connect(self._zoom_to_layer)
         self._layer_panel.layer_symbology_requested.connect(self._show_symbology)
+        self._layer_panel.layer_labeling_changed.connect(self._change_labeling_visibility)
+        self._layer_panel.layer_labeling_requested.connect(self._show_labeling)
         self._layer_panel.category_visibility_changed.connect(
             self._change_category_visibility
         )
@@ -1128,6 +1132,83 @@ class MainWindow(QMainWindow):
             return
         self._refresh_workspace()
         self._show_display_settings(active_tab=0)
+
+    def _change_labeling_visibility(self, layer_id: str, enabled: bool) -> None:
+        """响应图层右键菜单的标注开关，并在首次开启时创建默认标注类。"""
+        layer_snapshot: LayerSnapshot | None = self._layer_snapshot(layer_id)
+        if layer_snapshot is None or not isinstance(layer_snapshot.layer, VectorLayer):
+            return
+        before: LabelingConfig | None = layer_snapshot.layer.labeling
+        if enabled:
+            config: LabelingConfig = before or default_labeling_for_features(
+                layer_snapshot.layer.features
+            )
+            if not config.classes:
+                QMessageBox.information(
+                    self,
+                    "无法开启标注",
+                    "当前图层没有可用于标注的属性字段。",
+                )
+                return
+            after: LabelingConfig = replace(config, enabled=True)
+        else:
+            if before is None:
+                return
+            after = replace(before, enabled=False)
+        try:
+            self._application.set_layer_labeling(layer_id, after)
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "标注更新失败", str(error))
+            return
+        self._push_undo(
+            "切换图层标注",
+            undo_action=partial(self._application.set_layer_labeling, layer_id, before),
+            redo_action=partial(self._application.set_layer_labeling, layer_id, after),
+        )
+        self._refresh_workspace()
+
+    def _show_labeling(self, layer_id: str) -> None:
+        """打开目标图层的标注分类窗口，并在确认后一次性应用配置。"""
+        layer_snapshot: LayerSnapshot | None = self._layer_snapshot(layer_id)
+        if layer_snapshot is None or not isinstance(layer_snapshot.layer, VectorLayer):
+            return
+        try:
+            self._application.set_active_layer(layer_id)
+        except ApplicationError:
+            return
+        self._refresh_workspace()
+        dialog: LabelingDialog = LabelingDialog(layer_snapshot, self)
+        dialog.resize(820, 620)
+        parent_geometry = self.frameGeometry()
+        dialog_geometry = dialog.frameGeometry()
+        dialog_geometry.moveCenter(parent_geometry.center())
+        dialog.move(dialog_geometry.topLeft())
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.result_config is None:
+            return
+        before: LabelingConfig | None = layer_snapshot.layer.labeling
+        after: LabelingConfig = dialog.result_config
+        try:
+            self._application.set_layer_labeling(layer_id, after)
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "标注更新失败", str(error))
+            return
+        self._push_undo(
+            "修改标注分类",
+            undo_action=partial(self._application.set_layer_labeling, layer_id, before),
+            redo_action=partial(self._application.set_layer_labeling, layer_id, after),
+        )
+        self._refresh_workspace()
+
+    def _layer_snapshot(self, layer_id: str) -> LayerSnapshot | None:
+        """按图层编号返回当前工作区快照中的图层。"""
+        return next(
+            (
+                layer
+                for layer in self._application.snapshot().layers
+                if layer.layer_id == layer_id
+            ),
+            None,
+        )
 
     def _current_symbology(
         self, layer_id: str
