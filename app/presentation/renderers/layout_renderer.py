@@ -48,6 +48,7 @@ def render_map_frame(
     frame: MapFrameElement,
     snapshot: WorkspaceSnapshot,
     dpi: float = 300.0,
+    reference_dpi: float | None = None,
 ) -> QPixmap:
     """将工作区数据渲染到地图框对应的像素图。
 
@@ -55,6 +56,9 @@ def render_map_frame(
         frame: 地图框布局元素（位置、大小、比例尺）。
         snapshot: 当前工作区全部图层的快照。
         dpi: 输出分辨率（默认 300）。
+        reference_dpi: map_units_per_pixel 当初计算时使用的 DPI。
+                       为 None 时假定与 dpi 相同（无需调整）。
+                       若与 dpi 不同，则等比缩放 mupp 以保证地理范围不变。
 
     返回:
         已渲染的像素图；空快照时返回白色填充图。
@@ -62,6 +66,8 @@ def render_map_frame(
     pw: int = max(1, round(_mm_to_px(frame.width_mm, dpi)))
     ph: int = max(1, round(_mm_to_px(frame.height_mm, dpi)))
     mupp: float = frame.map_units_per_pixel
+    if reference_dpi is not None and reference_dpi > 0:
+        mupp = mupp * (reference_dpi / dpi)
 
     # --- 计算地图范围 ---
     ground_half_w: float = pw * mupp / 2.0
@@ -231,7 +237,11 @@ def render_legend(
     dpi: float,
     snapshot: WorkspaceSnapshot | None = None,
 ) -> list[QGraphicsItem]:
-    """在场景中绘制图例：符号预览 + 图层名称。
+    """在场景中绘制图例：按几何类型渲染对应符号预览 + 图层名称。
+
+    点图层 → 实心圆，线图层 → 水平线段，面图层 → 填充矩形。
+    颜色取自图层的实际符号系统，与地图显示一致。
+    支持通过 ``column_count`` 分列布局。
 
     参数:
         element: 图例布局元素。
@@ -242,10 +252,15 @@ def render_legend(
     返回:
         创建的全部图元。
     """
+    from app.domain.layer_style import GeometryFamily
+    from app.domain.raster_layer import RasterLayer
+    from app.domain.symbology import VectorRendererType
+
     items: list[QGraphicsItem] = []
     px: float = _mm_to_px(element.x_mm, dpi)
     py: float = _mm_to_px(element.y_mm, dpi)
 
+    # ── 字体与尺寸 ──────────────────────────────────────────────
     title_font: QFont = QFont("Arial")
     title_font.setPixelSize(max(1, round(_mm_to_px(element.title_font_size_mm, dpi))))
     title_font.setBold(True)
@@ -253,60 +268,261 @@ def render_legend(
     item_font: QFont = QFont("Arial")
     item_font.setPixelSize(max(1, round(_mm_to_px(element.item_font_size_mm, dpi))))
 
-    row_h: float = _mm_to_px(element.item_font_size_mm + 1.5, dpi)
-    patch_w: float = _mm_to_px(6.0, dpi)
-    patch_h: float = _mm_to_px(3.0, dpi)
+    sub_font: QFont = QFont("Arial")
+    sub_font.setPixelSize(max(1, round(_mm_to_px(element.item_font_size_mm * 0.85, dpi))))
+
+    row_h: float = _mm_to_px(element.item_font_size_mm + 2.5, dpi)
+    patch_size: float = _mm_to_px(7.0, dpi)
     gap: float = _mm_to_px(1.5, dpi)
+    indent: float = _mm_to_px(4.0, dpi)
 
-    cur_y: float = py
+    # ── 阶段一：收集条目（不立即创建图元） ──────────────────────
+    # 每条目: (kind, label, font, color, geom_family, style, height_px)
+    body_entries: list[dict] = []
 
-    # 标题
-    title: QGraphicsSimpleTextItem = scene.addSimpleText(element.title, title_font)
-    title.setPos(px, cur_y)
-    title.setBrush(QBrush(QColor("#1f2937")))
-    title.setZValue(20)
-    items.append(title)
-    cur_y += title.boundingRect().height() + gap * 2
-
-    # 遍历可见图层
     if snapshot is not None:
         for layer_snap in snapshot.layers:
-            if not layer_snap.visible or not isinstance(layer_snap.layer, VectorLayer):
+            if not layer_snap.visible:
                 continue
-            vec_layer: VectorLayer = layer_snap.layer
-            # 符号色块
-            fill_color: QColor = QColor("#9ec5fe")
-            stroke_color: QColor = QColor("#2f7de1")
-            if vec_layer.symbology is not None:
-                style = vec_layer.style
-                if style is not None:
-                    fill_color = QColor(style.fill_color) if style.fill_color != "transparent" else QColor(Qt.GlobalColor.transparent)
-                    stroke_color = QColor(style.stroke_color)
 
-            patch: QGraphicsRectItem = scene.addRect(
-                QRectF(px, cur_y + (row_h - patch_h) / 2, patch_w, patch_h),
-                QPen(stroke_color, 1.0),
-                QBrush(fill_color),
+            layer = layer_snap.layer
+            layer_name: str = getattr(layer, "name", "图层")
+
+            if isinstance(layer, RasterLayer):
+                body_entries.append({
+                    "kind": "simple",
+                    "label": layer_name,
+                    "font": item_font,
+                    "color": "#374151",
+                    "geom": "raster",
+                    "style": None,
+                })
+                continue
+
+            if not isinstance(layer, VectorLayer):
+                continue
+
+            symbology = layer.symbology
+            geom_family = layer.geometry_family
+
+            if (symbology is not None
+                    and symbology.renderer_type is VectorRendererType.UNIQUE
+                    and symbology.unique_classes):
+                # 图层名（粗体）
+                body_entries.append({
+                    "kind": "layer_header",
+                    "label": layer_name,
+                    "font": item_font,
+                    "color": "#374151",
+                    "geom": None,
+                    "style": None,
+                })
+                for cat in symbology.unique_classes:
+                    if not cat.visible:
+                        continue
+                    cat_label = cat.label if cat.label else cat.value_key
+                    body_entries.append({
+                        "kind": "category",
+                        "label": cat_label,
+                        "font": sub_font,
+                        "color": "#6b7280",
+                        "geom": geom_family,
+                        "style": cat.symbol,
+                    })
+            else:
+                body_entries.append({
+                    "kind": "simple",
+                    "label": layer_name,
+                    "font": item_font,
+                    "color": "#374151",
+                    "geom": geom_family,
+                    "style": layer.style,
+                })
+
+    # ── 阶段二：计算列布局 ──────────────────────────────────────
+    num_cols: int = max(1, element.column_count)
+    total_col_width: float = _mm_to_px(element.width_mm, dpi)
+    col_width: float = total_col_width / num_cols
+    per_col: int = (
+        math.ceil(len(body_entries) / num_cols) if body_entries else 1
+    )
+
+    # ── 阶段三：渲染标题（跨全部列居中） ──────────────────────────
+    title_item: QGraphicsSimpleTextItem = scene.addSimpleText(
+        element.title, title_font,
+    )
+    title_width: float = title_item.boundingRect().width()
+    title_item.setPos(
+        px + total_col_width / 2.0 - title_width / 2.0,
+        py,
+    )
+    title_item.setBrush(QBrush(QColor("#1f2937")))
+    title_item.setZValue(20)
+    items.append(title_item)
+
+    title_bottom: float = py + title_item.boundingRect().height() + gap * 2
+
+    # ── 阶段四：逐列渲染条目 ────────────────────────────────────
+    for idx, entry in enumerate(body_entries):
+        col: int = idx // per_col
+        if col >= num_cols:
+            col = num_cols - 1  # 防止舍入导致列越界
+        row_in_col: int = idx % per_col
+
+        entry_x: float = px + col * col_width
+        entry_y: float = title_bottom + row_in_col * row_h
+
+        kind: str = entry["kind"]
+        label: str = entry["label"]
+        font: QFont = entry["font"]
+        color_str: str = entry["color"]
+        geom = entry["geom"]
+        style = entry["style"]
+
+        if kind == "layer_header":
+            # 粗体图层名（无符号）
+            text = scene.addSimpleText(label, font)
+            text.setPos(entry_x, entry_y)
+            text.setBrush(QBrush(QColor(color_str)))
+            text.setZValue(20)
+            items.append(text)
+
+        elif kind == "category":
+            # 缩进子条目：符号色块 + 标签
+            cat_px: float = entry_x + indent
+            _draw_patch_for_geom(
+                scene, items, geom, style,
+                cat_px, entry_y, patch_size, row_h,
             )
-            patch.setZValue(20)
-            items.append(patch)
+            cat_label_x: float = cat_px + patch_size + _mm_to_px(2.0, dpi)
+            text = scene.addSimpleText(f"  {label}", font)
+            text.setPos(cat_label_x, entry_y)
+            text.setBrush(QBrush(QColor(color_str)))
+            text.setZValue(20)
+            items.append(text)
 
-            # 图层名
-            layer_name: str = getattr(layer_snap.layer, "name", "图层")
-            name_text: QGraphicsSimpleTextItem = scene.addSimpleText(
-                layer_name, item_font,
+        else:  # "simple" — 符号色块 + 图层名
+            label_x: float = entry_x + patch_size + _mm_to_px(3.0, dpi)
+            _draw_patch_for_geom(
+                scene, items, geom, style,
+                entry_x, entry_y, patch_size, row_h,
             )
-            name_text.setPos(px + patch_w + gap, cur_y)
-            name_text.setBrush(QBrush(QColor("#374151")))
-            name_text.setZValue(20)
-            items.append(name_text)
-
-            cur_y += row_h + gap
-
-    # 更新元素高度
-    element.height_mm = (cur_y - py) / dpi * 25.4
+            text = scene.addSimpleText(label, font)
+            text.setPos(label_x, entry_y)
+            text.setBrush(QBrush(QColor(color_str)))
+            text.setZValue(20)
+            items.append(text)
 
     return items
+
+
+def _draw_patch_for_geom(
+    scene: QGraphicsScene,
+    items: list[QGraphicsItem],
+    geom_family,
+    style,
+    px: float,
+    py: float,
+    patch_size: float,
+    row_h: float,
+) -> None:
+    """根据几何类型和样式调度绘制符号色块。"""
+    if geom_family == "raster" or style is None:
+        _draw_raster_patch(scene, items, px, py, patch_size, row_h)
+        return
+
+    from app.domain.layer_style import GeometryFamily
+
+    if geom_family is GeometryFamily.POINT:
+        _draw_point_patch(scene, items, px, py, patch_size, row_h, style)
+    elif geom_family is GeometryFamily.LINE:
+        _draw_line_patch(scene, items, px, py, patch_size, row_h, style)
+    else:
+        _draw_polygon_patch(scene, items, px, py, patch_size, row_h, style)
+
+
+def _draw_point_patch(
+    scene: QGraphicsScene,
+    items: list[QGraphicsItem],
+    px: float, py: float,
+    patch_size: float, row_h: float,
+    style,
+) -> None:
+    """绘制点符号：实心圆。"""
+    fill = QColor(style.fill_color) if style.fill_color != "transparent" else QColor(Qt.GlobalColor.transparent)
+    stroke = QColor(style.stroke_color)
+    r: float = patch_size * 0.35
+    cx: float = px + patch_size / 2
+    cy: float = py + row_h / 2
+    circle: QGraphicsRectItem = scene.addEllipse(
+        QRectF(cx - r, cy - r, r * 2, r * 2),
+        QPen(stroke, max(0.8, style.line_width * 0.6)),
+        QBrush(fill),
+    )
+    circle.setZValue(20)
+    items.append(circle)
+
+
+def _draw_line_patch(
+    scene: QGraphicsScene,
+    items: list[QGraphicsItem],
+    px: float, py: float,
+    patch_size: float, row_h: float,
+    style,
+) -> None:
+    """绘制线符号：水平线段。"""
+    stroke = QColor(style.stroke_color)
+    lw: float = max(1.0, style.line_width * 1.2)
+    y: float = py + row_h / 2
+    line = scene.addLine(
+        px + 1, y, px + patch_size - 1, y,
+        QPen(stroke, lw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap),
+    )
+    line.setZValue(20)
+    items.append(line)
+
+
+def _draw_polygon_patch(
+    scene: QGraphicsScene,
+    items: list[QGraphicsItem],
+    px: float, py: float,
+    patch_size: float, row_h: float,
+    style,
+) -> None:
+    """绘制面符号：填充矩形 + 描边。"""
+    fill = QColor(style.fill_color) if style.fill_color != "transparent" else QColor(Qt.GlobalColor.transparent)
+    stroke = QColor(style.stroke_color)
+    rect_h: float = row_h * 0.55
+    rect_y: float = py + (row_h - rect_h) / 2
+    rect = scene.addRect(
+        QRectF(px + 1, rect_y, patch_size - 2, rect_h),
+        QPen(stroke, max(0.8, style.line_width * 0.6)),
+        QBrush(fill),
+    )
+    rect.setZValue(20)
+    items.append(rect)
+
+
+def _draw_raster_patch(
+    scene: QGraphicsScene,
+    items: list[QGraphicsItem],
+    px: float, py: float,
+    patch_size: float, row_h: float,
+) -> None:
+    """绘制栅格符号：3×3 棋盘格。"""
+    cell: float = patch_size / 3
+    rect_y: float = py + (row_h - patch_size + cell) / 2
+    for row in range(3):
+        for col in range(3):
+            is_dark: bool = (row + col) % 2 == 0
+            color: QColor = QColor("#6b7280") if is_dark else QColor("#d1d5db")
+            cell_rect = scene.addRect(
+                QRectF(px + col * cell, rect_y + row * cell, cell, cell),
+                QPen(Qt.PenStyle.NoPen),
+                QBrush(color),
+            )
+            cell_rect.setZValue(20)
+            items.append(cell_rect)
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +692,7 @@ def render_full_page(
     document,
     snapshot: WorkspaceSnapshot | None = None,
     dpi: float | None = None,
+    view_dpi: float = 96.0,
 ) -> QPixmap:
     """将整个布局页面渲染到一个 QPixmap。
 
@@ -483,6 +700,8 @@ def render_full_page(
         document: 布局文档（LayoutDocument），包含页面规格和元素列表。
         snapshot: 工作区快照（用于地图框渲染）。
         dpi: 输出分辨率；为 None 时使用页面自身的 dpi。
+        view_dpi: 交互式视图使用的屏幕 DPI。
+                  map_units_per_pixel 基于此值计算，导出 DPI 不同时需等比缩放。
 
     返回:
         渲染完成的像素图。
@@ -507,7 +726,7 @@ def render_full_page(
     for element in document.elements:
         if isinstance(element, MapFrameElement):
             if snapshot is not None:
-                pixmap = render_map_frame(element, snapshot, out_dpi)
+                pixmap = render_map_frame(element, snapshot, out_dpi, reference_dpi=view_dpi)
                 pix_item = scene.addPixmap(pixmap)
                 px = _mm_to_px(element.x_mm, out_dpi)
                 py = _mm_to_px(element.y_mm, out_dpi)

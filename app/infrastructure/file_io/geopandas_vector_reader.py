@@ -69,20 +69,20 @@ class GeoPandasVectorReader:
                 resolved_path,
                 layer=resolved_layer_name,
             )
-        except UnicodeDecodeError:
-            # 中文 Windows 上 ArcGIS 导出的 shapefile 的 .dbf 属性表
-            # 经常使用 GBK 编码，pyogrio 默认 UTF-8 解码会失败。
-            # 回退为 GBK 再试一次。
-            try:
-                dataframe = gpd.read_file(
-                    resolved_path,
-                    layer=resolved_layer_name,
-                    encoding="gbk",
+            # 即使未抛出 UnicodeDecodeError，GBK 字节也可能恰好是合法 UTF-8 序列，
+            # 导致静默乱码。对 shapefile 检测字符串列是否包含典型乱码特征。
+            if (
+                suffix == ".shp"
+                and not dataframe.empty
+                and self._looks_garbled(dataframe)
+            ):
+                dataframe = self._read_with_fallback_encoding(
+                    resolved_path, resolved_layer_name,
                 )
-            except Exception as fallback_error:
-                raise VectorReadFailed(
-                    f"矢量文件读取失败（已尝试 UTF-8 / GBK 编码）：{resolved_path.name}"
-                ) from fallback_error
+        except UnicodeDecodeError:
+            dataframe = self._read_with_fallback_encoding(
+                resolved_path, resolved_layer_name,
+            )
         except Exception as error:
             raise VectorReadFailed(f"矢量文件读取失败：{resolved_path.name}") from error
 
@@ -174,6 +174,68 @@ class GeoPandasVectorReader:
                 f"GeoJSON 坐标超出经纬度范围，文件可能缺失或声明了错误的坐标系："
                 f"{file_name}"
             )
+
+    @staticmethod
+    def _read_with_fallback_encoding(
+        resolved_path: Path,
+        resolved_layer_name: str | None,
+    ) -> gpd.GeoDataFrame:
+        """依次尝试 GBK / GB18030 / 系统默认编码读取矢量文件。"""
+        import locale
+
+        for encoding in ("gbk", "gb18030"):
+            try:
+                return gpd.read_file(
+                    resolved_path,
+                    layer=resolved_layer_name,
+                    encoding=encoding,
+                )
+            except Exception:
+                continue
+        sys_enc = locale.getpreferredencoding()
+        try:
+            return gpd.read_file(
+                resolved_path,
+                layer=resolved_layer_name,
+                encoding=sys_enc,
+            )
+        except Exception as fallback_error:
+            raise VectorReadFailed(
+                f"矢量文件读取失败（已尝试 UTF-8 / GBK / GB18030 / {sys_enc} 编码）："
+                f"{resolved_path.name}"
+            ) from fallback_error
+
+    @staticmethod
+    def _looks_garbled(dataframe: gpd.GeoDataFrame) -> bool:
+        """检测字符串列是否包含典型乱码特征（GBK 被误读为 UTF-8）。
+
+        乱码特征：包含大量 CJK 兼容区字符（U+F900-U+FAFF）或
+        带有异常组合标记的字符，这些在正常中文文本中极少出现。
+        """
+        string_columns = dataframe.select_dtypes(include=["object"]).columns
+        if len(string_columns) == 0:
+            return False
+        garbled_chars = 0
+        total_chars = 0
+        for col in string_columns:
+            for value in dataframe[col].dropna():
+                text = str(value)
+                total_chars += len(text)
+                for ch in text:
+                    code = ord(ch)
+                    # CJK 兼容区（乱码常见区域）
+                    if 0xF900 <= code <= 0xFAFF:
+                        garbled_chars += 1
+                    # 带有异常组合标记的字符
+                    elif 0x0300 <= code <= 0x036F:
+                        garbled_chars += 1
+                if total_chars > 500:
+                    break
+            if total_chars > 500:
+                break
+        if total_chars == 0:
+            return False
+        return garbled_chars / total_chars > 0.05
 
     @staticmethod
     def _normalize_feature_id(value: Any) -> FeatureId:

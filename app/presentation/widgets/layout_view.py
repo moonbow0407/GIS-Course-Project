@@ -150,6 +150,8 @@ class LayoutView(QGraphicsView):
 
     # 选中元素变化时发出
     element_selected = Signal(str)  # element_id
+    # 撤销/重做状态变化时发出
+    undo_state_changed = Signal(bool, bool)  # can_undo, can_redo
 
     def __init__(self, parent: QFrame | None = None) -> None:
         super().__init__(parent)
@@ -195,6 +197,14 @@ class LayoutView(QGraphicsView):
         self._undo_stack: list[tuple[str, Callable[[], object], Callable[[], object]]] = []
         self._redo_stack: list[tuple[str, Callable[[], object], Callable[[], object]]] = []
 
+        # 中键平移状态
+        self._panning: bool = False
+        self._pan_start: QPointF | None = None
+
+        # Shift+拖拽 地图内容平移状态
+        self._map_panning: bool = False
+        self._map_pan_center: tuple[float, float] = (0.0, 0.0)
+
         # 缩放手柄状态
         self._resize_handles: list[QGraphicsRectItem] = []
         self._resizing_handle_index: int | None = None
@@ -210,6 +220,19 @@ class LayoutView(QGraphicsView):
     # 公开接口
     # ------------------------------------------------------------------
 
+    @property
+    def _view_dpi(self) -> float:
+        """返回屏幕逻辑 DPI，供交互式视图渲染使用。
+
+        页面设置中的 page.dpi (300) 仅用于导出，屏幕显示使用此值 (~96)，
+        确保纸张在屏幕上接近物理尺寸，实现"所见即所得"的纸张预览。
+        """
+        return float(self.logicalDpiX())
+
+    def set_map_canvas(self, canvas) -> None:
+        """设置关联的地图画布引用，用于布局视图同步数据视图的缩放状态。"""
+        self._map_canvas = canvas
+
     def set_snapshot(self, snapshot: WorkspaceSnapshot) -> None:
         """设置当前工作区快照，供地图框渲染使用。"""
         self._snapshot = snapshot
@@ -223,6 +246,7 @@ class LayoutView(QGraphicsView):
         self._document = document
         self._needs_initial_fit = True
         self._rebuild_scene()
+        self._fit_page()
 
     def document(self) -> LayoutDocument | None:
         """返回当前排版文档，未设置时返回 None。"""
@@ -232,17 +256,30 @@ class LayoutView(QGraphicsView):
         """将纸张适配到当前视口大小。"""
         self._fit_page()
 
+    def zoom_in(self) -> None:
+        """放大视图（以视口中心为锚点）。"""
+        self._apply_scale(1.25)
+
+    def zoom_out(self) -> None:
+        """缩小视图（以视口中心为锚点）。"""
+        self._apply_scale(0.8)
+
     def has_content(self) -> bool:
         """是否已设置排版文档。"""
         return self._document is not None
 
     def add_map_frame(self) -> str | None:
-        """在页面中心添加一个默认大小地图框。
+        """在页面中心添加一个默认大小地图框（每种元素最多一个）。
 
         返回:
-            新元素的 ID，若文档未设置则返回 None。
+            新元素的 ID；若已存在同类型元素则选中已有元素并返回 None。
         """
         if self._document is None or self._document.page is None:
+            return None
+        existing = self._find_existing(MapFrameElement)
+        if existing is not None:
+            self._select_element(existing.element_id)
+            self.element_selected.emit(existing.element_id)
             return None
         page = self._document.page
         # 默认地图框占据可打印区域的 70%
@@ -253,20 +290,34 @@ class LayoutView(QGraphicsView):
         fx: float = page.margin_mm + (pw - fw) / 2
         fy: float = page.margin_mm + (ph - fh) / 2
 
-        # 从快照获取初始地图中心和分辨率
+        # 优先从数据视图同步当前可见范围和中心；不可用时回退到全图适配。
         cx, cy = 0.0, 0.0
-        mupp = 1.0
-        if self._snapshot is not None and self._snapshot.layers:
-            first = self._snapshot.layers[0]
-            b = first.bounds
-            cx = (b[0] + b[2]) / 2.0
-            cy = (b[1] + b[3]) / 2.0
-            # 估算合适的 mupp 使数据适配地图框
-            data_w = max(b[2] - b[0], 1e-9)
-            data_h = max(b[3] - b[1], 1e-9)
-            px_w = _mm_to_px(fw, page.dpi)
-            px_h = _mm_to_px(fh, page.dpi)
-            mupp = max(data_w / px_w, data_h / px_h)
+        mupp: float = 0.0  # 0 表示尚未设置
+        frame_px_w: float = _mm_to_px(fw, self._view_dpi)
+        frame_px_h: float = _mm_to_px(fh, self._view_dpi)
+
+        map_canvas = getattr(self, "_map_canvas", None)
+        if map_canvas is not None:
+            extent = map_canvas.capture_view_extent()
+            if extent is not None:
+                v_cx, v_cy, v_w, v_h = extent
+                if v_w > 1e-9 and v_h > 1e-9:
+                    cx = v_cx
+                    cy = v_cy
+                    mupp = max(v_w / frame_px_w, v_h / frame_px_h)
+
+        if mupp <= 0:
+            # 回退：从快照估算，使全图数据适配地图框
+            if self._snapshot is not None and self._snapshot.layers:
+                first = self._snapshot.layers[0]
+                b = first.bounds
+                cx = (b[0] + b[2]) / 2.0
+                cy = (b[1] + b[3]) / 2.0
+                data_w = max(b[2] - b[0], 1e-9)
+                data_h = max(b[3] - b[1], 1e-9)
+                mupp = max(data_w / frame_px_w, data_h / frame_px_h)
+            else:
+                mupp = 1.0
 
         frame = MapFrameElement(
             x_mm=fx,
@@ -286,12 +337,17 @@ class LayoutView(QGraphicsView):
         return frame.element_id
 
     def add_scale_bar(self) -> str | None:
-        """在页面底部添加比例尺。
+        """在页面底部添加比例尺（每种元素最多一个）。
 
         返回:
-            新元素的 ID，若文档未设置则返回 None。
+            新元素的 ID；若已存在同类型元素则选中已有元素并返回 None。
         """
         if self._document is None:
+            return None
+        existing = self._find_existing(ScaleBarElement)
+        if existing is not None:
+            self._select_element(existing.element_id)
+            self.element_selected.emit(existing.element_id)
             return None
         page = self._document.page
 
@@ -322,12 +378,17 @@ class LayoutView(QGraphicsView):
         return element.element_id
 
     def add_legend(self) -> str | None:
-        """在页面右侧添加图例。
+        """在页面右侧添加图例（每种元素最多一个）。
 
         返回:
-            新元素的 ID，若文档未设置则返回 None。
+            新元素的 ID；若已存在同类型元素则选中已有元素并返回 None。
         """
         if self._document is None:
+            return None
+        existing = self._find_existing(LegendElement)
+        if existing is not None:
+            self._select_element(existing.element_id)
+            self.element_selected.emit(existing.element_id)
             return None
         page = self._document.page
 
@@ -341,11 +402,18 @@ class LayoutView(QGraphicsView):
                 pos_y = e.y_mm
                 break
 
+        # 根据可见图层数估算初始高度
+        visible_count = (
+            sum(1 for s in self._snapshot.layers if s.visible)
+            if self._snapshot else 0
+        )
+        est_height = 8.0 + visible_count * 7.0  # 标题 + 每行约 7mm
+
         element = LegendElement(
             x_mm=pos_x,
             y_mm=pos_y,
             width_mm=50,
-            height_mm=5,
+            height_mm=est_height,
             linked_frame_id=linked_id,
         )
         self._add_element(element)
@@ -357,12 +425,17 @@ class LayoutView(QGraphicsView):
         return element.element_id
 
     def add_north_arrow(self) -> str | None:
-        """在页面右上方添加指北针。
+        """在页面右上方添加指北针（每种元素最多一个）。
 
         返回:
-            新元素的 ID，若文档未设置则返回 None。
+            新元素的 ID；若已存在同类型元素则选中已有元素并返回 None。
         """
         if self._document is None:
+            return None
+        existing = self._find_existing(NorthArrowElement)
+        if existing is not None:
+            self._select_element(existing.element_id)
+            self.element_selected.emit(existing.element_id)
             return None
         page = self._document.page
 
@@ -390,12 +463,17 @@ class LayoutView(QGraphicsView):
         return element.element_id
 
     def add_text_element(self) -> str | None:
-        """弹出输入框让用户输入文本，然后在页面中心添加文本元素。
+        """弹出输入框让用户输入文本，然后在页面中心添加文本元素（每种元素最多一个）。
 
         返回:
-            新元素的 ID，若用户取消或文档未设置则返回 None。
+            新元素的 ID；若已存在同类型元素则选中已有元素并返回 None。
         """
         if self._document is None:
+            return None
+        existing = self._find_existing(TextElement)
+        if existing is not None:
+            self._select_element(existing.element_id)
+            self.element_selected.emit(existing.element_id)
             return None
         text, ok = QInputDialog.getText(
             self, "添加文本", "请输入文本内容:",
@@ -495,8 +573,7 @@ class LayoutView(QGraphicsView):
         """渲染单个布局元素到场景。"""
         if self._document is None:
             return
-        page = self._document.page
-        dpi = page.dpi
+        dpi: float = self._view_dpi
 
         # 移除旧图元
         old = self._element_items.pop(element.element_id, None)
@@ -746,7 +823,7 @@ class LayoutView(QGraphicsView):
             return
 
         page = self._document.page
-        dpi = page.dpi
+        dpi: float = self._view_dpi
 
         paper_w: float = _mm_to_px(page.width_mm, dpi)
         paper_h: float = _mm_to_px(page.height_mm, dpi)
@@ -848,14 +925,23 @@ class LayoutView(QGraphicsView):
     def _element_at(self, scene_pos: QPointF) -> str | None:
         """返回场景坐标处最上层的元素 ID，未命中返回 None。
 
-        遍历全部元素并返回最后命中者（后添加的元素在上层），
-        避免大尺寸地图框拦截对小元素的点击。
+        按内容图元的 z-value 排序，z 值最高的元素优先被选中。
+        内容图元（文本 z=20、比例尺 z=20 等）优先于地图框（z=10），
+        即使两者 bounds_rect 重叠也能精确选中上层元素。
         """
-        hit: str | None = None
-        for elem_id, (_items, bounds_rect) in self._element_items.items():
-            if bounds_rect.contains(scene_pos):
-                hit = elem_id
-        return hit
+        best_z: float = -1.0
+        best_id: str | None = None
+        for elem_id, (items, bounds_rect) in self._element_items.items():
+            for item in items:
+                local = item.mapFromScene(scene_pos)
+                if item.contains(local) and item.zValue() >= best_z:
+                    best_z = item.zValue()
+                    best_id = elem_id
+            # 兜底：无内容图元命中时用 bounds_rect
+            if bounds_rect.contains(scene_pos) and bounds_rect.zValue() > best_z:
+                best_z = bounds_rect.zValue()
+                best_id = elem_id
+        return best_id
 
     # ------------------------------------------------------------------
     # Qt 事件
@@ -878,6 +964,12 @@ class LayoutView(QGraphicsView):
         # 进入布局模式后不再重置视图，用户可自由缩放/平移
 
     def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._panning = True
+            self._pan_start = event.position()
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             scene_pos: QPointF = self.mapToScene(event.pos())
             # 先检查是否点击了缩放手柄
@@ -894,11 +986,22 @@ class LayoutView(QGraphicsView):
                 return
             elem_id: str | None = self._element_at(scene_pos)
             if elem_id is not None:
+                elem = self._find_element(elem_id)
+                # Shift + 点击已选中的地图框 → 进入地图内容平移模式
+                shift_held = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                if (shift_held
+                        and isinstance(elem, MapFrameElement)
+                        and elem_id == self._selected_element_id):
+                    self._map_panning = True
+                    self._drag_start_pos = scene_pos
+                    self._map_pan_center = (elem.map_center_x, elem.map_center_y)
+                    self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
+                    event.accept()
+                    return
                 # 点击元素：选中并准备拖拽移动
                 self._select_element(elem_id)
                 self._dragging_element_id = elem_id
                 self._drag_start_pos = scene_pos
-                elem = self._find_element(elem_id)
                 if elem is not None:
                     self._drag_start_mm = (elem.x_mm, elem.y_mm)
                 self.element_selected.emit(elem_id)
@@ -911,6 +1014,32 @@ class LayoutView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        # Shift+拖拽 → 平移地图框内容
+        if self._map_panning and self._drag_start_pos is not None:
+            scene_pos = self.mapToScene(event.pos())
+            elem = self._find_element(self._selected_element_id)
+            if isinstance(elem, MapFrameElement):
+                dx_scene = scene_pos.x() - self._drag_start_pos.x()
+                dy_scene = scene_pos.y() - self._drag_start_pos.y()
+                mupp = elem.map_units_per_pixel
+                # 场景 X 与地图 X 同向，场景 Y 与地图 Y 反向
+                elem.map_center_x = self._map_pan_center[0] - dx_scene * mupp
+                elem.map_center_y = self._map_pan_center[1] + dy_scene * mupp
+                self._render_element(elem)
+                if self._selected_element_id == elem.element_id:
+                    self._select_element(elem.element_id)
+            event.accept()
+            return
+
+        if self._panning and self._pan_start is not None:
+            delta = event.position() - self._pan_start
+            self._pan_start = event.position()
+            self.horizontalScrollBar().setValue(
+                self.horizontalScrollBar().value() - round(delta.x()))
+            self.verticalScrollBar().setValue(
+                self.verticalScrollBar().value() - round(delta.y()))
+            event.accept()
+            return
         if self._resizing_handle_index is not None:
             self._do_resize(event)
             event.accept()
@@ -922,7 +1051,7 @@ class LayoutView(QGraphicsView):
             elem = self._find_element(self._dragging_element_id)
             if elem is None or self._document is None:
                 return
-            dpi = self._document.page.dpi
+            dpi: float = self._view_dpi
             dx_mm: float = (scene_pos.x() - self._drag_start_pos.x()) / dpi * 25.4
             dy_mm: float = (scene_pos.y() - self._drag_start_pos.y()) / dpi * 25.4
             elem.x_mm = self._drag_start_mm[0] + dx_mm
@@ -933,6 +1062,36 @@ class LayoutView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._map_panning:
+            self._map_panning = False
+            old_cx, old_cy = self._map_pan_center
+            elem = self._find_element(self._selected_element_id)
+            if isinstance(elem, MapFrameElement):
+                new_cx, new_cy = elem.map_center_x, elem.map_center_y
+                if (old_cx, old_cy) != (new_cx, new_cy):
+                    self._push_undo(
+                        "平移地图",
+                        undo_action=lambda e=elem, cx=old_cx, cy=old_cy: (
+                            setattr(e, "map_center_x", cx),
+                            setattr(e, "map_center_y", cy),
+                            self._render_element(e),
+                        ),
+                        redo_action=lambda e=elem, cx=new_cx, cy=new_cy: (
+                            setattr(e, "map_center_x", cx),
+                            setattr(e, "map_center_y", cy),
+                            self._render_element(e),
+                        ),
+                    )
+            self._drag_start_pos = None
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._panning = False
+            self._pan_start = None
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
         if self._resizing_handle_index is not None:
             self._finish_resize()
             event.accept()
@@ -1000,9 +1159,31 @@ class LayoutView(QGraphicsView):
             self.apply_element_changes(element_id, changes)
 
     def wheelEvent(self, event) -> None:
-        factor: float = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
+        # Ctrl+滚轮 → 始终缩放整个布局视图
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            factor = 1.05 if event.angleDelta().y() > 0 else 1.0 / 1.05
+            factor: float = 1.05 if event.angleDelta().y() > 0 else 1.0 / 1.05
+            self._apply_scale(factor)
+            event.accept()
+            return
+
+        # 选中地图框时，滚轮缩放地图内容（map_units_per_pixel）
+        if self._selected_element_id is not None:
+            elem = self._find_element(self._selected_element_id)
+            if isinstance(elem, MapFrameElement):
+                scene_pos = self.mapToScene(event.position().toPoint())
+                old = self._element_items.get(elem.element_id)
+                if old is not None and old[1].contains(scene_pos):
+                    zoom_in = event.angleDelta().y() > 0
+                    factor = 0.8 if zoom_in else 1.25  # mupp 越小越放大
+                    elem.map_units_per_pixel *= factor
+                    self._render_element(elem)
+                    if self._selected_element_id == elem.element_id:
+                        self._select_element(elem.element_id)
+                    event.accept()
+                    return
+
+        # 默认：缩放整个布局视图
+        factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
         self._apply_scale(factor)
         event.accept()
 
@@ -1107,6 +1288,7 @@ class LayoutView(QGraphicsView):
         # 限制栈深度
         if len(self._undo_stack) > 50:
             self._undo_stack.pop(0)
+        self.undo_state_changed.emit(self.can_undo(), self.can_redo())
 
     def _undo(self) -> None:
         """撤销最近一步操作。"""
@@ -1115,6 +1297,7 @@ class LayoutView(QGraphicsView):
         _desc, undo_fn, redo_fn = self._undo_stack.pop()
         undo_fn()
         self._redo_stack.append((_desc, undo_fn, redo_fn))
+        self.undo_state_changed.emit(self.can_undo(), self.can_redo())
 
     def _redo(self) -> None:
         """重做最近一次撤销。"""
@@ -1123,6 +1306,7 @@ class LayoutView(QGraphicsView):
         _desc, undo_fn, redo_fn = self._redo_stack.pop()
         redo_fn()
         self._undo_stack.append((_desc, undo_fn, redo_fn))
+        self.undo_state_changed.emit(self.can_undo(), self.can_redo())
 
     def can_undo(self) -> bool:
         """撤销栈非空时返回 True。"""
@@ -1141,6 +1325,15 @@ class LayoutView(QGraphicsView):
     # 辅助
     # ------------------------------------------------------------------
 
+    def _find_existing(self, element_type: type) -> LayoutElement | None:
+        """查找文档中第一个指定类型的元素，不存在返回 None。"""
+        if self._document is None:
+            return None
+        for e in self._document.elements:
+            if isinstance(e, element_type):
+                return e
+        return None
+
     def _find_element(self, element_id: str):
         """按 ID 查找布局元素。"""
         if self._document is None:
@@ -1156,7 +1349,7 @@ class LayoutView(QGraphicsView):
         """
         if self._document is None:
             return
-        dpi = self._document.page.dpi
+        dpi: float = self._view_dpi
 
         # 对于非地图框的装饰元素，重新渲染以更新内部坐标
         if not isinstance(element, MapFrameElement):
@@ -1234,10 +1427,14 @@ class LayoutView(QGraphicsView):
         self._resize_handles.clear()
 
     def _handle_at(self, scene_pos: QPointF) -> int | None:
-        """检查场景坐标是否命中某个缩放手柄，返回手柄索引或 None。"""
+        """检查场景坐标是否命中某个缩放手柄。
+
+        使用 sceneBoundingRect 自动处理 ItemIgnoresTransformations
+        变换，缩放手柄在任意缩放级别下均能准确命中。
+        """
         for i, handle in enumerate(self._resize_handles):
-            local_pos = handle.mapFromScene(scene_pos)
-            if handle.rect().contains(local_pos):
+            sbr = handle.sceneBoundingRect()
+            if sbr.adjusted(-6, -6, 6, 6).contains(scene_pos):
                 return i
         return None
 
@@ -1253,7 +1450,7 @@ class LayoutView(QGraphicsView):
         elem = self._find_element(self._selected_element_id)
         if elem is None:
             return
-        dpi = self._document.page.dpi
+        dpi: float = self._view_dpi
         scene_pos = self.mapToScene(event.pos())
         dx_mm = (scene_pos.x() - self._resize_start_pos.x()) / dpi * 25.4
         dy_mm = (scene_pos.y() - self._resize_start_pos.y()) / dpi * 25.4

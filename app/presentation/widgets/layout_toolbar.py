@@ -29,6 +29,9 @@ class LayoutToolbar(QFrame):
     add_text = Signal()
     page_setup = Signal()
     edit_properties = Signal()
+    zoom_in = Signal()
+    zoom_out = Signal()
+    zoom_fit = Signal()
     export_layout = Signal()
     close_requested = Signal()
     delete_selected = Signal()
@@ -46,35 +49,66 @@ class LayoutToolbar(QFrame):
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(6)
 
+        self._add_buttons: list[QPushButton] = []
+
         # 添加地图框
-        btn_frame: QPushButton = QPushButton("▣ 地图框")
-        btn_frame.setObjectName("layoutToolBtn")
-        btn_frame.clicked.connect(self.add_map_frame.emit)
-        layout.addWidget(btn_frame)
+        self._btn_frame: QPushButton = self._make_add_button("▣ 地图框")
+        self._btn_frame.clicked.connect(
+            lambda: self._on_add_clicked(self._btn_frame, self.add_map_frame)
+        )
+        layout.addWidget(self._btn_frame)
 
         # 添加比例尺
-        btn_scale: QPushButton = QPushButton("━ 比例尺")
-        btn_scale.setObjectName("layoutAddBtn")
-        btn_scale.clicked.connect(self.add_scale_bar.emit)
-        layout.addWidget(btn_scale)
+        self._btn_scale: QPushButton = self._make_add_button("━ 比例尺")
+        self._btn_scale.clicked.connect(
+            lambda: self._on_add_clicked(self._btn_scale, self.add_scale_bar)
+        )
+        layout.addWidget(self._btn_scale)
 
         # 添加图例
-        btn_legend: QPushButton = QPushButton("≡ 图例")
-        btn_legend.setObjectName("layoutAddBtn")
-        btn_legend.clicked.connect(self.add_legend.emit)
-        layout.addWidget(btn_legend)
+        self._btn_legend: QPushButton = self._make_add_button("≡ 图例")
+        self._btn_legend.clicked.connect(
+            lambda: self._on_add_clicked(self._btn_legend, self.add_legend)
+        )
+        layout.addWidget(self._btn_legend)
 
         # 添加指北针
-        btn_north: QPushButton = QPushButton("↑ 指北针")
-        btn_north.setObjectName("layoutAddBtn")
-        btn_north.clicked.connect(self.add_north_arrow.emit)
-        layout.addWidget(btn_north)
+        self._btn_north: QPushButton = self._make_add_button("↑ 指北针")
+        self._btn_north.clicked.connect(
+            lambda: self._on_add_clicked(self._btn_north, self.add_north_arrow)
+        )
+        layout.addWidget(self._btn_north)
 
         # 添加文本
-        btn_text: QPushButton = QPushButton("T 文本")
-        btn_text.setObjectName("layoutAddBtn")
-        btn_text.clicked.connect(self.add_text.emit)
-        layout.addWidget(btn_text)
+        self._btn_text: QPushButton = self._make_add_button("T 文本")
+        self._btn_text.clicked.connect(
+            lambda: self._on_add_clicked(self._btn_text, self.add_text)
+        )
+        layout.addWidget(self._btn_text)
+
+        # 缩放分隔
+        sep_zoom: QFrame = QFrame()
+        sep_zoom.setFrameShape(QFrame.Shape.VLine)
+        sep_zoom.setStyleSheet("background: #d1d5db; max-width: 1px; min-width: 1px;")
+        layout.addWidget(sep_zoom)
+
+        # 放大
+        btn_zoom_in: QPushButton = QPushButton("⊕ 放大")
+        btn_zoom_in.setObjectName("layoutEditBtn")
+        btn_zoom_in.clicked.connect(self.zoom_in.emit)
+        layout.addWidget(btn_zoom_in)
+
+        # 缩小
+        btn_zoom_out: QPushButton = QPushButton("⊖ 缩小")
+        btn_zoom_out.setObjectName("layoutEditBtn")
+        btn_zoom_out.clicked.connect(self.zoom_out.emit)
+        layout.addWidget(btn_zoom_out)
+
+        # 适配页面
+        btn_fit: QPushButton = QPushButton("⊡ 适配")
+        btn_fit.setObjectName("layoutEditBtn")
+        btn_fit.clicked.connect(self.zoom_fit.emit)
+        layout.addWidget(btn_fit)
 
         # 分隔
         sep: QFrame = QFrame()
@@ -137,25 +171,24 @@ class LayoutToolbar(QFrame):
                 border: 1px solid #d1d5db;
                 border-radius: 6px;
             }
-            #layoutToolBtn {
-                background: #16a34a;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 14px;
-            }
-            #layoutToolBtn:hover {
-                background: #15803d;
-            }
             #layoutAddBtn {
                 background: #f3f4f6;
-                color: #374151;
-                border: 1px solid #d1d5db;
+                color: #9ca3af;
+                border: 1px solid #e5e7eb;
                 border-radius: 4px;
                 padding: 6px 12px;
             }
             #layoutAddBtn:hover {
                 background: #e5e7eb;
+                color: #6b7280;
+            }
+            #layoutAddBtn:checked {
+                background: #1e40af;
+                color: #ffffff;
+                border-color: #1e40af;
+            }
+            #layoutAddBtn:checked:hover {
+                background: #1e3a8a;
             }
             #layoutDeleteBtn {
                 background: #f3f4f6;
@@ -195,6 +228,24 @@ class LayoutToolbar(QFrame):
                 color: #dc2626;
             }
         """)
+
+    def _make_add_button(self, text: str) -> QPushButton:
+        """创建可切换的添加按钮。"""
+        btn: QPushButton = QPushButton(text)
+        btn.setObjectName("layoutAddBtn")
+        btn.setCheckable(True)
+        self._add_buttons.append(btn)
+        return btn
+
+    def _on_add_clicked(self, btn: QPushButton, signal: Signal) -> None:
+        """处理添加按钮点击：互斥切换 + 允许取消选中。"""
+        if btn.isChecked():
+            # 刚被选中 → 取消其他按钮，保持当前选中
+            for other in self._add_buttons:
+                if other is not btn:
+                    other.setChecked(False)
+            signal.emit()
+        # 已选中的按钮再次点击变成未选中 → 不做任何操作
 
     def set_delete_enabled(self, enabled: bool) -> None:
         """启用/禁用删除按钮。"""

@@ -124,6 +124,7 @@ class MainWindow(QMainWindow):
         self._map_canvas: MapCanvas = MapCanvas()
         # 布局视图：制图排版与打印预览。
         self._layout_view: LayoutView = LayoutView()
+        self._layout_view.set_map_canvas(self._map_canvas)
         # 布局工具栏：浮动在布局视图上方。
         self._layout_toolbar: LayoutToolbar = LayoutToolbar(self)
         self._layout_toolbar.add_map_frame.connect(self._layout_view.add_map_frame)
@@ -132,6 +133,9 @@ class MainWindow(QMainWindow):
         self._layout_toolbar.add_north_arrow.connect(self._layout_view.add_north_arrow)
         self._layout_toolbar.add_text.connect(self._layout_view.add_text_element)
         self._layout_toolbar.page_setup.connect(self._on_page_setup)
+        self._layout_toolbar.zoom_in.connect(self._layout_view.zoom_in)
+        self._layout_toolbar.zoom_out.connect(self._layout_view.zoom_out)
+        self._layout_toolbar.zoom_fit.connect(self._layout_view.fit_page)
         self._layout_toolbar.edit_properties.connect(self._on_edit_properties)
         self._layout_toolbar.export_layout.connect(self._export_layout)
         self._layout_toolbar.delete_selected.connect(self._layout_view._delete_selected)
@@ -140,6 +144,12 @@ class MainWindow(QMainWindow):
         self._layout_toolbar.close_requested.connect(self._exit_layout_mode)
         self._layout_view.element_selected.connect(
             lambda eid: self._layout_toolbar.set_delete_enabled(eid is not None)
+        )
+        self._layout_view.undo_state_changed.connect(
+            lambda can_undo, can_redo: (
+                self._layout_toolbar.set_undo_enabled(can_undo),
+                self._layout_toolbar.set_redo_enabled(can_redo),
+            )
         )
         self._layout_toolbar.hide()  # 初始隐藏，进入布局视图时才显示
         # 视图栈：在数据视图和布局视图之间切换。
@@ -2871,6 +2881,18 @@ class MainWindow(QMainWindow):
         )
         if not file_path:
             return
+
+        # 用户未输入扩展名时自动补充
+        fp = Path(file_path)
+        if not fp.suffix:
+            if "PDF" in selected_filter:
+                fp = fp.with_suffix(".pdf")
+            elif "JPEG" in selected_filter:
+                fp = fp.with_suffix(".jpg")
+            elif "PNG" in selected_filter:
+                fp = fp.with_suffix(".png")
+            file_path = str(fp)
+
         from app.presentation.renderers.layout_renderer import render_full_page
 
         snapshot = self._application.snapshot()
@@ -2879,23 +2901,55 @@ class MainWindow(QMainWindow):
         if selected_filter.startswith("PDF"):
             from PySide6.QtGui import QPageSize
             from PySide6.QtPrintSupport import QPrinter
+            from PySide6.QtCore import QMarginsF, QRectF, QSizeF
+
+            pixmap = render_full_page(document, snapshot, view_dpi=self._layout_view._view_dpi)
+
+            # 删除 QFileDialog 可能创建的占位文件，避免 QPrinter 写入失败
+            Path(file_path).unlink(missing_ok=True)
 
             printer = QPrinter(QPrinter.PrinterMode.HighResolution)
             printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
             printer.setOutputFileName(file_path)
-            from PySide6.QtCore import QSizeF
             printer.setPageSize(
                 QPageSize(
                     QSizeF(page.width_mm, page.height_mm),
                     QPageSize.Unit.Millimeter,
                 )
             )
+            printer.setFullPage(True)
+            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+
             painter = QPainter(printer)
-            pixmap = render_full_page(document, snapshot)
-            painter.drawPixmap(0, 0, pixmap)
+
+            # 使用打印机实际 DPI 将所有尺寸从毫米换算到设备像素
+            dpi_x: float = float(printer.logicalDpiX())
+            dpi_y: float = float(printer.logicalDpiY())
+            mm_to_px_x: Callable[[float], float] = lambda m: m / 25.4 * dpi_x
+            mm_to_px_y: Callable[[float], float] = lambda m: m / 25.4 * dpi_y
+
+            margin_mm: float = 5.0
+            page_rect = printer.pageRect(QPrinter.Unit.DevicePixel)
+            target_x: float = page_rect.x() + mm_to_px_x(margin_mm)
+            target_y: float = page_rect.y() + mm_to_px_y(margin_mm)
+            target_w: float = page_rect.width() - 2.0 * mm_to_px_x(margin_mm)
+            target_h: float = page_rect.height() - 2.0 * mm_to_px_y(margin_mm)
+
+            # 等比缩放 pixmap（300 DPI）到目标区域，保持宽高比
+            scale: float = min(target_w / pixmap.width(), target_h / pixmap.height())
+            draw_w: float = pixmap.width() * scale
+            draw_h: float = pixmap.height() * scale
+            draw_x: float = page_rect.x() + (page_rect.width() - draw_w) / 2.0
+            draw_y: float = page_rect.y() + (page_rect.height() - draw_h) / 2.0
+
+            painter.drawPixmap(
+                QRectF(draw_x, draw_y, draw_w, draw_h),
+                pixmap,
+                QRectF(0, 0, pixmap.width(), pixmap.height()),
+            )
             painter.end()
         else:
-            pixmap = render_full_page(document, snapshot)
+            pixmap = render_full_page(document, snapshot, view_dpi=self._layout_view._view_dpi)
             fmt = "JPEG" if "JPEG" in selected_filter or file_path.lower().endswith(
                 (".jpg", ".jpeg")
             ) else "PNG"

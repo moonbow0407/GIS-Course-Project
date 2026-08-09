@@ -242,6 +242,25 @@ class MapCanvas(QGraphicsView):
             zoom_percent=self._zoom_percent,
         )
 
+    def capture_view_extent(self) -> tuple[float, float, float, float] | None:
+        """返回当前可见范围（地图坐标，Y 向上），用于布局视图同步。
+
+        返回值:
+            (center_x, center_y, extent_w, extent_h) 元组；
+            无数据时返回 None。
+        """
+        vp = self.viewport()
+        top_left = self.mapToScene(0, 0)
+        bottom_right = self.mapToScene(vp.width(), vp.height())
+        if top_left == bottom_right:
+            return None
+        # 场景 Y 向下，翻转得到地图坐标中心
+        extent_w: float = abs(bottom_right.x() - top_left.x())
+        extent_h: float = abs(bottom_right.y() - top_left.y())
+        center_x: float = (top_left.x() + bottom_right.x()) / 2.0
+        center_y: float = -(top_left.y() + bottom_right.y()) / 2.0
+        return (center_x, center_y, extent_w, extent_h)
+
     def restore_view_state(self, view_state: MapViewState) -> None:
         """在当前图层场景上恢复工程保存的地图中心和缩放比例。"""
         if self._map_scene_rect is None:

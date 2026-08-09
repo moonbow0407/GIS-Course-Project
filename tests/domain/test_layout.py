@@ -48,7 +48,7 @@ def test_text_element_defaults() -> None:
     """TextElement 默认值应符合预期。"""
     elem = TextElement()
     assert elem.text == "文本"
-    assert elem.font_size_mm == 3.0
+    assert elem.font_size_mm == 5.0
     assert elem.color == "#000000"
     assert elem.bold is False
     assert elem.italic is False
