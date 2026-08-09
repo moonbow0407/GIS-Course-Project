@@ -11,7 +11,7 @@ import pytest
 from affine import Affine
 from pyproj import CRS
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QImage, QMouseEvent, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QGraphicsPathItem
 from shapely.geometry import LineString, Point, Polygon
@@ -19,6 +19,7 @@ from shapely.geometry import LineString, Point, Polygon
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.feature import Feature
+from app.domain.labeling import LabelClass, LabelingConfig, LabelPlacement
 from app.domain.raster_layer import RasterLayer
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.file_io.auto_reader import AutoDataReader
@@ -484,3 +485,143 @@ def test_line_vertex_edit_accepts_left_click_on_blank_canvas() -> None:
     assert event.isAccepted()
     assert canvas._vertex_edit_active is True
     assert canvas._vertex_drag_idx == -1
+
+
+def test_map_canvas_paints_label_text_on_real_viewport() -> None:
+    """真实 QGraphicsView 视口中，白字白光晕配置也必须显示深色文字。"""
+    application = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    layer = VectorLayer.create(
+        layer_id="viewport-label-contrast",
+        name="行政区",
+        features=(
+            Feature(
+                fid=1,
+                geometry=Polygon(
+                    [(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)]
+                ),
+                attributes={"name": "合肥"},
+            ),
+        ),
+        crs=CRS.from_epsg(4326),
+        labeling=LabelingConfig(
+            enabled=True,
+            classes=(
+                LabelClass(
+                    name="名称",
+                    field_name="name",
+                    placement=LabelPlacement.CENTER,
+                    font_size=18.0,
+                    text_color="#FFFFFF",
+                    halo_color="#FFFFFF",
+                    halo_width=3.0,
+                ),
+            ),
+        ),
+    )
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),),
+            active_layer_id=layer.layer_id,
+            display_crs=layer.crs,
+        )
+    )
+    application.processEvents()
+
+    label_items = [
+        item for item in canvas.scene().items() if item.data(2) == "label"
+    ]
+    assert len(label_items) == 1
+    image = QImage(canvas.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    painter = QPainter(image)
+    canvas.render(painter)
+    painter.end()
+    label_rect = canvas.mapFromScene(label_items[0].sceneBoundingRect()).boundingRect()
+    dark_pixels = 0
+    for y in range(max(0, label_rect.top()), min(image.height(), label_rect.bottom() + 1)):
+        for x in range(max(0, label_rect.left()), min(image.width(), label_rect.right() + 1)):
+            color = image.pixelColor(x, y)
+            if color.red() < 100 and color.green() < 120 and color.blue() < 140:
+                dark_pixels += 1
+
+    assert dark_pixels >= 10
+    assert application is not None
+
+
+def test_map_canvas_declutters_labels_when_zoomed_out() -> None:
+    """缩小到多个标签争用同一屏幕区域时，应自动避让而不是叠成一团。"""
+    application = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    extent_layer = VectorLayer.create(
+        layer_id="zoom-extent",
+        name="范围",
+        features=(
+            Feature(
+                fid=1,
+                geometry=Polygon(
+                    [(-5000, -5000), (5000, -5000), (5000, 5000), (-5000, 5000), (-5000, -5000)]
+                ),
+                attributes={},
+            ),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    labeled_layer = VectorLayer.create(
+        layer_id="zoom-labels",
+        name="省份",
+        features=tuple(
+            Feature(
+                fid=index,
+                geometry=Point(index * 16.0, 0.0),
+                attributes={"name": name},
+            )
+            for index, name in enumerate(("山东", "安徽", "江苏", "浙江"), start=1)
+        ),
+        crs=CRS.from_epsg(4326),
+        labeling=LabelingConfig(
+            enabled=True,
+            classes=(
+                LabelClass(
+                    name="省名",
+                    field_name="name",
+                    placement=LabelPlacement.CENTER,
+                    font_size=18.0,
+                ),
+            ),
+        ),
+    )
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(
+                LayerSnapshot(layer=extent_layer, visible=True, selected_feature_ids=()),
+                LayerSnapshot(layer=labeled_layer, visible=True, selected_feature_ids=()),
+            ),
+            active_layer_id=labeled_layer.layer_id,
+            display_crs=labeled_layer.crs,
+        )
+    )
+    application.processEvents()
+
+    label_items = [
+        item
+        for item in canvas.scene().items()
+        if item.data(0) == labeled_layer.layer_id and item.data(2) == "label"
+    ]
+    assert 1 <= len(label_items) < 4
+    screen_rects = [
+        canvas.mapFromScene(item.sceneBoundingRect()).boundingRect()
+        for item in label_items
+    ]
+    overlapping_pairs = [
+        (left, right)
+        for index, left in enumerate(screen_rects)
+        for right in screen_rects[index + 1 :]
+        if left.intersects(right)
+    ]
+
+    assert not overlapping_pairs
+    assert application is not None

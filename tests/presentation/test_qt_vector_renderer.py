@@ -7,12 +7,14 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pyproj import CRS
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsPathItem, QGraphicsScene
 from shapely.geometry import LineString, Point, Polygon
 
 from app.application.results import LayerSnapshot
 from app.domain.feature import Feature
+from app.domain.labeling import LabelClass, LabelingConfig, LabelPlacement
 from app.domain.vector_layer import VectorLayer
 from app.presentation.renderers.qt_vector_renderer import QtVectorRenderer
 
@@ -87,4 +89,164 @@ def test_renderer_simplifies_dense_geometry_for_current_screen_scale() -> None:
 
     item = next(item for item in items if isinstance(item, QGraphicsPathItem))
     assert item.path().elementCount() < len(coordinates) / 4
+    assert application is not None
+
+
+def test_renderer_creates_readable_label_items_for_enabled_label_class() -> None:
+    """启用标注类后，渲染器应为非空字段创建带屏幕尺寸的标签图元。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = VectorLayer.create(
+        layer_id="cities",
+        name="城市",
+        features=(
+            Feature(
+                fid=1,
+                geometry=Point(10, 20),
+                attributes={"name": "合肥"},
+            ),
+            Feature(
+                fid=2,
+                geometry=Point(30, 40),
+                attributes={"name": "南京"},
+            ),
+        ),
+        crs=CRS.from_epsg(4326),
+        labeling=LabelingConfig(
+            enabled=True,
+            classes=(
+                LabelClass(
+                    name="城市名",
+                    field_name="name",
+                    placement=LabelPlacement.ABOVE_RIGHT,
+                ),
+            ),
+        ),
+    )
+    scene: QGraphicsScene = QGraphicsScene()
+
+    items = QtVectorRenderer().render_layer(
+        scene,
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),
+        z_value=2.0,
+        map_units_per_pixel=0.5,
+    )
+
+    label_items = [item for item in items if item.data(2) == "label"]
+    assert len(label_items) == 2
+    assert all(
+        item.flags() & item.GraphicsItemFlag.ItemIgnoresTransformations
+        for item in label_items
+    )
+    assert application is not None
+
+
+def test_renderer_paints_dark_label_text_inside_white_halo() -> None:
+    """标注绘制到地图后应保留深色文字，而不是只显示白色光晕。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = VectorLayer.create(
+        layer_id="label-contrast",
+        name="行政区",
+        features=(
+            Feature(
+                fid=1,
+                geometry=Point(50, -50),
+                attributes={"name": "合肥"},
+            ),
+        ),
+        crs=CRS.from_epsg(4326),
+        labeling=LabelingConfig(
+            enabled=True,
+            classes=(
+                LabelClass(
+                    name="名称",
+                    field_name="name",
+                    placement=LabelPlacement.CENTER,
+                    font_size=18.0,
+                    text_color="#20354A",
+                    halo_color="#FFFFFF",
+                    halo_width=3.0,
+                ),
+            ),
+        ),
+    )
+    scene = QGraphicsScene(0.0, 0.0, 100.0, 100.0)
+    QtVectorRenderer().render_layer(
+        scene,
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),
+        z_value=1.0,
+        map_units_per_pixel=1.0,
+    )
+
+    image = QImage(100, 100, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill("#A8C8F5")
+    painter = QPainter(image)
+    scene.render(painter, QRectF(0.0, 0.0, 100.0, 100.0), scene.sceneRect())
+    painter.end()
+
+    dark_pixels = 0
+    for y in range(35, 65):
+        for x in range(35, 65):
+            color = image.pixelColor(x, y)
+            if color.red() < 100 and color.green() < 120 and color.blue() < 140:
+                dark_pixels += 1
+
+    assert dark_pixels >= 10
+    assert application is not None
+
+
+def test_renderer_repairs_light_text_with_light_halo_for_readability() -> None:
+    """历史配置出现白字白光晕时，渲染器也应自动恢复可读的深色文字。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = VectorLayer.create(
+        layer_id="legacy-label-contrast",
+        name="行政区",
+        features=(
+            Feature(
+                fid=1,
+                geometry=Point(50, -50),
+                attributes={"name": "合肥"},
+            ),
+        ),
+        crs=CRS.from_epsg(4326),
+        labeling=LabelingConfig(
+            enabled=True,
+            classes=(
+                LabelClass(
+                    name="名称",
+                    field_name="name",
+                    placement=LabelPlacement.CENTER,
+                    font_size=18.0,
+                    text_color="#FFFFFF",
+                    halo_color="#FFFFFF",
+                    halo_width=3.0,
+                ),
+            ),
+        ),
+    )
+    scene = QGraphicsScene(0.0, 0.0, 100.0, 100.0)
+    QtVectorRenderer().render_layer(
+        scene,
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),
+        z_value=1.0,
+        map_units_per_pixel=1.0,
+    )
+
+    image = QImage(100, 100, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill("#A8C8F5")
+    painter = QPainter(image)
+    scene.render(painter, QRectF(0.0, 0.0, 100.0, 100.0), scene.sceneRect())
+    painter.end()
+
+    dark_pixels = sum(
+        1
+        for y in range(35, 65)
+        for x in range(35, 65)
+        if (
+            image.pixelColor(x, y).red() < 100
+            and image.pixelColor(x, y).green() < 120
+            and image.pixelColor(x, y).blue() < 140
+        )
+    )
+
+    assert dark_pixels >= 10
     assert application is not None

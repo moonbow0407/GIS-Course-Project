@@ -1,8 +1,22 @@
 """将 Shapely 矢量几何转换为 Qt 图元。"""
 
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QGraphicsItem, QGraphicsPathItem, QGraphicsScene, QWidget
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
+from PySide6.QtWidgets import (
+    QGraphicsItem,
+    QGraphicsPathItem,
+    QGraphicsScene,
+    QStyleOptionGraphicsItem,
+    QWidget,
+)
 from shapely import get_num_coordinates
 from shapely.geometry import (
     GeometryCollection,
@@ -20,6 +34,7 @@ from app.presentation.global_display_settings import selection_color
 
 from app.application.results import LayerSnapshot
 from app.domain.feature import Feature
+from app.domain.labeling import LabelClass, LabelPlacement
 from app.domain.layer_style import LayerStyle
 from app.domain.vector_layer import VectorLayer
 
@@ -51,6 +66,181 @@ class _BlendPathItem(QGraphicsPathItem):
         painter.setCompositionMode(self._composition_mode)
         super().paint(painter, option, widget)
         painter.restore()
+
+
+def _readable_label_colors(
+    text_name: str,
+    halo_name: str,
+    halo_enabled: bool,
+) -> tuple[QColor, QColor]:
+    """修复历史或手工配置中的低对比度颜色，保证标签在常见底图上可读。"""
+    text_color: QColor = QColor(text_name)
+    halo_color: QColor = QColor(halo_name)
+    if not text_color.isValid():
+        text_color = QColor("#20354A")
+    if not halo_color.isValid():
+        halo_color = QColor("#FFFFFF")
+    text_color.setAlpha(255)
+    halo_color.setAlpha(255)
+
+    def relative_luminance(color: QColor) -> float:
+        def linear_channel(channel: float) -> float:
+            return channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+
+        return (
+            0.2126 * linear_channel(color.redF())
+            + 0.7152 * linear_channel(color.greenF())
+            + 0.0722 * linear_channel(color.blueF())
+        )
+
+    text_luminance: float = relative_luminance(text_color)
+    halo_luminance: float = relative_luminance(halo_color)
+    contrast_ratio: float = (max(text_luminance, halo_luminance) + 0.05) / (
+        min(text_luminance, halo_luminance) + 0.05
+    )
+    if contrast_ratio < 2.5:
+        # 白字白光晕、黑字黑光晕等历史配置会把笔画完全淹没；
+        # 优先恢复 GIS 常用的深色字白色光晕组合。
+        if text_luminance > 0.45:
+            text_color = QColor("#20354A")
+        halo_color = QColor("#FFFFFF")
+    elif not halo_enabled and text_luminance > 0.55:
+        # 关闭晕染后没有底框托底，浅色文字在常见浅色地图上仍不可读。
+        text_color = QColor("#20354A")
+    return text_color, halo_color
+
+
+class _LabelItem(QGraphicsItem):
+    """绘制带高对比度光晕的屏幕像素标注文本。"""
+
+    _ALIGNMENT: dict[LabelPlacement, tuple[int, int]] = {
+        LabelPlacement.ABOVE_LEFT: (-1, -1),
+        LabelPlacement.ABOVE: (0, -1),
+        LabelPlacement.ABOVE_RIGHT: (1, -1),
+        LabelPlacement.LEFT: (-1, 0),
+        LabelPlacement.CENTER: (0, 0),
+        LabelPlacement.RIGHT: (1, 0),
+        LabelPlacement.BELOW_LEFT: (-1, 1),
+        LabelPlacement.BELOW: (0, 1),
+        LabelPlacement.BELOW_RIGHT: (1, 1),
+    }
+
+    def __init__(
+        self,
+        text: str,
+        anchor: QPointF,
+        label_class: LabelClass,
+        map_units_per_pixel: float,
+    ) -> None:
+        super().__init__()
+        font: QFont = QFont("Microsoft YaHei UI")
+        font.setPixelSize(max(round(label_class.font_size), 1))
+        font.setWeight(QFont.Weight.Medium)
+        metrics: QFontMetricsF = QFontMetricsF(font)
+        metrics_bounds: QRectF = metrics.tightBoundingRect(text)
+        self._font: QFont = font
+        self._text: str = text
+        self._map_units_per_pixel: float = max(map_units_per_pixel, 1e-9)
+        self._text_baseline: QPointF = QPointF(
+            -metrics_bounds.left(),
+            -metrics_bounds.top(),
+        )
+        self._text_bounds: QRectF = QRectF(
+            0.0,
+            0.0,
+            max(metrics.horizontalAdvance(text), metrics_bounds.width()),
+            max(metrics.height(), metrics_bounds.height()),
+        )
+        self._text_color, self._halo_color = _readable_label_colors(
+            label_class.text_color,
+            label_class.halo_color,
+            label_class.halo_enabled,
+        )
+        self._halo_width: float = label_class.halo_width
+        self._halo_enabled: bool = label_class.halo_enabled
+        padding: float = max(self._halo_width, 1.0) if self._halo_enabled else 0.0
+        self._bounds: QRectF = self._text_bounds.adjusted(
+            -padding,
+            -padding,
+            padding,
+            padding,
+        )
+        self._place(
+            anchor,
+            label_class.placement,
+            label_class.offset_x,
+            label_class.offset_y,
+            map_units_per_pixel,
+        )
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+
+    def boundingRect(self) -> QRectF:
+        """返回包含文本和光晕的局部包围盒。"""
+        return self._bounds
+
+    def screen_rect(self) -> QRectF:
+        """返回用于标签避让的屏幕像素矩形，避免依赖 Qt 变换后的场景包围盒。"""
+        position: QPointF = self.pos()
+        scale: float = self._map_units_per_pixel
+        return QRectF(
+            position.x() / scale + self._bounds.left(),
+            position.y() / scale + self._bounds.top(),
+            self._bounds.width(),
+            self._bounds.height(),
+        )
+
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionGraphicsItem,
+        widget: QWidget | None = None,
+    ) -> None:
+        """绘制不透明标签底和文本，确保不同底图与字体环境下均可读。"""
+        del option, widget
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self._halo_enabled:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(self._halo_color))
+            corner_radius: float = max(self._halo_width, 3.0)
+            painter.drawRoundedRect(self._bounds, corner_radius, corner_radius)
+        painter.setFont(self._font)
+        painter.setPen(self._text_color)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawText(self._text_baseline, self._text)
+        painter.restore()
+
+    def _place(
+        self,
+        anchor: QPointF,
+        placement: LabelPlacement,
+        offset_x: float,
+        offset_y: float,
+        map_units_per_pixel: float,
+    ) -> None:
+        """按九宫格位置把标签左上角放到要素锚点附近。"""
+        horizontal, vertical = self._ALIGNMENT[placement]
+        gap_x: float = 4.0 * map_units_per_pixel
+        gap_y: float = 4.0 * map_units_per_pixel
+        if horizontal < 0:
+            x = anchor.x() - self._text_bounds.width() - gap_x
+        elif horizontal > 0:
+            x = anchor.x() + gap_x
+        else:
+            x = anchor.x() - self._text_bounds.width() / 2.0
+        if vertical < 0:
+            y = anchor.y() - self._text_bounds.height() - gap_y
+        elif vertical > 0:
+            y = anchor.y() + gap_y
+        else:
+            y = anchor.y() - self._text_bounds.height() / 2.0
+        # 显式偏移允许用户微调位置；scene Y 轴向下，与屏幕坐标一致。
+        self.setPos(
+            QPointF(
+                x + offset_x * map_units_per_pixel,
+                y + offset_y * map_units_per_pixel,
+            )
+        )
 
 
 class QtVectorRenderer:
@@ -135,7 +325,57 @@ class QtVectorRenderer:
             item.setVisible(snapshot.visible)
             scene.addItem(item)
             items.append(item)
+        self._render_labels(scene, snapshot, z_value, map_units_per_pixel, items)
         return items
+
+    def _render_labels(
+        self,
+        scene: QGraphicsScene,
+        snapshot: LayerSnapshot,
+        z_value: float,
+        map_units_per_pixel: float,
+        items: list[QGraphicsItem],
+    ) -> None:
+        """按标注类为要素创建动态标签图元。"""
+        if not isinstance(snapshot.layer, VectorLayer):
+            return
+        labeling = snapshot.layer.labeling
+        if labeling is None or not labeling.enabled:
+            return
+        occupied_rects: list[QRectF] = []
+        for class_index, label_class in enumerate(labeling.classes):
+            if not label_class.visible:
+                continue
+            for feature in snapshot.layer.features:
+                if feature.geometry.is_empty:
+                    continue
+                text: str | None = label_class.text_for(feature)
+                if text is None:
+                    continue
+                anchor = feature.geometry.representative_point()
+                label_item = _LabelItem(
+                    text,
+                    QPointF(float(anchor.x), -float(anchor.y)),
+                    label_class,
+                    map_units_per_pixel,
+                )
+                collision_rect: QRectF = label_item.screen_rect().adjusted(
+                    -2.0,
+                    -2.0,
+                    2.0,
+                    2.0,
+                )
+                if any(collision_rect.intersects(occupied) for occupied in occupied_rects):
+                    continue
+                occupied_rects.append(collision_rect)
+                label_item.setData(0, snapshot.layer_id)
+                label_item.setData(1, feature.fid)
+                label_item.setData(2, "label")
+                label_item.setZValue(z_value + 0.2 + class_index * 0.001)
+                label_item.setVisible(snapshot.visible)
+                label_item.setOpacity(snapshot.opacity)
+                scene.addItem(label_item)
+                items.append(label_item)
 
     @staticmethod
     def _geometry_for_display(
