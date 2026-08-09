@@ -94,6 +94,9 @@ class MapCanvas(QGraphicsView):
         self._rectangle_query_active: bool = False
         # 每屏幕像素对应的地图单位：由 set_snapshot 刷新，供容差计算使用。
         self._map_units_per_pixel: float = 1.0
+        # 上次重建图元时的 _map_units_per_pixel：缩放时若变化小于 50%
+        # 则跳过全量重建，仅通过 _apply_scale_ranges 更新图层显隐。
+        self._last_render_mupp: float = 0.0
         # 数字化模式："none"/"point"/"line"/"polygon"。
         self._digitize_mode: str = "none"
         # 数字化顶点栈：屏幕像素坐标列表。
@@ -226,6 +229,8 @@ class MapCanvas(QGraphicsView):
                 self._selected_fids.add((layer.layer_id, fid))
         # 按当前视图比例应用图层的显示比例范围。
         self._apply_scale_ranges()
+        # 记录本次重建时的地图单位，供缩放时判断是否需要再次重建。
+        self._last_render_mupp = self._map_units_per_pixel
 
     def capture_view_state(self) -> MapViewState:
         """捕获当前地图中心和相对于全图的缩放比例。"""
@@ -1092,13 +1097,23 @@ class MapCanvas(QGraphicsView):
             )
         if self._vertex_edit_active and self._edit_geometry is not None:
             self._rebuild_vertex_markers(self._edit_geometry)
-        # 缩放后立即重建场景（关闭刷新避免闪烁），更新点大小。
+        # 缩放后按需重建场景：若每像素地图单位变化不足 50%，
+        # 已渲染的简化几何在视觉上不可分辨，跳过全量重建以避免卡顿。
+        # _emit_view_scale() 已调用 _apply_scale_ranges() 更新图层显隐。
         if self._last_snapshot is not None and not self._vertex_edit_active:
-            self.setUpdatesEnabled(False)
-            try:
-                self.set_snapshot(self._last_snapshot)
-            finally:
-                self.setUpdatesEnabled(True)
+            _MUPP_CHANGE_THRESHOLD: float = 0.5
+            mupp_changed: bool = (
+                self._last_render_mupp == 0.0
+                or abs(self._map_units_per_pixel - self._last_render_mupp)
+                / max(self._last_render_mupp, 1e-9)
+                > _MUPP_CHANGE_THRESHOLD
+            )
+            if mupp_changed:
+                self.setUpdatesEnabled(False)
+                try:
+                    self.set_snapshot(self._last_snapshot)
+                finally:
+                    self.setUpdatesEnabled(True)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         """把鼠标滚轮动作转换为以光标为锚点的连续地图缩放。
