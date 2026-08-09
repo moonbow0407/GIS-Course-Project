@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QTabWidget,
     QToolButton,
@@ -55,6 +56,7 @@ from app.application.results import (
 from app.domain.feature import AttributeValue, Feature, FeatureId
 from app.domain.labeling import LabelingConfig, default_labeling_for_features
 from app.domain.layer_style import GeometryFamily
+from app.domain.layout import LayoutDocument
 from app.domain.symbology import RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.database.postgis_database_gateway import PostgisDatabaseGateway
@@ -78,6 +80,8 @@ from app.presentation.widgets.edit_feature_dialog import EditFeatureDialog
 from app.presentation.widgets.geometry_edit_toolbar import GeometryEditToolbar
 from app.presentation.widgets.labeling_dialog import LabelingDialog
 from app.presentation.widgets.layer_panel import LayerPanel
+from app.presentation.widgets.layout_toolbar import LayoutToolbar
+from app.presentation.widgets.layout_view import LayoutView
 from app.presentation.widgets.map_canvas import MapCanvas
 from app.presentation.widgets.new_layer_dialog import NewLayerDialog
 from app.presentation.widgets.overlay_analysis_dialog import OverlayAnalysisDialog
@@ -118,6 +122,24 @@ class MainWindow(QMainWindow):
         self._layer_panel: LayerPanel = LayerPanel()
         # 地图画布：显示矢量与栅格图层并提供基础导航能力。
         self._map_canvas: MapCanvas = MapCanvas()
+        # 布局视图：制图排版与打印预览。
+        self._layout_view: LayoutView = LayoutView()
+        # 布局工具栏：浮动在布局视图上方。
+        self._layout_toolbar: LayoutToolbar = LayoutToolbar()
+        self._layout_toolbar.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self._layout_toolbar.add_map_frame.connect(self._layout_view.add_map_frame)
+        self._layout_toolbar.delete_selected.connect(self._layout_view._delete_selected)
+        self._layout_toolbar.undo.connect(self._layout_view._undo)
+        self._layout_toolbar.redo.connect(self._layout_view._redo)
+        self._layout_view.element_selected.connect(self._layout_toolbar.set_delete_enabled)
+        self._layout_toolbar.hide()  # 初始隐藏，进入布局视图时才显示
+        # 视图栈：在数据视图和布局视图之间切换。
+        self._view_stack: QStackedWidget = QStackedWidget()
+        self._layout_mode: bool = False
         # 右侧停靠面板：分析历史记录。
         self._analysis_history_panel: AnalysisHistoryPanel = AnalysisHistoryPanel()
         self._attribute_table_panel: AttributeTablePanel = AttributeTablePanel()
@@ -231,7 +253,11 @@ class MainWindow(QMainWindow):
         )
 
         map_workspace.addWidget(self._layer_panel)
-        map_workspace.addWidget(self._map_canvas)
+        # 使用 QStackedWidget 在数据视图（MapCanvas）和布局视图（LayoutView）之间切换。
+        self._view_stack.addWidget(self._map_canvas)
+        self._view_stack.addWidget(self._layout_view)
+        self._view_stack.setCurrentWidget(self._map_canvas)
+        map_workspace.addWidget(self._view_stack)
         map_workspace.setSizes([300, 1380])
         map_workspace.setStretchFactor(0, 0)
         map_workspace.setStretchFactor(1, 1)
@@ -462,6 +488,7 @@ class MainWindow(QMainWindow):
             "raster_calculator": self._raster_calculator,
             "analysis_history": self._toggle_analysis_history,
             "toggle_layers": self._toggle_layer_panel,
+            "toggle_layout_view": self._toggle_layout_view,
             "add_feature": self._add_point_feature,
             "add_point_feature": self._add_point_feature,
             "add_line_feature": self._add_line_feature,
@@ -741,9 +768,10 @@ class MainWindow(QMainWindow):
         # 清空所有图层的要素选择（不推入撤销栈，避免在切换工程时
         # 残留的撤销记录引用已销毁的领域对象）。
         self._application.clear_selection()
-        # 隐藏属性表，关闭几何编辑工具栏。
+        # 隐藏属性表，关闭几何编辑工具栏，退出布局视图。
         self._hide_attribute_table()
         self._geom_edit_toolbar.hide()
+        self._exit_layout_mode()
         self._ready_label.setText("就绪")
 
     def _new_project(self) -> None:
@@ -2753,6 +2781,51 @@ class MainWindow(QMainWindow):
     def _toggle_layer_panel(self) -> None:
         """切换左侧图层管理面板的显示状态。"""
         self._layer_panel.setVisible(not self._layer_panel.isVisible())
+
+    def _exit_layout_mode(self) -> None:
+        """退出布局视图，回到数据视图。"""
+        if not self._layout_mode:
+            return
+        self._layout_mode = False
+        self._layout_toolbar.hide()
+        self._view_stack.setCurrentWidget(self._map_canvas)
+        self._ribbon.set_action_checked("toggle_layout_view", False)
+
+    def _toggle_layout_view(self) -> None:
+        """在数据视图与布局视图之间切换。"""
+        if self._layout_mode:
+            self._exit_layout_mode()
+            return
+        # 进入布局视图
+        self._layout_mode = True
+        snapshot = self._application.snapshot()
+        self._layout_view.set_snapshot(snapshot)
+        if not self._layout_view.has_content():
+            doc = LayoutDocument.create_default()
+            self._layout_view.set_document(doc)
+        self._view_stack.setCurrentWidget(self._layout_view)
+        self._layout_toolbar.show()
+        self._layout_toolbar.set_delete_enabled(
+            self._layout_view.selected_element_id is not None
+        )
+        self._layout_toolbar.set_undo_enabled(self._layout_view.can_undo())
+        self._layout_toolbar.set_redo_enabled(self._layout_view.can_redo())
+        self._position_layout_toolbar()
+        self._ribbon.set_action_checked("toggle_layout_view", True)
+
+    def _position_layout_toolbar(self) -> None:
+        """将布局工具栏定位在布局视图顶部居中。"""
+        if not self._layout_toolbar.isVisible():
+            return
+        toolbar_w: int = self._layout_toolbar.sizeHint().width()
+        toolbar_h: int = self._layout_toolbar.sizeHint().height()
+        # 获取 _view_stack 在屏幕上的位置
+        view_global = self._view_stack.mapToGlobal(
+            self._view_stack.rect().topLeft()
+        )
+        x: int = view_global.x() + max(0, (self._view_stack.width() - toolbar_w) // 2)
+        y: int = view_global.y() + 10
+        self._layout_toolbar.setGeometry(x, y, toolbar_w, toolbar_h)
 
     def _show_display_settings(self, active_tab: int = 1) -> None:
         """打开显示设置对话框，管理图层属性、符号系统、比例尺、全局显示和书签。

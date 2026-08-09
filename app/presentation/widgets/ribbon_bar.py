@@ -381,6 +381,15 @@ class RibbonBar(QWidget):
                         RibbonActionSpec("set_crs", "坐标系统", "◎", "#0f766e"),
                         RibbonActionSpec("map_settings", "显示设置", "⚙", "#475569"),
                     )),
+                    RibbonGroupSpec("布局", (
+                        RibbonActionSpec(
+                            "toggle_layout_view",
+                            "布局视图",
+                            "▣",
+                            "#16a34a",
+                            checkable=True,
+                        ),
+                    )),
                     RibbonGroupSpec("关于", (
                         RibbonActionSpec("about", "关于平台", "i", "#475569"),
                     )),
