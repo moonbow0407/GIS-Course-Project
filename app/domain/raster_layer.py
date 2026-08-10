@@ -63,6 +63,24 @@ class RasterLayer:
     # 符号系统：为空时根据波段数量生成默认 RGB 或灰度拉伸配置。
     symbology: RasterSymbology | None = None
 
+    # 与 image_data 同行列的低分辨率原始像元，用于不加载全图的符号重建。
+    # 读取器可以只保留用于首屏显示的波段，display_band_indexes 记录其原始波段编号。
+    display_values: NDArray[np.generic] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    display_valid_mask: NDArray[np.bool_] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    display_band_indexes: tuple[int, ...] = field(
+        default=(),
+        repr=False,
+        compare=False,
+    )
+
     # 延迟读取完整分析数组的外部适配器回调；领域层不依赖 Rasterio。
     _analysis_loader: RasterDataLoader | None = field(
         default=None,
@@ -130,6 +148,26 @@ class RasterLayer:
             raise ValueError("栅格显示数据不能为空。")
         if self._raster_data is not None and self.image_data.shape[:2] != raster_shape:
             raise ValueError("已加载栅格的分析数据与显示缓存行列尺寸必须一致。")
+        if self.display_values is not None:
+            if self.display_values.ndim != 3 or self.display_values.shape[0] == 0:
+                raise ValueError("栅格显示原始像元必须是波段×高度×宽度数组。")
+            if self.display_values.shape[1:] != self.image_data.shape[:2]:
+                raise ValueError("栅格显示原始像元与 RGBA 预览行列尺寸必须一致。")
+            if self.display_valid_mask is None:
+                raise ValueError("栅格显示原始像元必须同时提供有效掩膜。")
+            if (
+                self.display_valid_mask.dtype != np.bool_
+                or self.display_valid_mask.shape != self.image_data.shape[:2]
+            ):
+                raise ValueError("栅格显示有效掩膜必须与 RGBA 预览行列一致。")
+            indexes = self.display_band_indexes or tuple(range(self.display_values.shape[0]))
+            if len(indexes) != self.display_values.shape[0]:
+                raise ValueError("栅格显示原始像元的波段编号数量无效。")
+            if any(index < 0 or index >= band_count for index in indexes):
+                raise ValueError("栅格显示原始像元的波段编号超出范围。")
+            object.__setattr__(self, "display_band_indexes", indexes)
+        elif self.display_valid_mask is not None:
+            raise ValueError("未提供栅格显示原始像元时不能单独提供有效掩膜。")
         if self._valid_mask is not None and (
             self._valid_mask.dtype != np.bool_ or self._valid_mask.shape != raster_shape
         ):
@@ -207,6 +245,9 @@ class RasterLayer:
         layer_id: str | None = None,
         symbology: RasterSymbology | None = None,
         display_transform: Affine | None = None,
+        display_values: NDArray[np.generic] | None = None,
+        display_valid_mask: NDArray[np.bool_] | None = None,
+        display_band_indexes: tuple[int, ...] = (),
     ) -> "RasterLayer":
         """创建已经加载完整分析像元的栅格图层。"""
         return cls(
@@ -222,6 +263,9 @@ class RasterLayer:
             nodata=nodata,
             source_path=source_path,
             symbology=symbology,
+            display_values=display_values,
+            display_valid_mask=display_valid_mask,
+            display_band_indexes=display_band_indexes,
         )
 
     @classmethod
@@ -240,6 +284,9 @@ class RasterLayer:
         source_path: Path | None = None,
         layer_id: str | None = None,
         symbology: RasterSymbology | None = None,
+        display_values: NDArray[np.generic] | None = None,
+        display_valid_mask: NDArray[np.bool_] | None = None,
+        display_band_indexes: tuple[int, ...] = (),
     ) -> "RasterLayer":
         """创建只含显示预览的栅格图层，并注册完整像元延迟加载器。"""
         return cls(
@@ -255,6 +302,9 @@ class RasterLayer:
             nodata=nodata,
             source_path=source_path,
             symbology=symbology,
+            display_values=display_values,
+            display_valid_mask=display_valid_mask,
+            display_band_indexes=display_band_indexes,
             _analysis_loader=analysis_loader,
             _raster_shape_hint=raster_shape,
             _band_count_hint=band_count,
@@ -282,6 +332,9 @@ class RasterLayer:
             nodata=self.nodata,
             source_path=source_path,
             symbology=symbology,
+            display_values=self.display_values,
+            display_valid_mask=self.display_valid_mask,
+            display_band_indexes=self.display_band_indexes,
             _analysis_loader=self._analysis_loader,
             _raster_shape_hint=self.raster_shape,
             _band_count_hint=self.band_count,

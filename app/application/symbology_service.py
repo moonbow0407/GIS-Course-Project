@@ -1,5 +1,6 @@
 """符号分类与栅格显示缓存生成服务。"""
 
+from collections.abc import Mapping
 from dataclasses import replace
 
 import numpy as np
@@ -12,6 +13,7 @@ from app.domain.symbology import (
     CATEGORICAL_SCHEMES,
     COLOR_RAMPS,
     GraduatedClass,
+    RasterClass,
     RasterRendererType,
     RasterSymbology,
     StretchType,
@@ -110,34 +112,130 @@ def create_graduated_symbology(
     )
 
 
+def create_raster_classified_symbology(
+    values: tuple[float, ...],
+    color_scheme: str = "standard",
+    labels: Mapping[float, str] | None = None,
+) -> RasterSymbology:
+    """为重分类输出的离散值创建分类颜色配置，可选保留源区间标签。"""
+    colors: tuple[str, ...] = CATEGORICAL_SCHEMES[color_scheme]
+    ordered_values = tuple(
+        sorted({float(value) for value in values if np.isfinite(float(value))})
+    )
+    classes = tuple(
+        RasterClass(
+            value=value,
+            label=(labels or {}).get(value, _format_raster_class_value(value)),
+            color=colors[index % len(colors)],
+        )
+        for index, value in enumerate(ordered_values[:100])
+    )
+    return RasterSymbology(
+        renderer_type=RasterRendererType.CLASSIFIED,
+        color_scheme=color_scheme,
+        classes=classes,
+        other_color="#BDBDBD",
+        other_visible=True,
+    )
+
+
 def apply_raster_symbology(layer: RasterLayer, symbology: RasterSymbology) -> RasterLayer:
-    """根据原始像元重新生成 RGBA 显示缓存并保留空间身份。"""
+    """根据原始像元重新生成 RGBA 显示缓存并保留空间身份。
+
+    延迟栅格优先使用读取时保留的低分辨率原始预览，避免工程重开或修改
+    符号系统时为了刷新地图而加载整幅分析数据。
+    """
+    requested_band_candidates = (
+        symbology.rgb_bands
+        if symbology.renderer_type is RasterRendererType.RGB
+        else (symbology.stretch_band,)
+    )
+    requested_bands: tuple[int, ...] = tuple(
+        min(max(index, 0), layer.band_count - 1)
+        for index in requested_band_candidates
+    )
+    if layer.analysis_data_loaded:
+        source_data = layer.raster_data
+        source_valid_mask = layer.valid_mask
+        render_band_indexes = requested_bands
+        display_transform = layer.transform
+    elif (
+        layer.display_values is not None
+        and layer.display_valid_mask is not None
+        and all(index in layer.display_band_indexes for index in requested_bands)
+    ):
+        source_data = layer.display_values
+        source_valid_mask = layer.display_valid_mask
+        positions = {index: position for position, index in enumerate(layer.display_band_indexes)}
+        render_band_indexes = tuple(positions[index] for index in requested_bands)
+        display_transform = layer.display_transform or layer.transform
+    else:
+        # 外部构造的延迟图层可能只有 RGBA 预览而没有对应原始值，不能凭颜色
+        # 反推分类结果；保留预览并恢复参数，避免意外触发不可控的全图读取。
+        return replace(layer, symbology=symbology)
+
     if symbology.renderer_type is RasterRendererType.RGB:
-        bands = tuple(min(max(index, 0), layer.band_count - 1) for index in symbology.rgb_bands)
         stretched = [
-            _stretch_band(layer.raster_data[index], layer.valid_mask, symbology)
-            for index in bands
+            _stretch_band(source_data[index], source_valid_mask, symbology)
+            for index in render_band_indexes
         ]
         rgb = np.stack(stretched, axis=2)
-    else:
-        band_index: int = min(max(symbology.stretch_band, 0), layer.band_count - 1)
+        stretch_alpha: NDArray[np.uint8] = np.where(
+            source_valid_mask, 255, 0
+        ).astype(np.uint8)
+        image_data = np.ascontiguousarray(
+            np.dstack((rgb, stretch_alpha)).astype(np.uint8)
+        )
+    elif symbology.renderer_type is RasterRendererType.STRETCH:
         normalized = _stretch_normalized(
-            layer.raster_data[band_index],
-            layer.valid_mask,
+            source_data[render_band_indexes[0]],
+            source_valid_mask,
             symbology,
         )
         if symbology.inverted:
             normalized = 1.0 - normalized
         rgb = _apply_color_ramp(normalized, COLOR_RAMPS[symbology.color_scheme])
-    alpha: NDArray[np.uint8] = np.where(layer.valid_mask, 255, 0).astype(np.uint8)
-    image_data = np.ascontiguousarray(np.dstack((rgb, alpha)).astype(np.uint8))
-    # 符号化会使用完整分析数组生成全分辨率图像，因此恢复完整像元变换。
+        alpha: NDArray[np.uint8] = np.where(source_valid_mask, 255, 0).astype(np.uint8)
+        image_data = np.ascontiguousarray(np.dstack((rgb, alpha)).astype(np.uint8))
+    else:
+        image_data = render_raster_classified(
+            source_data[render_band_indexes[0]],
+            source_valid_mask,
+            symbology,
+        )
+    # 使用低分辨率原始值时必须保留预览变换，否则颜色虽正确但地图位置会偏移。
     return replace(
         layer,
         image_data=image_data,
-        display_transform=layer.transform,
+        display_transform=display_transform,
         symbology=symbology,
     )
+
+
+def render_raster_classified(
+    values: NDArray[np.generic],
+    valid_mask: NDArray[np.bool_],
+    symbology: RasterSymbology,
+) -> NDArray[np.uint8]:
+    """将栅格离散值渲染为分类颜色，并保持 NoData 透明。"""
+    numeric_values = np.asarray(values, dtype=np.float64)
+    shape = numeric_values.shape
+    other_rgb = np.asarray(_hex_to_rgb(symbology.other_color), dtype=np.uint8)
+    rgb = np.broadcast_to(other_rgb, (*shape, 3)).copy()
+    visible = np.asarray(valid_mask, dtype=bool).copy()
+    matched = np.zeros(shape, dtype=bool)
+    for category in symbology.classes:
+        category_mask = valid_mask & np.isfinite(numeric_values) & (
+            numeric_values == category.value
+        )
+        matched |= category_mask
+        rgb[category_mask] = _hex_to_rgb(category.color)
+        if not category.visible:
+            visible[category_mask] = False
+    if not symbology.other_visible:
+        visible[valid_mask & ~matched] = False
+    alpha = np.where(visible, 255, 0).astype(np.uint8)
+    return np.ascontiguousarray(np.dstack((rgb, alpha)).astype(np.uint8))
 
 
 def sample_color_ramp(name: str, count: int) -> tuple[str, ...]:
@@ -152,6 +250,11 @@ def _symbol_with_color(base: LayerStyle, color: str) -> LayerStyle:
     if base.fill_color == "transparent":
         return replace(base, stroke_color=color)
     return replace(base, fill_color=color, stroke_color="#4B5563")
+
+
+def _format_raster_class_value(value: float) -> str:
+    """把分类值格式化为不带无意义小数的图例标签。"""
+    return f"{value:.6g}"
 
 
 def _stretch_band(

@@ -5,6 +5,7 @@ from pathlib import Path
 import fiona
 import numpy as np
 import pytest
+import rasterio
 from affine import Affine
 from pyproj import CRS
 from shapely.geometry import Point
@@ -14,6 +15,7 @@ from app.application.errors import InvalidBufferParameters
 from app.application.gis_application import GisApplication
 from app.application.project_models import LayerReference, MapViewState
 from app.application.project_service import ProjectService
+from app.application.symbology_service import create_raster_classified_symbology
 from app.domain.feature import Feature
 from app.domain.raster_layer import RasterLayer
 from app.domain.symbology import RasterRendererType, RasterSymbology, symbology_to_dict
@@ -84,6 +86,78 @@ def test_restoring_lazy_raster_symbology_does_not_load_full_analysis_data() -> N
     assert restored.name == "工程中的 DEM"
     assert restored.symbology == symbology
     assert restored.analysis_data_loaded is False
+
+
+def test_restoring_lazy_classified_raster_uses_preview_values_without_full_load() -> None:
+    """大栅格恢复分类符号时应使用预览原始值而不是读取完整分析数组。"""
+
+    def fail_if_loaded() -> tuple[np.ndarray, np.ndarray]:
+        raise AssertionError("分类预览不应触发完整栅格分析数据加载")
+
+    symbology = create_raster_classified_symbology((1.0, 2.0))
+    layer = RasterLayer.create_lazy(
+        name="reclass",
+        image_data=np.zeros((2, 2, 4), dtype=np.uint8),
+        display_values=np.asarray([[[1.0, 2.0], [1.0, 9.0]]], dtype=np.float32),
+        display_valid_mask=np.ones((2, 2), dtype=np.bool_),
+        display_band_indexes=(0,),
+        transform=Affine.identity(),
+        display_transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0, 0, 2, 2),
+        raster_shape=(10000, 10000),
+        band_count=1,
+        analysis_loader=fail_if_loaded,
+    )
+    reference = LayerReference(
+        layer_id="stable-reclass",
+        name="工程中的重分类",
+        source_path="reclass.tif",
+        source_layer_name=None,
+        layer_kind="raster",
+        visible=True,
+        selected_feature_ids=(),
+        fingerprint=None,
+        symbology=symbology_to_dict(symbology),
+    )
+
+    restored = ProjectService._restore_layer_identity(layer, reference, Path("reclass.tif"))
+
+    assert restored.analysis_data_loaded is False
+    assert restored.image_data[0, 0, :3].tolist() == [78, 121, 167]
+    assert restored.image_data[0, 1, :3].tolist() == [242, 142, 43]
+
+
+def test_project_round_trip_rebuilds_raster_classified_preview(tmp_path: Path) -> None:
+    """工程重开后，分类图例颜色应与地图栅格预览保持一致。"""
+    source_path: Path = tmp_path / "classified.tif"
+    with rasterio.open(
+        source_path,
+        "w",
+        driver="GTiff",
+        height=2,
+        width=2,
+        count=1,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=Affine.translation(0, 2) * Affine.scale(1, -1),
+        nodata=-9999.0,
+    ) as dataset:
+        dataset.write(np.asarray([[1.0, 2.0], [1.0, -9999.0]], dtype=np.float32), 1)
+    project_path: Path = tmp_path / "classified.gisproj"
+
+    application = make_application()
+    opened = application.open_data(source_path)
+    # 直接从工程可持久化的符号配置构造两类，避免测试依赖界面操作。
+    symbology = create_raster_classified_symbology((1.0, 2.0))
+    application.apply_raster_symbology(opened.layer_id, symbology)
+    application.save_project(project_path)
+
+    restored = make_application().open_project(project_path)
+    restored_layer = restored.snapshot.layers[0].layer
+
+    assert restored_layer.symbology.renderer_type is RasterRendererType.CLASSIFIED
+    assert restored_layer.image_data[0, 0, :3].tolist() == [78, 121, 167]
 
 
 def test_project_round_trip_restores_workspace_and_relative_source_path(

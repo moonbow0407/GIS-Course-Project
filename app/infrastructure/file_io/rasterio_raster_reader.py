@@ -96,6 +96,8 @@ class RasterioRasterReader:
             resampling=Resampling.nearest,
         )
         rgba: NDArray[np.uint8] = self._to_rgba(display_values, display_masks)
+        display_valid_mask = self._display_valid_mask(display_values, display_masks)
+        display_band_indexes: tuple[int, ...] = tuple(index - 1 for index in indexes)
         transform: Affine = dataset.transform
         display_transform: Affine = transform * Affine.scale(
             dataset.width / preview_width,
@@ -129,6 +131,9 @@ class RasterioRasterReader:
                 bounds=bounds,
                 nodata=dataset.nodata,
                 source_path=path,
+                display_values=display_values,
+                display_valid_mask=display_valid_mask,
+                display_band_indexes=display_band_indexes,
             )
         return RasterLayer.create_lazy(
             name=path.stem,
@@ -142,6 +147,9 @@ class RasterioRasterReader:
             analysis_loader=analysis_loader,
             nodata=dataset.nodata,
             source_path=path,
+            display_values=display_values,
+            display_valid_mask=display_valid_mask,
+            display_band_indexes=display_band_indexes,
         )
 
     def _read_analysis_data(
@@ -205,9 +213,7 @@ class RasterioRasterReader:
         values: NDArray[np.generic], masks: NDArray[np.uint8]
     ) -> NDArray[np.uint8]:
         """对预览有效像元做百分位拉伸，并生成透明无效区的 RGBA 数组。"""
-        valid: NDArray[np.bool_] = np.all(masks > 0, axis=0)
-        # 部分遥感产品未声明 nodata，但会用所有显示波段均为零表示覆盖区外背景。
-        valid &= np.any(values != 0, axis=0)
+        valid: NDArray[np.bool_] = RasterioRasterReader._display_valid_mask(values, masks)
         stretched_bands: list[NDArray[np.uint8]] = []
         band_index: int
         for band_index in range(values.shape[0]):
@@ -221,11 +227,26 @@ class RasterioRasterReader:
             upper: float = float(np.percentile(samples, 98.0))
             if upper <= lower:
                 upper = lower + 1.0
-            scaled: NDArray[np.float64] = np.clip((band - lower) / (upper - lower), 0.0, 1.0)
-            stretched_bands.append(np.asarray(scaled * 255.0, dtype=np.uint8))
+            scaled_valid = np.clip(
+                (band[valid] - lower) / (upper - lower), 0.0, 1.0
+            )
+            stretched = np.zeros(band.shape, dtype=np.uint8)
+            stretched[valid] = np.asarray(scaled_valid * 255.0, dtype=np.uint8)
+            stretched_bands.append(stretched)
         if len(stretched_bands) == 1:
             stretched_bands = stretched_bands * 3
         rgb: NDArray[np.uint8] = np.stack(stretched_bands[:3], axis=2)
         alpha: NDArray[np.uint8] = np.where(valid, 255, 0).astype(np.uint8)
         # 连续内存便于 Qt 按行读取 RGBA 像素。
         return np.ascontiguousarray(np.dstack((rgb, alpha)))
+
+    @staticmethod
+    def _display_valid_mask(
+        values: NDArray[np.generic], masks: NDArray[np.uint8]
+    ) -> NDArray[np.bool_]:
+        """按显示预览规则生成有效掩膜，供后续低分辨率符号重建复用。"""
+        valid: NDArray[np.bool_] = np.all(masks > 0, axis=0)
+        # 部分遥感产品未声明 nodata，但会用所有显示波段均为零表示覆盖区外背景。
+        valid &= np.any(values != 0, axis=0)
+        valid &= np.all(np.isfinite(values), axis=0)
+        return valid

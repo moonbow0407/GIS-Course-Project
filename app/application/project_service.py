@@ -20,6 +20,7 @@ from app.application.project_models import (
     ProjectManifest,
     SourceFingerprint,
 )
+from app.application.symbology_service import apply_raster_symbology
 from app.domain.labeling import labeling_from_dict, labeling_to_dict
 from app.domain.layout import LayoutDocument, layout_to_dict
 from app.domain.map_document import MapDocument
@@ -323,9 +324,11 @@ class ProjectService:
                 source_path=source_path,
                 symbology=restored_raster_symbology,
             )
-            # 大栅格首读只保留显示预览；工程恢复阶段仅恢复符号参数，
-            # 不应为重新生成全分辨率 RGBA 图像而强制加载完整分析像元。
-            return restored
+            if restored_raster_symbology is None:
+                return restored
+            # 分类/拉伸符号必须同步作用到地图预览；符号服务会优先使用
+            # 读取器保留的低分辨率原始值，不会因工程重开而加载整幅大栅格。
+            return apply_raster_symbology(restored, restored_raster_symbology)
         raise ProjectReadFailed(
             f"工程图层“{reference.name}”的数据类型与记录不一致。"
         )
