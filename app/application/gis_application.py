@@ -49,6 +49,7 @@ from app.application.errors import (
     RasterCalculatorFailed,
     UnsupportedBufferInput,
     UnsupportedOverlayInput,
+    WorkspaceOperationCancelled,
 )
 from app.application.overlay_analysis import (
     OverlayRequest,
@@ -63,6 +64,18 @@ from app.application.project_models import (
     MapViewState,
 )
 from app.application.project_service import ProjectService
+from app.application.raster_analysis import (
+    DemAnalysisRequest,
+    RasterClipRequest,
+    RasterReclassifyRequest,
+    clip_history_parameters,
+    dem_history_parameters,
+    reclassify_history_parameters,
+)
+from app.application.raster_analysis_service import (
+    ProgressCallback,
+    RasterAnalysisService,
+)
 from app.application.raster_calculator import (
     RasterCalculatorRequest,
     compute_raster_expression,
@@ -72,6 +85,8 @@ from app.application.raster_calculator import (
 from app.application.results import (
     AnalysisResultPersisted,
     BufferAnalysisResult,
+    DemAnalysisResult,
+    DisplayCrsPreparation,
     ExportDataResult,
     LayerSnapshot,
     OpenDataResult,
@@ -80,6 +95,8 @@ from app.application.results import (
     ProjectOpenResult,
     ProjectSaveResult,
     RasterCalculatorResult,
+    RasterClipResult,
+    RasterReclassifyResult,
     SelectedFeature,
     SelectionResult,
     WorkspaceSnapshot,
@@ -96,7 +113,7 @@ from app.domain.layout import LayoutDocument
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
-from app.domain.symbology import RasterSymbology, VectorSymbology
+from app.domain.symbology import RasterRendererType, RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
 
 
@@ -1463,23 +1480,80 @@ class GisApplication:
             snapshot=self.snapshot(),
         )
 
-    def set_display_crs(self, target_crs: CRS) -> WorkspaceSnapshot:
+    def set_display_crs(
+        self,
+        target_crs: CRS,
+        progress_callback: ProgressCallback | None = None,
+    ) -> WorkspaceSnapshot:
         """设置地图显示坐标系，并从原始数据源原子重建已有图层。"""
-        if self._document.display_crs == target_crs:
+        if self._document.display_crs == target_crs or not self._document.layers:
             self._document.set_display_crs(target_crs)
             self._modified = True
             return self.snapshot()
-        if not self._document.layers:
-            self._document.set_display_crs(target_crs)
+        preparation = self.prepare_display_crs(target_crs, progress_callback)
+        return self.commit_display_crs(preparation)
+
+    def prepare_display_crs(
+        self,
+        target_crs: CRS,
+        progress_callback: ProgressCallback | None = None,
+    ) -> DisplayCrsPreparation:
+        """在不修改工作区的前提下准备全部图层的目标 CRS 副本。
+
+        参数:
+            target_crs: 目标显示坐标系。
+            progress_callback: 按图层报告 ``(已完成数量, 总数量)``，返回 False 时取消。
+
+        返回:
+            可在主线程原子提交的转换结果。
+
+        异常:
+            WorkspaceOperationCancelled: 用户在提交前取消转换。
+            LayerReprojectionFailed: 某个图层无法从原始数据源转换。
+        """
+        old_layers: tuple[SpatialLayer, ...] = self._document.layers
+        total: int = len(old_layers)
+        if self._document.display_crs == target_crs:
+            return DisplayCrsPreparation(
+                target_crs=target_crs,
+                source_layer_ids=tuple(layer.layer_id for layer in old_layers),
+                projected_layers=old_layers,
+            )
+        if progress_callback is not None and not progress_callback(0, total):
+            raise WorkspaceOperationCancelled("已取消坐标系转换。")
+
+        projected_layers: list[SpatialLayer] = []
+        for index, layer in enumerate(old_layers, start=1):
+            projected_layers.append(self._project_layer_from_source(layer, target_crs))
+            if progress_callback is not None and not progress_callback(index, total):
+                raise WorkspaceOperationCancelled("已取消坐标系转换。")
+        return DisplayCrsPreparation(
+            target_crs=target_crs,
+            source_layer_ids=tuple(layer.layer_id for layer in old_layers),
+            projected_layers=tuple(projected_layers),
+        )
+
+    def commit_display_crs(
+        self,
+        preparation: DisplayCrsPreparation,
+    ) -> WorkspaceSnapshot:
+        """在主线程把已准备好的 CRS 结果一次性提交到地图文档。"""
+        current_layer_ids: tuple[str, ...] = tuple(
+            layer.layer_id for layer in self._document.layers
+        )
+        if current_layer_ids != preparation.source_layer_ids:
+            raise ValueError("坐标系转换期间工作区发生变化，请重试。")
+        if self._document.display_crs == preparation.target_crs or not current_layer_ids:
+            self._document.set_display_crs(preparation.target_crs)
             self._modified = True
             return self.snapshot()
 
         old_layers: tuple[SpatialLayer, ...] = self._document.layers
-        projected_layers: tuple[SpatialLayer, ...] = tuple(
-            self._project_layer_from_source(layer, target_crs) for layer in old_layers
-        )
+        projected_layers: tuple[SpatialLayer, ...] = preparation.projected_layers
+        if len(old_layers) != len(projected_layers):
+            raise ValueError("坐标系转换结果与当前图层数量不一致，请重试。")
         replacement_document: MapDocument = MapDocument()
-        replacement_document.set_display_crs(target_crs)
+        replacement_document.set_display_crs(preparation.target_crs)
         for old_layer, projected_layer in zip(old_layers, projected_layers, strict=True):
             replacement_document.add_layer(projected_layer)
             replacement_document.set_layer_visibility(
@@ -1592,16 +1666,31 @@ class GisApplication:
                 labeling=layer.labeling,
             )
         if isinstance(layer, RasterLayer) and isinstance(projected, RasterLayer):
+            symbology: RasterSymbology | None = layer.symbology
             restored_raster = projected.with_identity(
                 layer_id=layer.layer_id,
                 name=projected.name,
                 source_path=projected.source_path,
-                symbology=layer.symbology,
+                symbology=symbology,
             )
-            if layer.symbology is None:
+            if self._is_default_raster_symbology(layer):
                 return restored_raster
-            return apply_raster_symbology(restored_raster, layer.symbology)
+            assert symbology is not None
+            return apply_raster_symbology(restored_raster, symbology)
         raise LayerReprojectionFailed(f"图层“{layer.name}”转换后类型发生变化。")
+
+    @staticmethod
+    def _is_default_raster_symbology(layer: RasterLayer) -> bool:
+        """判断是否可直接使用重投影预览，避免大栅格被迫完整加载。"""
+        symbology: RasterSymbology | None = layer.symbology
+        if symbology is None:
+            return True
+        if layer.band_count < 3:
+            return symbology == RasterSymbology(renderer_type=RasterRendererType.STRETCH)
+        # 三波段默认显示与读取器的 RGB 预览一致；四波段通常需要保留 4-3-2 预览。
+        return layer.band_count == 3 and symbology == RasterSymbology(
+            renderer_type=RasterRendererType.RGB
+        )
 
     def _find_layer(self, layer_id: str) -> SpatialLayer:
         """按编号查找工作区图层。"""
@@ -2149,6 +2238,230 @@ class GisApplication:
             started_at=started_at,
             completed_at=self._now(),
             duration_seconds=perf_counter() - started_monotonic,
+        )
+        self._analysis_runs = self._analysis_runs + (run,)
+        self._modified = True
+
+    # ── 栅格分析（重分类/DEM/掩膜裁剪） ───────────────────
+
+    def _layers_map(self) -> dict[str, SpatialLayer]:
+        """返回工作区图层编号到图层的映射，供分析服务查找。"""
+        return {layer.layer_id: layer for layer in self._document.layers}
+
+    def _create_analysis_service(
+        self, progress: ProgressCallback | None = None
+    ) -> RasterAnalysisService:
+        """创建栅格分析服务，可选注入进度回调。"""
+        return RasterAnalysisService(
+            data_reader=self.data_reader, progress_callback=progress
+        )
+
+    def raster_reclassify(
+        self, request: RasterReclassifyRequest
+    ) -> RasterReclassifyResult:
+        """执行栅格重分类，并记录分析历史。"""
+        started_at: str = self._now()
+        started_monotonic: float = perf_counter()
+        parameters = reclassify_history_parameters(request)
+        try:
+            service = self._create_analysis_service()
+            result_layer = service.execute_reclassify(request, self._layers_map())
+            snapshot = self.register_raster_analysis_layer(
+                result_layer,
+                algorithm_id="raster_reclassify",
+                input_layer_ids=(request.input_layer_id,),
+                parameters=parameters,
+                output_layer_name=request.output_layer_name,
+                started_monotonic=started_monotonic,
+            )
+            return RasterReclassifyResult(
+                input_layer_id=request.input_layer_id,
+                output_layer_id=result_layer.layer_id,
+                output_layer_name=request.output_layer_name,
+                output_path=request.output_path,
+                rule_count=len(request.rules),
+                snapshot=snapshot,
+            )
+        except Exception as error:
+            self._append_failed_raster_analysis(
+                "raster_reclassify",
+                (request.input_layer_id,),
+                parameters,
+                started_at,
+                started_monotonic,
+                error,
+            )
+            raise
+
+    def dem_analysis(
+        self, request: DemAnalysisRequest
+    ) -> DemAnalysisResult:
+        """执行 DEM 坡度/坡向/山体阴影计算，并记录分析历史。"""
+        started_at: str = self._now()
+        started_monotonic: float = perf_counter()
+        parameters = dem_history_parameters(request)
+        try:
+            service = self._create_analysis_service()
+            result_layer = service.execute_dem_analysis(request, self._layers_map())
+            snapshot = self.register_raster_analysis_layer(
+                result_layer,
+                algorithm_id="dem_analysis",
+                input_layer_ids=(request.input_layer_id,),
+                parameters=parameters,
+                output_layer_name=request.output_layer_name,
+                started_monotonic=started_monotonic,
+            )
+            return DemAnalysisResult(
+                input_layer_id=request.input_layer_id,
+                output_layer_id=result_layer.layer_id,
+                output_layer_name=request.output_layer_name,
+                output_path=request.output_path,
+                mode=request.mode,
+                snapshot=snapshot,
+            )
+        except Exception as error:
+            self._append_failed_raster_analysis(
+                "dem_analysis",
+                (request.input_layer_id,),
+                parameters,
+                started_at,
+                started_monotonic,
+                error,
+            )
+            raise
+
+    def raster_clip_analysis(
+        self, request: RasterClipRequest
+    ) -> RasterClipResult:
+        """执行矢量掩膜裁剪栅格，并记录分析历史。"""
+        started_at: str = self._now()
+        started_monotonic: float = perf_counter()
+        input_ids = (request.raster_layer_id, request.mask_layer_id)
+        parameters = clip_history_parameters(request)
+        try:
+            service = self._create_analysis_service()
+            result_layer = service.execute_clip(request, self._layers_map())
+            snapshot = self.register_raster_analysis_layer(
+                result_layer,
+                algorithm_id="raster_clip",
+                input_layer_ids=input_ids,
+                parameters=parameters,
+                output_layer_name=request.output_layer_name,
+                started_monotonic=started_monotonic,
+            )
+            return RasterClipResult(
+                raster_layer_id=request.raster_layer_id,
+                mask_layer_id=request.mask_layer_id,
+                output_layer_id=result_layer.layer_id,
+                output_layer_name=request.output_layer_name,
+                output_path=request.output_path,
+                snapshot=snapshot,
+            )
+        except Exception as error:
+            self._append_failed_raster_analysis(
+                "raster_clip",
+                input_ids,
+                parameters,
+                started_at,
+                started_monotonic,
+                error,
+            )
+            raise
+
+    def _append_failed_raster_analysis(
+        self,
+        algorithm_id: str,
+        input_layer_ids: tuple[str, ...],
+        parameters: dict[str, object],
+        started_at: str,
+        started_monotonic: float,
+        error: Exception,
+    ) -> None:
+        """将失败的栅格分析写入历史，便于用户回溯。"""
+        run = self._create_analysis_run(
+            algorithm_id=algorithm_id,
+            input_layer_ids=input_layer_ids,
+            parameters=parameters,
+            status="failed",
+            message=str(error),
+            started_at=started_at,
+            completed_at=self._now(),
+            duration_seconds=perf_counter() - started_monotonic,
+        )
+        self._analysis_runs = self._analysis_runs + (run,)
+        self._modified = True
+
+    def register_raster_analysis_layer(
+        self,
+        result_layer: RasterLayer,
+        algorithm_id: str,
+        input_layer_ids: tuple[str, ...],
+        parameters: Mapping[str, object],
+        output_layer_name: str,
+        started_monotonic: float | None = None,
+    ) -> WorkspaceSnapshot:
+        """在工作线程计算完成后注册结果图层并记录历史。
+
+        该方法只操作内存状态，应在主线程调用。
+
+        参数:
+            result_layer: 分析服务已经写出并重新加载的结果图层。
+            algorithm_id: 分析算法标识，用于历史记录。
+            input_layer_ids: 本次分析使用的输入图层编号。
+            parameters: 可持久化的分析参数。
+            output_layer_name: 结果图层显示名称。
+            started_monotonic: 分析开始时的单调时钟，用于计算耗时。
+
+        返回:
+            注册结果图层后的工作区快照。
+        """
+        layer_added = False
+        try:
+            self._document.add_layer(result_layer)
+            layer_added = True
+            self._document.set_active_layer(result_layer.layer_id)
+            run = self._create_analysis_run(
+                algorithm_id=algorithm_id,
+                input_layer_ids=input_layer_ids,
+                parameters=dict(parameters),
+                output_layer_id=result_layer.layer_id,
+                output_path=result_layer.source_path,
+                output_layer_name=output_layer_name,
+                started_at=self._now(),
+                completed_at=self._now(),
+                duration_seconds=(
+                    perf_counter() - started_monotonic
+                    if started_monotonic is not None
+                    else None
+                ),
+            )
+            self._analysis_runs = self._analysis_runs + (run,)
+            self._modified = True
+            return self.snapshot()
+        except Exception:
+            # 结果文件由本次分析新建；图层注册失败时不能留下孤立文件。
+            if layer_added:
+                self._document.remove_layer(result_layer.layer_id)
+            if result_layer.source_path is not None:
+                result_layer.source_path.unlink(missing_ok=True)
+            raise
+
+    def record_failed_raster_analysis(
+        self,
+        algorithm_id: str,
+        input_layer_ids: tuple[str, ...],
+        parameters: Mapping[str, object],
+        message: str,
+    ) -> None:
+        """记录一次失败的栅格分析，便于分析历史回溯。"""
+        run = self._create_analysis_run(
+            algorithm_id=algorithm_id,
+            input_layer_ids=input_layer_ids,
+            parameters=dict(parameters),
+            status="failed",
+            message=message,
+            started_at=self._now(),
+            completed_at=self._now(),
         )
         self._analysis_runs = self._analysis_runs + (run,)
         self._modified = True

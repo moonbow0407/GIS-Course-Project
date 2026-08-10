@@ -352,17 +352,24 @@ class SymbologyPanel(QWidget):
         self._fill_vector_classes(symbology)
 
     def _load_raster(self, layer: RasterLayer) -> None:
-        """加载栅格模式、波段和拉伸参数。"""
+        """加载栅格模式、分类值、波段和拉伸参数。"""
         symbology: RasterSymbology = layer.symbology  # type: ignore[assignment]
         with QSignalBlocker(self._renderer):
             self._renderer.clear()
             if layer.band_count >= 3:
                 self._renderer.addItem("RGB合成", RasterRendererType.RGB.value)
             self._renderer.addItem("单波段拉伸", RasterRendererType.STRETCH.value)
+            if symbology.renderer_type is RasterRendererType.CLASSIFIED:
+                self._renderer.addItem("分类值", RasterRendererType.CLASSIFIED.value)
             self._set_combo_data(self._renderer, symbology.renderer_type.value)
         with QSignalBlocker(self._scheme):
             self._scheme.clear()
-            for name in COLOR_RAMPS:
+            scheme_names = (
+                CATEGORICAL_SCHEMES
+                if symbology.renderer_type is RasterRendererType.CLASSIFIED
+                else COLOR_RAMPS
+            )
+            for name in scheme_names:
                 self._add_scheme_item(name)
             self._set_combo_data(self._scheme, symbology.color_scheme)
         for spin, value in zip(
@@ -378,17 +385,32 @@ class SymbologyPanel(QWidget):
         self._lower_percent.setValue(symbology.lower_percent)
         self._upper_percent.setValue(symbology.upper_percent)
         self._invert.setChecked(symbology.inverted)
-        self._classes.setRowCount(0)
+        if symbology.renderer_type is RasterRendererType.CLASSIFIED:
+            self._fill_raster_classes(symbology)
+        else:
+            self._classes.setRowCount(0)
 
     def _on_vector_or_raster_change(self) -> None:
         """按当前图层类型自动生成或应用主符号。"""
         if self._updating or self._snapshot is None:
             return
         snapshot: LayerSnapshot = self._snapshot
-        self._update_control_visibility()
         if isinstance(snapshot.layer, RasterLayer):
+            renderer_data = str(self._renderer.currentData())
+            scheme_names = (
+                tuple(CATEGORICAL_SCHEMES)
+                if renderer_data == RasterRendererType.CLASSIFIED.value
+                else tuple(COLOR_RAMPS)
+            )
+            if str(self._scheme.currentData()) not in scheme_names:
+                with QSignalBlocker(self._scheme):
+                    self._scheme.clear()
+                    for name in scheme_names:
+                        self._add_scheme_item(name)
+            self._update_control_visibility()
             self._emit_raster()
             return
+        self._update_control_visibility()
         renderer = VectorRendererType(str(self._renderer.currentData()))
         layer = snapshot.layer
         if isinstance(layer, VectorLayer) and renderer is not VectorRendererType.SIMPLE:
@@ -517,18 +539,36 @@ class SymbologyPanel(QWidget):
         )
 
     def _emit_raster(self) -> None:
-        """应用当前 RGB 或拉伸栅格配置。"""
+        """应用当前 RGB、拉伸或分类栅格配置。"""
         if self._updating or self._snapshot is None:
             return
         layer = self._snapshot.layer
         if not isinstance(layer, RasterLayer):
+            return
+        renderer_type = RasterRendererType(str(self._renderer.currentData()))
+        if renderer_type is RasterRendererType.CLASSIFIED:
+            current: RasterSymbology = layer.symbology  # type: ignore[assignment]
+            scheme = str(self._scheme.currentData())
+            colors = CATEGORICAL_SCHEMES[scheme]
+            classes = tuple(
+                replace(category, color=colors[index % len(colors)])
+                for index, category in enumerate(current.classes)
+            )
+            config = replace(
+                current,
+                color_scheme=scheme,
+                classes=classes,
+            )
+            self._emit_or_defer(
+                lambda: self.symbology_changed.emit(layer.layer_id, config)
+            )
             return
         lower: float = self._lower_percent.value()
         upper: float = self._upper_percent.value()
         if lower >= upper:
             return
         config = RasterSymbology(
-            renderer_type=RasterRendererType(str(self._renderer.currentData())),
+            renderer_type=renderer_type,
             rgb_bands=(
                 self._red_band.value() - 1,
                 self._green_band.value() - 1,
@@ -602,14 +642,89 @@ class SymbologyPanel(QWidget):
             self._classes.setItem(row, 2, color_item)
             self._classes.setRowHeight(row, 34)
 
+    def _fill_raster_classes(self, symbology: RasterSymbology) -> None:
+        """把重分类值和其他值写入栅格分类表。"""
+        display_rows: list[tuple[str, str, bool]] = [
+            (category.label, category.color, category.visible)
+            for category in symbology.classes
+        ]
+        display_rows.append(("其他值", symbology.other_color, symbology.other_visible))
+        self._classes.setRowCount(len(display_rows))
+        self._class_count_label.setText(f"{len(display_rows)} 类")
+        for row, (label, color, visible) in enumerate(display_rows):
+            visible_item = QTableWidgetItem()
+            visible_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsUserCheckable
+            )
+            visible_item.setCheckState(
+                Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked
+            )
+            label_item = QTableWidgetItem(label)
+            label_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsEditable
+            )
+            color_item = QTableWidgetItem(self._color_display_name(color))
+            color_item.setIcon(self._solid_color_icon(color))
+            color_item.setToolTip(color.upper())
+            color_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+            )
+            self._classes.setItem(row, 0, visible_item)
+            self._classes.setItem(row, 1, label_item)
+            self._classes.setItem(row, 2, color_item)
+            self._classes.setRowHeight(row, 34)
+
     def _on_class_item_changed(self, item: QTableWidgetItem) -> None:
         """将类别标签或显隐编辑写回矢量符号配置。"""
         if self._updating or self._snapshot is None:
             return
         layer = self._snapshot.layer
+        if isinstance(layer, RasterLayer):
+            raster_symbology = layer.symbology
+            if raster_symbology is None:
+                return
+            if raster_symbology.renderer_type is not RasterRendererType.CLASSIFIED:
+                return
+            raster_row: int = item.row()
+            visible_item = self._classes.item(raster_row, 0)
+            label_item = self._classes.item(raster_row, 1)
+            if visible_item is None or label_item is None:
+                return
+            raster_visible: bool = (
+                visible_item.checkState() == Qt.CheckState.Checked
+            )
+            raster_label: str = label_item.text()
+            if raster_row == len(raster_symbology.classes):
+                raster_updated = replace(
+                    raster_symbology,
+                    other_visible=raster_visible,
+                )
+            elif 0 <= raster_row < len(raster_symbology.classes):
+                raster_classes = list(raster_symbology.classes)
+                raster_classes[raster_row] = replace(
+                    raster_classes[raster_row],
+                    visible=raster_visible,
+                    label=raster_label,
+                )
+                raster_updated = replace(
+                    raster_symbology,
+                    classes=tuple(raster_classes),
+                )
+            else:
+                return
+            self._emit_or_defer(
+                lambda: self.symbology_changed.emit(layer.layer_id, raster_updated)
+            )
+            return
         if not isinstance(layer, VectorLayer):
             return
-        symbology: VectorSymbology = layer.symbology  # type: ignore[assignment]
+        symbology = layer.symbology
+        if symbology is None:
+            return
         row: int = item.row()
         visible_item = self._classes.item(row, 0)
         label_item = self._classes.item(row, 1)
@@ -618,8 +733,8 @@ class SymbologyPanel(QWidget):
         visible: bool = visible_item.checkState() == Qt.CheckState.Checked
         label: str = label_item.text()
         if symbology.renderer_type is VectorRendererType.UNIQUE:
-            classes = list(symbology.unique_classes)
-            if row == len(classes):
+            vector_classes = list(symbology.unique_classes)
+            if row == len(vector_classes):
                 self._emit_or_defer(
                     lambda: self.symbology_changed.emit(
                         layer.layer_id,
@@ -627,14 +742,21 @@ class SymbologyPanel(QWidget):
                     )
                 )
                 return
-            classes[row] = replace(classes[row], visible=visible, label=label)
-            updated = replace(symbology, unique_classes=tuple(classes))
+            vector_classes[row] = replace(
+                vector_classes[row], visible=visible, label=label
+            )
+            vector_updated = replace(symbology, unique_classes=tuple(vector_classes))
         else:
-            classes2 = list(symbology.graduated_classes)
-            classes2[row] = replace(classes2[row], visible=visible, label=label)
-            updated = replace(symbology, graduated_classes=tuple(classes2))
+            graduated_classes = list(symbology.graduated_classes)
+            graduated_classes[row] = replace(
+                graduated_classes[row], visible=visible, label=label
+            )
+            vector_updated = replace(
+                symbology,
+                graduated_classes=tuple(graduated_classes),
+            )
         self._emit_or_defer(
-            lambda: self.symbology_changed.emit(layer.layer_id, updated)
+            lambda: self.symbology_changed.emit(layer.layer_id, vector_updated)
         )
 
     def _edit_class_color(self, row: int, column: int) -> None:
@@ -642,9 +764,48 @@ class SymbologyPanel(QWidget):
         if column != 2 or self._snapshot is None:
             return
         layer = self._snapshot.layer
+        if isinstance(layer, RasterLayer):
+            raster_symbology = layer.symbology
+            if raster_symbology is None:
+                return
+            if raster_symbology.renderer_type is not RasterRendererType.CLASSIFIED:
+                return
+            if row < 0 or row > len(raster_symbology.classes):
+                return
+            raster_current_color = (
+                raster_symbology.classes[row].color
+                if row < len(raster_symbology.classes)
+                else raster_symbology.other_color
+            )
+            raster_color: QColor | None = ColorWheelPicker.get_color(
+                QColor(raster_current_color), self
+            )
+            if raster_color is None:
+                return
+            if row < len(raster_symbology.classes):
+                raster_classes = list(raster_symbology.classes)
+                raster_classes[row] = replace(
+                    raster_classes[row],
+                    color=raster_color.name(),
+                )
+                raster_updated = replace(
+                    raster_symbology,
+                    classes=tuple(raster_classes),
+                )
+            else:
+                raster_updated = replace(
+                    raster_symbology,
+                    other_color=raster_color.name(),
+                )
+            self._emit_or_defer(
+                lambda: self.symbology_changed.emit(layer.layer_id, raster_updated)
+            )
+            return
         if not isinstance(layer, VectorLayer):
             return
-        symbology: VectorSymbology = layer.symbology  # type: ignore[assignment]
+        symbology = layer.symbology
+        if symbology is None:
+            return
         editing_other: bool = False
         if symbology.renderer_type is VectorRendererType.UNIQUE:
             unique_classes = list(symbology.unique_classes)
@@ -695,22 +856,31 @@ class SymbologyPanel(QWidget):
         is_raster = snapshot is not None and isinstance(snapshot.layer, RasterLayer)
         is_rgb = is_raster and renderer_data == RasterRendererType.RGB.value
         is_stretch = is_raster and renderer_data == RasterRendererType.STRETCH.value
+        is_classified_raster = (
+            is_raster and renderer_data == RasterRendererType.CLASSIFIED.value
+        )
         self._settings_card.setVisible(snapshot is not None)
         self._form.setRowVisible(self._field, is_unique or is_graduated)
-        self._form.setRowVisible(self._scheme, is_unique or is_graduated or is_stretch)
+        self._form.setRowVisible(
+            self._scheme,
+            is_unique or is_graduated or is_stretch or is_classified_raster,
+        )
         self._form.setRowVisible(
             self._simple_color_button,
             is_vector and not is_unique and not is_graduated,
         )
         self._form.setRowVisible(self._method, is_graduated)
         self._form.setRowVisible(self._class_count, is_graduated)
-        self._classes_card.setVisible(is_unique or is_graduated)
+        self._classes_card.setVisible(
+            is_unique or is_graduated or is_classified_raster
+        )
         for control in (self._red_band, self._green_band, self._blue_band):
             self._form.setRowVisible(control, is_rgb)
         self._form.setRowVisible(self._stretch_band, is_stretch)
-        self._form.setRowVisible(self._stretch_type, is_raster)
+        self._form.setRowVisible(self._stretch_type, is_stretch)
         percent_visible: bool = (
-            is_raster and str(self._stretch_type.currentData()) == StretchType.PERCENT_CLIP.value
+            is_stretch
+            and str(self._stretch_type.currentData()) == StretchType.PERCENT_CLIP.value
         )
         self._form.setRowVisible(self._lower_percent, percent_visible)
         self._form.setRowVisible(self._upper_percent, percent_visible)
@@ -929,7 +1099,7 @@ class SymbologyPanel(QWidget):
             painter.drawRoundedRect(20, 18, 40, 30, 3, 3)
 
     def _paint_raster_preview(self, painter: QPainter, layer: RasterLayer) -> None:
-        """绘制 RGB 波段组合或单波段拉伸预览。"""
+        """绘制 RGB、单波段拉伸或分类值预览。"""
         symbology = layer.symbology
         if symbology is None:
             return
@@ -944,6 +1114,11 @@ class SymbologyPanel(QWidget):
                 painter.fillRect(left, 31, 88, 20, QColor(color))
                 painter.setPen(QColor("#ffffff"))
                 painter.drawText(left + 6, 46, f"{label}  波段 {band + 1}")
+            return
+        if symbology.renderer_type is RasterRendererType.CLASSIFIED:
+            colors = tuple(category.color for category in symbology.classes)
+            painter.drawText(12, 20, f"分类值 · {len(symbology.classes)} 类")
+            self._paint_discrete_bar(painter, colors, 12, 31, 276, 20)
             return
         ramp_colors = COLOR_RAMPS[symbology.color_scheme]
         if symbology.inverted:

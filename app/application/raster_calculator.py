@@ -7,6 +7,7 @@
 - generate_display_image：单波段结果 → RGBA 显示图
 """
 
+import ast
 import math
 import re
 from dataclasses import dataclass
@@ -190,6 +191,9 @@ def compute_raster_expression(
 ) -> NDArray[np.generic]:
     """按逐像素表达式对输入波段求值，返回 2D 结果数组。
 
+    使用 AST 白名单限制可执行节点：只允许数字、变量、指定函数、
+    算术/比较/布尔运算，禁止属性访问、下标、导入和未注册函数调用。
+
     参数:
         band_arrays: alias → 2D numpy 数组（height × width）。
         expression: 引用 alias 的数学表达式。
@@ -202,22 +206,14 @@ def compute_raster_expression(
     """
     # ── 构建安全的求值命名空间 ──
     namespace: dict[str, object] = {
-        # NumPy 函数
         **_ALLOWED_FUNCTIONS,
-        # 布尔常量
         "True": True,
         "False": False,
     }
-    # 将波段数组注入命名空间
     namespace.update(band_arrays)
 
-    # ── 将表达式中的 "alias" 引用替换为直接变量名 ──
-    # 流程：扫描所有 "…" 字符串 → 如果是已知 alias → 替换为同名变量引用；
-    # 保留字符串字面量形式的非 alias 内容不动。
-    # eval 可直接使用 alias 变量，无需额外替换。
+    # ── 将表达式中的 "alias" 引用替换为裸变量名 ──
     transformed: str = expression
-
-    # 检查所有引用的变量是否都已定义
     quoted_refs: set[str] = set(re.findall(r'"([^"]+)"', transformed))
     unknown: set[str] = quoted_refs - set(band_arrays.keys())
     if unknown:
@@ -225,14 +221,19 @@ def compute_raster_expression(
             f"表达式中引用了未定义的波段变量：{', '.join(sorted(unknown))}。"
             f"可用变量：{', '.join(sorted(band_arrays.keys()))}"
         )
-
-    # 将 "alias" 替换为裸变量名（去掉引号，使其成为 Python 标识符引用）
     for alias in quoted_refs & set(band_arrays.keys()):
         transformed = transformed.replace(f'"{alias}"', alias)
 
+    # ── AST 白名单校验 ──
+    try:
+        tree = ast.parse(transformed, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"表达式语法错误：{exc}") from exc
+    _validate_ast(tree)
+
     # ── 执行求值 ──
     try:
-        result = eval(transformed, {"__builtins__": {}}, namespace)
+        result = eval(transformed, {"__builtins__": {}}, namespace)  # noqa: S307
     except SyntaxError as exc:
         raise ValueError(f"表达式语法错误：{exc}") from exc
     except Exception as exc:
@@ -242,7 +243,6 @@ def compute_raster_expression(
     result_array: NDArray[np.generic] = np.asarray(result)
 
     if result_array.ndim == 0:
-        # 标量结果 → 广播到与第一个输入波段同形
         first_shape = next(iter(band_arrays.values())).shape
         result_array = np.full(first_shape, result_array.item(), dtype=np.float32)
 
@@ -252,6 +252,39 @@ def compute_raster_expression(
         )
 
     return result_array.astype(np.float32, copy=False)
+
+
+# AST 白名单允许的节点类型。
+_AST_FORBIDDEN_NODES: tuple[type, ...] = (
+    ast.Attribute,
+    ast.Subscript,
+    ast.Import,
+    ast.ImportFrom,
+    ast.Lambda,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+    ast.Starred,
+    ast.NamedExpr,
+)
+
+
+def _validate_ast(node: ast.AST) -> None:
+    """递归校验 AST 节点只包含白名单允许的类型和已注册函数调用。"""
+    for child in ast.walk(node):
+        if isinstance(child, _AST_FORBIDDEN_NODES):
+            raise ValueError(
+                f"表达式包含不允许的语法结构：{type(child).__name__}。"
+            )
+        if isinstance(child, ast.Call):
+            func = child.func
+            if not isinstance(func, ast.Name):
+                raise ValueError("表达式中的函数调用必须使用已注册的函数名。")
+            if func.id not in _ALLOWED_FUNCTIONS:
+                raise ValueError(
+                    f"表达式引用了未注册的函数：{func.id}。"
+                )
 
 
 # ---------------------------------------------------------------------------

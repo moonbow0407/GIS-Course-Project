@@ -93,6 +93,10 @@ class LayerReprojectionFailed(ApplicationError):
     """表示图层无法根据原始数据源转换到目标坐标系。"""
 
 
+class WorkspaceOperationCancelled(ApplicationError):
+    """表示用户取消了仍未提交的工作区耗时操作。"""
+
+
 class ProjectReadFailed(ApplicationError):
     """表示工程文件无法读取或格式校验失败。"""
 
@@ -155,3 +159,35 @@ class RasterCalculatorFailed(ApplicationError):
 
 class RasterBandAlignmentError(ApplicationError):
     """表示输入栅格波段空间对齐不一致（CRS/分辨率/范围）。"""
+
+
+class InvalidRasterAnalysisParameters(ApplicationError):
+    """表示栅格分析参数不满足业务约束。"""
+
+
+class UnsupportedRasterAnalysisInput(ApplicationError):
+    """表示栅格分析输入图层类型或状态不满足要求。"""
+
+
+class RasterAnalysisFailed(ApplicationError):
+    """表示栅格分析算法内核执行失败。"""
+
+
+class EmptyRasterResult(ApplicationError):
+    """表示栅格分析计算后没有产生任何有效像元。"""
+
+
+class RasterWindowReadFailed(ApplicationError):
+    """表示按窗口读取栅格分析数据失败。"""
+
+
+class RasterReclassFailed(ApplicationError):
+    """表示栅格重分类规则应用失败。"""
+
+
+class DemAnalysisFailed(ApplicationError):
+    """表示 DEM 地形分析计算失败。"""
+
+
+class RasterClipFailed(ApplicationError):
+    """表示矢量掩膜裁剪栅格失败。"""

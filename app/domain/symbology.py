@@ -22,6 +22,7 @@ class RasterRendererType(str, Enum):
 
     RGB = "rgb"
     STRETCH = "stretch"
+    CLASSIFIED = "classified"
 
 
 class StretchType(str, Enum):
@@ -92,7 +93,7 @@ class VectorSymbology:
 
 @dataclass(frozen=True, slots=True)
 class RasterSymbology:
-    """保存 RGB 合成或单波段拉伸配置。"""
+    """保存 RGB、单波段拉伸或离散分类配置。"""
 
     renderer_type: RasterRendererType
     rgb_bands: tuple[int, int, int] = (0, 1, 2)
@@ -102,6 +103,19 @@ class RasterSymbology:
     upper_percent: float = 98.0
     color_scheme: str = "gray"
     inverted: bool = False
+    classes: tuple["RasterClass", ...] = ()
+    other_color: str = "#BDBDBD"
+    other_visible: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class RasterClass:
+    """描述一个栅格分类值及其显示颜色。"""
+
+    value: float
+    label: str
+    color: str
+    visible: bool = True
 
 
 CATEGORICAL_SCHEMES: dict[str, tuple[str, ...]] = {
@@ -222,6 +236,15 @@ def raster_symbology_from_dict(payload: dict[str, object]) -> RasterSymbology:
     bands = tuple(int(cast(str | int | float, value)) for value in cast(list[object], raw_bands))
     if len(bands) != 3:
         bands = (0, 1, 2)
+    classes = tuple(
+        RasterClass(
+            value=float(cast(str | int | float, item["value"])),
+            label=str(item["label"]),
+            color=str(item["color"]),
+            visible=bool(item.get("visible", True)),
+        )
+        for item in _dict_items(payload.get("classes", []))
+    )
     return RasterSymbology(
         renderer_type=RasterRendererType(str(payload["renderer_type"])),
         rgb_bands=bands,
@@ -231,6 +254,9 @@ def raster_symbology_from_dict(payload: dict[str, object]) -> RasterSymbology:
         upper_percent=float(cast(str | int | float, payload.get("upper_percent", 98.0))),
         color_scheme=str(payload.get("color_scheme", "gray")),
         inverted=bool(payload.get("inverted", False)),
+        classes=classes,
+        other_color=str(payload.get("other_color", "#BDBDBD")),
+        other_visible=bool(payload.get("other_visible", True)),
     )
 
 
@@ -249,6 +275,6 @@ def _style_from_object(value: object) -> LayerStyle:
 
 def _dict_items(value: object) -> tuple[dict[str, object], ...]:
     """把工程数组校验为字典元组。"""
-    if not isinstance(value, list):
+    if not isinstance(value, (list, tuple)):
         return ()
     return tuple(item for item in value if isinstance(item, dict))

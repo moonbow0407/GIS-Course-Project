@@ -1,7 +1,7 @@
 """真实地图文档对应的图层管理控件。"""
 
 from PySide6.QtCore import QModelIndex, QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QDropEvent, QMouseEvent
+from PySide6.QtGui import QAction, QColor, QDropEvent, QIcon, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -16,9 +16,16 @@ from PySide6.QtWidgets import (
 )
 
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
-from app.domain.layer_style import LayerStyle
+from app.domain.layer_style import GeometryFamily, LayerStyle
 from app.domain.raster_layer import RasterLayer
-from app.domain.symbology import GraduatedClass, UniqueValueClass, VectorRendererType
+from app.domain.symbology import (
+    COLOR_RAMPS,
+    GraduatedClass,
+    RasterClass,
+    RasterRendererType,
+    UniqueValueClass,
+    VectorRendererType,
+)
 from app.domain.vector_layer import VectorLayer
 
 
@@ -106,6 +113,9 @@ class LayerPanel(QWidget):
     layer_labeling_changed = Signal(str, bool)
     # 标注分类信号：请求打开指定图层的标注分类配置对话框。
     layer_labeling_requested = Signal(str)
+
+    # 栅格分析快捷信号：携带图层编号和分析入口标识（与 Ribbon 动作一致）。
+    layer_raster_analysis_requested = Signal(str, str)
     # 类别显隐信号：携带图层编号、类别索引和目标状态。
     category_visibility_changed = Signal(str, int, bool)
     # 选择清除信号：点击图层树空白区域时发出，请求取消活动图层。
@@ -299,6 +309,26 @@ class LayerPanel(QWidget):
         attribute_action = menu.addAction("打开属性表")
         open_folder_action = menu.addAction("打开文件夹")
         remove_action = menu.addAction("删除图层")
+        # 按数据类型提供栅格分析快捷入口，最终仍打开与 Ribbon 相同的对话框。
+        raster_analysis_actions: dict[QAction, str] = {}
+        if layer_snapshot is not None and isinstance(layer_snapshot.layer, RasterLayer):
+            menu.addSeparator()
+            for action_key, action_label in (
+                ("raster_calculator", "栅格计算器"),
+                ("raster_reclassify", "重分类"),
+                ("dem_analysis", "DEM 地形分析"),
+                ("raster_clip", "掩膜裁剪"),
+            ):
+                raster_analysis_actions[menu.addAction(action_label)] = action_key
+        elif (
+            layer_snapshot is not None
+            and isinstance(layer_snapshot.layer, VectorLayer)
+            and layer_snapshot.layer.geometry_family == GeometryFamily.POLYGON
+        ):
+            menu.addSeparator()
+            raster_analysis_actions[
+                menu.addAction("作为掩膜裁剪栅格")
+            ] = "raster_clip"
         selected_action: object | None = self._execute_context_menu(menu, position)
         layer_id: str = str(item.data(0, Qt.ItemDataRole.UserRole))
         if selected_action is zoom_action:
@@ -315,6 +345,12 @@ class LayerPanel(QWidget):
             self.layer_folder_requested.emit(layer_id)
         elif selected_action is remove_action:
             self.layer_removed.emit(layer_id)
+        elif isinstance(selected_action, QAction) and (
+            selected_action in raster_analysis_actions
+        ):
+            self.layer_raster_analysis_requested.emit(
+                layer_id, raster_analysis_actions[selected_action]
+            )
 
     def _layer_snapshot(self, layer_id: object) -> LayerSnapshot | None:
         """按图层编号返回当前快照中的图层状态。"""
@@ -413,17 +449,34 @@ class LayerPanel(QWidget):
             raster_symbology = layer.symbology
             if raster_symbology is None:
                 return
-            label = (
-                "RGB 合成"
-                if raster_symbology.renderer_type.value == "rgb"
-                else (
+            if raster_symbology.renderer_type is RasterRendererType.RGB:
+                label = "RGB 合成"
+                self._add_raster_legend_item(parent, label, ("#EF4444", "#22C55E", "#3B82F6"))
+            elif raster_symbology.renderer_type is RasterRendererType.CLASSIFIED:
+                label = f"分类值 · {len(raster_symbology.classes)} 类"
+                self._add_raster_legend_item(
+                    parent,
+                    label,
+                    tuple(raster_category.color for raster_category in raster_symbology.classes),
+                )
+                for raster_category in raster_symbology.classes:
+                    self._add_raster_class_child(parent, raster_category)
+                if raster_symbology.other_visible:
+                    self._add_raster_legend_item(
+                        parent,
+                        "其他值",
+                        (raster_symbology.other_color,),
+                    )
+                return
+            else:
+                label = (
                     f"{raster_symbology.color_scheme} · "
                     f"波段 {raster_symbology.stretch_band + 1}"
                 )
-            )
-            child = QTreeWidgetItem([f"▰  {label}"])
-            child.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            parent.addChild(child)
+                ramp_colors = COLOR_RAMPS.get(raster_symbology.color_scheme, ("#000000", "#FFFFFF"))
+                if raster_symbology.inverted:
+                    ramp_colors = tuple(reversed(ramp_colors))
+                self._add_raster_legend_item(parent, f"拉伸 · {label}", ramp_colors)
             return
         vector_symbology = layer.symbology
         if vector_symbology is None:
@@ -476,8 +529,8 @@ class LayerPanel(QWidget):
     ) -> None:
         """添加带颜色预览的单个图例子项。"""
         color = symbol.stroke_color if symbol.fill_color == "transparent" else symbol.fill_color
-        child = QTreeWidgetItem([f"■  {label}"])
-        child.setForeground(0, QColor(color))
+        child = QTreeWidgetItem([label])
+        child.setIcon(0, LayerPanel._color_icon((color,)))
         child.setData(0, _CATEGORY_ROLE, index)
         flags = Qt.ItemFlag.ItemIsEnabled
         if checkable:
@@ -488,3 +541,53 @@ class LayerPanel(QWidget):
             )
         child.setFlags(flags)
         parent.addChild(child)
+
+    @classmethod
+    def _add_raster_legend_item(
+        cls,
+        parent: QTreeWidgetItem,
+        label: str,
+        colors: tuple[str, ...],
+    ) -> None:
+        """添加带色带或色块图标的栅格图例项。"""
+        child = QTreeWidgetItem([label])
+        child.setIcon(0, cls._color_icon(colors))
+        child.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        parent.addChild(child)
+
+    @classmethod
+    def _add_raster_class_child(
+        cls,
+        parent: QTreeWidgetItem,
+        category: RasterClass,
+    ) -> None:
+        """添加单个栅格分类值及其对应颜色。"""
+        value_text: str = f"{category.value:.6g}"
+        label: str = category.label.strip()
+        display_label: str = (
+            value_text if not label or label == value_text else f"{value_text} · {label}"
+        )
+        child = QTreeWidgetItem([display_label])
+        child.setIcon(0, cls._color_icon((category.color,)))
+        child.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        parent.addChild(child)
+
+    @staticmethod
+    def _color_icon(colors: tuple[str, ...]) -> QIcon:
+        """生成图层树使用的离散色块或连续色带图标。"""
+        resolved: tuple[str, ...] = colors or ("#BDBDBD",)
+        width: int = max(18, min(72, len(resolved) * 14))
+        pixmap = QPixmap(width, 12)
+        pixmap.fill(QColor("#FFFFFF"))
+        painter = QPainter(pixmap)
+        segment_width: float = width / len(resolved)
+        for index, color in enumerate(resolved):
+            painter.fillRect(
+                int(index * segment_width),
+                0,
+                max(int(segment_width + 0.5), 1),
+                12,
+                QColor(color),
+            )
+        painter.end()
+        return QIcon(pixmap)

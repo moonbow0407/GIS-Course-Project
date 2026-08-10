@@ -1,9 +1,10 @@
 """GIS 桌面通用平台主窗口。"""
 
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
+from time import monotonic
 
 from pyproj import CRS
 from pyproj.exceptions import CRSError
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -47,7 +49,17 @@ from app.application.database_service import DatabaseService
 from app.application.errors import ApplicationError
 from app.application.gis_application import GisApplication, _chaikin_smooth
 from app.application.project_models import MapViewState
+from app.application.raster_analysis import (
+    DemAnalysisRequest,
+    RasterClipRequest,
+    RasterReclassifyRequest,
+    clip_history_parameters,
+    dem_history_parameters,
+    reclassify_history_parameters,
+)
+from app.application.raster_calculator import RasterCalculatorRequest
 from app.application.results import (
+    DisplayCrsPreparation,
     LayerSnapshot,
     OpenDataResult,
     SelectedFeature,
@@ -57,6 +69,8 @@ from app.domain.feature import AttributeValue, Feature, FeatureId
 from app.domain.labeling import LabelingConfig, default_labeling_for_features
 from app.domain.layer_style import GeometryFamily
 from app.domain.layout import LayoutDocument, layout_from_dict
+from app.domain.raster_layer import RasterLayer
+from app.domain.spatial_layer import SpatialLayer
 from app.domain.symbology import RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.database.postgis_database_gateway import PostgisDatabaseGateway
@@ -70,11 +84,13 @@ from app.presentation.widgets.attribute_query_dialog import (
 )
 from app.presentation.widgets.attribute_table import AttributeTablePanel
 from app.presentation.widgets.buffer_analysis_dialog import BufferAnalysisDialog
+from app.presentation.widgets.crs_reprojection_worker import CrsReprojectionWorker
 from app.presentation.widgets.crs_select_widget import CrsSelectWidget
 from app.presentation.widgets.database_dialogs import (
     DatabaseConnectionDialog,
     DatabaseLayerDialog,
 )
+from app.presentation.widgets.dem_analysis_dialog import DemAnalysisDialog
 from app.presentation.widgets.display_settings_dialog import DisplaySettingsDialog
 from app.presentation.widgets.edit_feature_dialog import EditFeatureDialog
 from app.presentation.widgets.geometry_edit_toolbar import GeometryEditToolbar
@@ -85,7 +101,13 @@ from app.presentation.widgets.layout_view import LayoutView
 from app.presentation.widgets.map_canvas import MapCanvas
 from app.presentation.widgets.new_layer_dialog import NewLayerDialog
 from app.presentation.widgets.overlay_analysis_dialog import OverlayAnalysisDialog
+from app.presentation.widgets.raster_analysis_worker import (
+    RasterAnalysisTask,
+    RasterAnalysisWorker,
+)
 from app.presentation.widgets.raster_calculator_dialog import RasterCalculatorDialog
+from app.presentation.widgets.raster_clip_dialog import RasterClipDialog
+from app.presentation.widgets.raster_reclassify_dialog import RasterReclassifyDialog
 from app.presentation.widgets.ribbon_bar import RibbonBar
 from app.presentation.widgets.startup_dialog import (
     save_recent_project,
@@ -94,6 +116,19 @@ from app.presentation.widgets.target_layer_dialog import (
     TargetLayerDialog,
     TargetLayerOption,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _RasterAnalysisContext:
+    """记录后台栅格分析完成后需要在主线程提交的上下文。"""
+
+    title: str
+    algorithm_id: str
+    input_layer_ids: tuple[str, ...]
+    parameters: Mapping[str, object]
+    output_layer_name: str
+    started_monotonic: float
+    success_message: Callable[[RasterLayer], str]
 
 
 class MainWindow(QMainWindow):
@@ -175,6 +210,14 @@ class MainWindow(QMainWindow):
         self._crs_label: QLabel = QLabel("坐标系  未设置")
         # 延迟刷新标记：避免在图层树信号回调中删除仍在处理事件的 Qt 节点。
         self._workspace_refresh_scheduled: bool = False
+        # 后台栅格分析状态：计算和文件 I/O 在 worker 中执行，结果只在主线程注册。
+        self._raster_worker: RasterAnalysisWorker | None = None
+        self._raster_progress_dialog: QProgressDialog | None = None
+        self._raster_analysis_context: _RasterAnalysisContext | None = None
+        # 后台坐标系转换状态：准备完成后才在主线程原子替换地图文档。
+        self._crs_worker: CrsReprojectionWorker | None = None
+        self._crs_progress_dialog: QProgressDialog | None = None
+        self._crs_target_crs: CRS | None = None
         # 撤销栈：每项为 (操作描述, 逆向操作, 重做操作)，最多保留 50 步。
         self._undo_stack: list[tuple[str, Callable[[], object], Callable[[], object]]] = []
         # 重做栈：撤销后暂存被撤销的操作，新操作执行时清空。
@@ -320,6 +363,9 @@ class MainWindow(QMainWindow):
         self._layer_panel.layer_symbology_requested.connect(self._show_symbology)
         self._layer_panel.layer_labeling_changed.connect(self._change_labeling_visibility)
         self._layer_panel.layer_labeling_requested.connect(self._show_labeling)
+        self._layer_panel.layer_raster_analysis_requested.connect(
+            self._handle_layer_raster_analysis
+        )
         self._layer_panel.category_visibility_changed.connect(
             self._change_category_visibility
         )
@@ -507,6 +553,9 @@ class MainWindow(QMainWindow):
             "buffer_analysis": self._buffer_analysis,
             "overlay_analysis": self._overlay_analysis,
             "raster_calculator": self._raster_calculator,
+            "raster_reclassify": self._raster_reclassify,
+            "dem_analysis": self._dem_analysis,
+            "raster_clip": self._raster_clip,
             "analysis_history": self._toggle_analysis_history,
             "toggle_layers": self._toggle_layer_panel,
             "toggle_layout_view": self._toggle_layout_view,
@@ -3053,7 +3102,7 @@ class MainWindow(QMainWindow):
         self._refresh_workspace()
 
     def _set_display_crs(self) -> None:
-        """弹出坐标系选择对话框，设置地图显示坐标系并重建已有图层。"""
+        """弹出坐标系选择对话框，并后台重建已有图层的显示坐标系。"""
         snapshot: WorkspaceSnapshot = self._application.snapshot()
 
         dialog: QDialog = QDialog(self)
@@ -3084,13 +3133,127 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "坐标系设置失败", "请输入有效的坐标系标识。")
             return
 
-        try:
+        if snapshot.display_crs == target_crs:
             self._application.set_display_crs(target_crs)
+            self._ready_label.setText(f"地图 CRS 已设置为 {self._format_crs(target_crs)}")
+            return
+        if not snapshot.layers:
+            try:
+                self._application.set_display_crs(target_crs)
+            except (ApplicationError, ValueError) as error:
+                QMessageBox.warning(self, "坐标系设置失败", str(error))
+                return
+            self._refresh_workspace(preserve_view=False)
+            self._ready_label.setText(f"地图 CRS 已设置为 {self._format_crs(target_crs)}")
+            return
+        self._start_crs_reprojection(target_crs)
+
+    def _start_crs_reprojection(self, target_crs: CRS) -> bool:
+        """在线程中准备图层转换，并显示可取消的进度框。"""
+        if self._crs_worker is not None and self._crs_worker.isRunning():
+            self.statusBar().showMessage("已有坐标系转换正在运行，请等待当前任务完成。", 4000)
+            return False
+        if self._raster_worker is not None and self._raster_worker.isRunning():
+            self.statusBar().showMessage("已有栅格分析正在运行，请等待当前任务完成。", 4000)
+            return False
+
+        worker = CrsReprojectionWorker(
+            lambda progress: self._application.prepare_display_crs(target_crs, progress),
+            parent=self,
+        )
+        progress = QProgressDialog("正在准备坐标系转换…", "取消", 0, 0, self)
+        progress.setWindowTitle("设置地图坐标系")
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+
+        self._crs_worker = worker
+        self._crs_progress_dialog = progress
+        self._crs_target_crs = target_crs
+
+        progress.canceled.connect(lambda: self._cancel_crs_reprojection(worker))
+        worker.progress_changed.connect(self._on_crs_reprojection_progress)
+        worker.completed.connect(self._on_crs_reprojection_completed)
+        worker.failed.connect(self._on_crs_reprojection_failed)
+        worker.finished.connect(lambda: self._on_crs_worker_finished(worker))
+
+        self._ready_label.setText("坐标系转换进行中…")
+        progress.show()
+        worker.start()
+        return True
+
+    def _cancel_crs_reprojection(self, worker: CrsReprojectionWorker) -> None:
+        """响应坐标系转换进度框的取消请求。"""
+        if worker is not self._crs_worker or not worker.isRunning():
+            return
+        worker.request_cancel()
+        progress = self._crs_progress_dialog
+        if progress is not None:
+            progress.setCancelButton(None)
+            progress.setLabelText("正在取消坐标系转换，请稍候…")
+
+    def _on_crs_reprojection_progress(self, done: int, total: int) -> None:
+        """把逐图层转换进度更新到主线程进度框。"""
+        progress = self._crs_progress_dialog
+        if progress is None:
+            return
+        if total > 0:
+            progress.setRange(0, total)
+            progress.setValue(min(done, total))
+            progress.setLabelText(f"正在转换图层：已完成 {min(done, total)} / {total}")
+        else:
+            progress.setRange(0, 0)
+            progress.setLabelText("正在设置地图坐标系…")
+
+    def _close_crs_progress(self) -> None:
+        """关闭坐标系转换进度框，但保留 worker 到 finished 信号。"""
+        progress = self._crs_progress_dialog
+        if progress is not None:
+            progress.close()
+
+    def _on_crs_reprojection_completed(self, result: object) -> None:
+        """在主线程提交后台转换结果并刷新地图。"""
+        target_crs = self._crs_target_crs
+        if not isinstance(result, DisplayCrsPreparation) or target_crs is None:
+            self._close_crs_progress()
+            return
+        try:
+            self._application.commit_display_crs(result)
         except (ApplicationError, ValueError) as error:
+            self._close_crs_progress()
             QMessageBox.warning(self, "坐标系设置失败", str(error))
             return
+        self._close_crs_progress()
         self._refresh_workspace(preserve_view=False)
         self._ready_label.setText(f"地图 CRS 已设置为 {self._format_crs(target_crs)}")
+
+    def _on_crs_reprojection_failed(self, message: str) -> None:
+        """处理坐标系转换失败或取消。"""
+        worker = self._crs_worker
+        cancelled = message.startswith("已取消") or (
+            worker is not None and worker.cancel_requested
+        )
+        self._close_crs_progress()
+        if cancelled:
+            self._ready_label.setText("坐标系转换已取消")
+            self.statusBar().showMessage("坐标系转换已取消。", 4000)
+        else:
+            self._ready_label.setText("坐标系转换失败")
+            QMessageBox.warning(self, "坐标系设置失败", message)
+
+    def _on_crs_worker_finished(self, worker: CrsReprojectionWorker) -> None:
+        """释放已完成的坐标系转换 worker 和进度框。"""
+        if worker is not self._crs_worker:
+            worker.deleteLater()
+            return
+        progress = self._crs_progress_dialog
+        worker.deleteLater()
+        if progress is not None:
+            progress.deleteLater()
+        self._crs_worker = None
+        self._crs_progress_dialog = None
+        self._crs_target_crs = None
 
     def _buffer_analysis(self) -> None:
         """打开缓冲区参数窗口并执行真实分析结果写出。"""
@@ -3158,12 +3321,167 @@ class MainWindow(QMainWindow):
             f"输出位置：\n{result.output_path}",
         )
 
-    def _raster_calculator(self) -> None:
-        """打开栅格计算器对话框并执行逐像素表达式求值。
+    def _start_raster_analysis(
+        self,
+        *,
+        title: str,
+        task: RasterAnalysisTask,
+        algorithm_id: str,
+        input_layer_ids: tuple[str, ...],
+        parameters: Mapping[str, object],
+        output_layer_name: str,
+        success_message: Callable[[RasterLayer], str],
+    ) -> bool:
+        """在后台启动一次栅格分析，并显示可取消的窗口进度。"""
+        if self._raster_worker is not None and self._raster_worker.isRunning():
+            self.statusBar().showMessage("已有栅格分析正在运行，请等待当前任务完成。", 4000)
+            return False
+        if self._crs_worker is not None and self._crs_worker.isRunning():
+            self.statusBar().showMessage("已有坐标系转换正在运行，请等待当前任务完成。", 4000)
+            return False
 
-        计算失败时对话框保留所有已填内容，用户可直接修改后重试，
-        无需重新打开对话框和重新设置变量映射。
-        """
+        context = _RasterAnalysisContext(
+            title=title,
+            algorithm_id=algorithm_id,
+            input_layer_ids=input_layer_ids,
+            parameters=dict(parameters),
+            output_layer_name=output_layer_name,
+            started_monotonic=monotonic(),
+            success_message=success_message,
+        )
+        worker = RasterAnalysisWorker(task, parent=self)
+        progress = QProgressDialog("正在准备栅格分析…", "取消", 0, 0, self)
+        progress.setWindowTitle(title)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+
+        self._raster_analysis_context = context
+        self._raster_worker = worker
+        self._raster_progress_dialog = progress
+
+        progress.canceled.connect(lambda: self._cancel_raster_analysis(worker))
+        worker.progress_changed.connect(self._on_raster_analysis_progress)
+        worker.completed.connect(self._on_raster_analysis_completed)
+        worker.failed.connect(self._on_raster_analysis_failed)
+        worker.finished.connect(lambda: self._on_raster_worker_finished(worker))
+
+        self._ready_label.setText(f"{title}进行中…")
+        progress.show()
+        worker.start()
+        return True
+
+    def _cancel_raster_analysis(self, worker: RasterAnalysisWorker) -> None:
+        """响应进度框的取消请求；让当前窗口处理完成后安全退出。"""
+        if worker is not self._raster_worker or not worker.isRunning():
+            return
+        worker.request_cancel()
+        progress = self._raster_progress_dialog
+        if progress is not None:
+            cancel_button = progress.cancelButton()
+            if cancel_button is not None:
+                cancel_button.setEnabled(False)
+            progress.setLabelText("正在取消栅格分析，请稍候…")
+
+    def _on_raster_analysis_progress(self, done: int, total: int) -> None:
+        """把分析服务的窗口进度更新到主线程进度框。"""
+        progress = self._raster_progress_dialog
+        context = self._raster_analysis_context
+        if progress is None or context is None:
+            return
+        if total > 0:
+            progress.setRange(0, total)
+            progress.setValue(min(done, total))
+            progress.setLabelText(
+                f"{context.title}：已处理 {min(done, total)} / {total} 个窗口"
+            )
+        else:
+            progress.setRange(0, 0)
+            progress.setLabelText(f"{context.title}：正在处理…")
+
+    def _close_raster_progress(self) -> None:
+        """关闭当前进度框，但保留 worker 引用直到 finished 信号到达。"""
+        progress = self._raster_progress_dialog
+        if progress is not None:
+            progress.close()
+
+    def _on_raster_analysis_completed(self, result_layer: object) -> None:
+        """在主线程注册后台生成的结果图层并刷新地图。"""
+        context = self._raster_analysis_context
+        if context is None or not isinstance(result_layer, RasterLayer):
+            self._close_raster_progress()
+            return
+        try:
+            self._application.register_raster_analysis_layer(
+                result_layer=result_layer,
+                algorithm_id=context.algorithm_id,
+                input_layer_ids=context.input_layer_ids,
+                parameters=context.parameters,
+                output_layer_name=context.output_layer_name,
+                started_monotonic=context.started_monotonic,
+            )
+        except Exception as error:  # noqa: BLE001  主线程需给出可理解提示。
+            self._application.record_failed_raster_analysis(
+                context.algorithm_id,
+                context.input_layer_ids,
+                context.parameters,
+                str(error),
+            )
+            self._close_raster_progress()
+            self._refresh_analysis_history()
+            QMessageBox.warning(self, f"{context.title}失败", str(error))
+            return
+
+        self._close_raster_progress()
+        self._refresh_workspace()
+        self._ready_label.setText(f"{context.title}完成  {result_layer.name}")
+        QMessageBox.information(
+            self,
+            f"{context.title}完成",
+            context.success_message(result_layer),
+        )
+
+    def _on_raster_analysis_failed(self, message: str) -> None:
+        """处理后台异常或取消，并将失败状态写入分析历史。"""
+        context = self._raster_analysis_context
+        if context is None:
+            self._close_raster_progress()
+            return
+        worker = self._raster_worker
+        cancelled = message.startswith("已取消") or (
+            worker is not None and worker.cancel_requested
+        )
+        self._application.record_failed_raster_analysis(
+            context.algorithm_id,
+            context.input_layer_ids,
+            context.parameters,
+            message,
+        )
+        self._close_raster_progress()
+        self._refresh_analysis_history()
+        if cancelled:
+            self._ready_label.setText(f"{context.title}已取消")
+            self.statusBar().showMessage(f"{context.title}已取消。", 4000)
+        else:
+            self._ready_label.setText(f"{context.title}失败")
+            QMessageBox.warning(self, f"{context.title}失败", message)
+
+    def _on_raster_worker_finished(self, worker: RasterAnalysisWorker) -> None:
+        """释放已完成的 worker 和进度框。"""
+        if worker is not self._raster_worker:
+            worker.deleteLater()
+            return
+        progress = self._raster_progress_dialog
+        worker.deleteLater()
+        if progress is not None:
+            progress.deleteLater()
+        self._raster_worker = None
+        self._raster_progress_dialog = None
+        self._raster_analysis_context = None
+
+    def _raster_calculator(self) -> None:
+        """打开栅格计算器对话框，并在后台执行逐像素表达式求值。"""
         snapshot: WorkspaceSnapshot = self._application.snapshot()
         raster_layers: tuple[LayerSnapshot, ...] = tuple(
             layer for layer in snapshot.layers if layer.is_raster
@@ -3182,32 +3500,152 @@ class MainWindow(QMainWindow):
                 "当前工作区没有可用于栅格计算的栅格图层。", 4000
             )
             return
-        # 计算失败时循环回到对话框，保留已填内容供用户修改。
-        while True:
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-            try:
-                result = self._application.raster_calculation(dialog.request())
-            except (ApplicationError, ValueError) as error:
-                self._refresh_analysis_history()
-                QMessageBox.warning(
-                    self,
-                    "栅格计算失败",
-                    f"{error}\n\n请修改参数后重试。",
-                )
-                # 对话框保留打开状态，进入下一次循环让用户修改。
-                continue
-            break
-        self._refresh_workspace()
-        self._ready_label.setText(
-            f"栅格计算完成  {result.output_layer_name}"
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            request: RasterCalculatorRequest = dialog.request()
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "栅格计算参数无效", str(error))
+            return
+        layers: dict[str, SpatialLayer] = {
+            layer.layer_id: layer.layer for layer in snapshot.layers
+        }
+        input_layer_ids = tuple(dict.fromkeys(
+            mapping.layer_id for mapping in request.band_mappings
+        ))
+        parameters: dict[str, object] = {
+            "expression": request.expression,
+            "variable_count": len(request.band_mappings),
+            "aliases": {
+                mapping.alias: mapping.band_index
+                for mapping in request.band_mappings
+            },
+            "output_path": str(request.output_path.expanduser().resolve()),
+            "nodata": request.nodata,
+        }
+        self._start_raster_analysis(
+            title="栅格计算",
+            task=lambda service: service.execute_calculator(request, layers),
+            algorithm_id="raster_calculator",
+            input_layer_ids=input_layer_ids,
+            parameters=parameters,
+            output_layer_name=request.output_layer_name,
+            success_message=lambda _result: (
+                f"结果图层：{request.output_layer_name}\n"
+                f"表达式：{request.expression}\n"
+                f"输出位置：\n{request.output_path}"
+            ),
         )
-        QMessageBox.information(
-            self,
-            "栅格计算完成",
-            f"结果图层：{result.output_layer_name}\n"
-            f"表达式：{result.expression}\n"
-            f"输出位置：\n{result.output_path}",
+
+    def _handle_layer_raster_analysis(self, layer_id: str, action_id: str) -> None:
+        """处理图层右键菜单发出的栅格分析快捷入口。"""
+        try:
+            self._activate_layer(layer_id)
+        except ApplicationError:
+            return
+        handlers: dict[str, Callable[[], None]] = {
+            "raster_calculator": self._raster_calculator,
+            "raster_reclassify": self._raster_reclassify,
+            "dem_analysis": self._dem_analysis,
+            "raster_clip": self._raster_clip,
+        }
+        handler = handlers.get(action_id)
+        if handler is not None:
+            handler()
+
+    def _raster_reclassify(self) -> None:
+        """打开重分类参数对话框并执行栅格重分类。"""
+        snapshot = self._application.snapshot()
+        try:
+            dialog = RasterReclassifyDialog(snapshot.layers, parent=self)
+        except ValueError as error:
+            self.statusBar().showMessage(str(error), 4000)
+            return
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            request: RasterReclassifyRequest = dialog.request()
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "栅格重分类参数无效", str(error))
+            return
+        layers: dict[str, SpatialLayer] = {
+            layer.layer_id: layer.layer for layer in snapshot.layers
+        }
+        self._start_raster_analysis(
+            title="栅格重分类",
+            task=lambda service: service.execute_reclassify(request, layers),
+            algorithm_id="raster_reclassify",
+            input_layer_ids=(request.input_layer_id,),
+            parameters=reclassify_history_parameters(request),
+            output_layer_name=request.output_layer_name,
+            success_message=lambda _result: (
+                f"结果图层：{request.output_layer_name}\n"
+                f"规则数量：{len(request.rules)}\n"
+                f"输出位置：\n{request.output_path}"
+            ),
+        )
+
+    def _dem_analysis(self) -> None:
+        """打开 DEM 参数对话框并执行地形分析。"""
+        snapshot = self._application.snapshot()
+        try:
+            dialog = DemAnalysisDialog(snapshot.layers, parent=self)
+        except ValueError as error:
+            self.statusBar().showMessage(str(error), 4000)
+            return
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            request: DemAnalysisRequest = dialog.request()
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "DEM 分析参数无效", str(error))
+            return
+        layers: dict[str, SpatialLayer] = {
+            layer.layer_id: layer.layer for layer in snapshot.layers
+        }
+        self._start_raster_analysis(
+            title="DEM 地形分析",
+            task=lambda service: service.execute_dem_analysis(request, layers),
+            algorithm_id="dem_analysis",
+            input_layer_ids=(request.input_layer_id,),
+            parameters=dem_history_parameters(request),
+            output_layer_name=request.output_layer_name,
+            success_message=lambda _result: (
+                f"结果图层：{request.output_layer_name}\n"
+                f"分析类型：{request.mode}\n"
+                f"输出位置：\n{request.output_path}"
+            ),
+        )
+
+    def _raster_clip(self) -> None:
+        """打开掩膜裁剪参数对话框并执行栅格裁剪。"""
+        snapshot = self._application.snapshot()
+        try:
+            dialog = RasterClipDialog(snapshot.layers, parent=self)
+        except ValueError as error:
+            self.statusBar().showMessage(str(error), 4000)
+            return
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            request: RasterClipRequest = dialog.request()
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "掩膜裁剪参数无效", str(error))
+            return
+        layers: dict[str, SpatialLayer] = {
+            layer.layer_id: layer.layer for layer in snapshot.layers
+        }
+        self._start_raster_analysis(
+            title="掩膜裁剪",
+            task=lambda service: service.execute_clip(request, layers),
+            algorithm_id="raster_clip",
+            input_layer_ids=(request.raster_layer_id, request.mask_layer_id),
+            parameters=clip_history_parameters(request),
+            output_layer_name=request.output_layer_name,
+            success_message=lambda _result: (
+                f"结果图层：{request.output_layer_name}\n"
+                f"输出位置：\n{request.output_path}"
+            ),
         )
 
     def _toggle_analysis_history(self) -> None:
@@ -3799,6 +4237,30 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """关闭窗口前清空查询选择和要素选择，避免未保存修改被静默丢弃。"""
+        crs_worker = self._crs_worker
+        if crs_worker is not None and crs_worker.isRunning():
+            crs_worker.request_cancel()
+            if not crs_worker.wait(3000):
+                QMessageBox.warning(
+                    self,
+                    "坐标系转换仍在运行",
+                    "正在取消坐标系转换，请稍后再关闭窗口。",
+                )
+                event.ignore()
+                return
+            self._close_crs_progress()
+        worker = self._raster_worker
+        if worker is not None and worker.isRunning():
+            worker.request_cancel()
+            if not worker.wait(3000):
+                QMessageBox.warning(
+                    self,
+                    "栅格分析仍在运行",
+                    "正在取消栅格分析，请稍后再关闭窗口。",
+                )
+                event.ignore()
+                return
+            self._close_raster_progress()
         self._cleanup_query_and_selection()
         if self._confirm_project_switch():
             if self._application.database_is_connected:

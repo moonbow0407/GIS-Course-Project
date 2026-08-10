@@ -89,6 +89,15 @@ class WorkspaceSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class DisplayCrsPreparation:
+    """表示已完成读取但尚未提交到地图文档的坐标系转换结果。"""
+
+    target_crs: CRS
+    source_layer_ids: tuple[str, ...]
+    projected_layers: tuple[SpatialLayer, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class SelectedFeature:
     """表示带有所属图层信息的选择结果要素。"""
 
@@ -233,6 +242,42 @@ class RasterCalculatorResult:
     output_path: Path
     expression: str
     variable_count: int
+    snapshot: WorkspaceSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class RasterReclassifyResult:
+    """表示栅格重分类写出并加入工作区后的结构化结果。"""
+
+    input_layer_id: str
+    output_layer_id: str
+    output_layer_name: str
+    output_path: Path
+    rule_count: int
+    snapshot: WorkspaceSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class DemAnalysisResult:
+    """表示 DEM 地形分析写出并加入工作区后的结构化结果。"""
+
+    input_layer_id: str
+    output_layer_id: str
+    output_layer_name: str
+    output_path: Path
+    mode: str
+    snapshot: WorkspaceSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class RasterClipResult:
+    """表示矢量掩膜裁剪写出并加入工作区后的结构化结果。"""
+
+    raster_layer_id: str
+    mask_layer_id: str
+    output_layer_id: str
+    output_layer_name: str
+    output_path: Path
     snapshot: WorkspaceSnapshot
 
 

@@ -27,6 +27,7 @@ from app.application.raster_calculator import (
 )
 from app.application.results import LayerSnapshot
 from app.domain.raster_layer import RasterLayer
+from app.presentation.widgets.raster_output_fields import RasterOutputNameBinder
 
 
 class RasterCalculatorDialog(QDialog):
@@ -147,6 +148,11 @@ class RasterCalculatorDialog(QDialog):
         browse_btn.clicked.connect(self._browse_output_path)
         path_row.addWidget(browse_btn)
         out_form.addRow("输出路径:", path_row)
+        self._output_fields = RasterOutputNameBinder(
+            self._name_edit,
+            self._path_edit,
+            self._path_edit.text(),
+        )
 
         layout.addWidget(out_group)
 
@@ -262,7 +268,7 @@ class RasterCalculatorDialog(QDialog):
             "GeoTIFF (*.tif *.tiff)",
         )
         if path_str:
-            self._path_edit.setText(path_str)
+            self._output_fields.set_path(path_str)
 
     # ── 确认提交 ────────────────────────────────────────────
 
@@ -277,18 +283,18 @@ class RasterCalculatorDialog(QDialog):
             QMessageBox.warning(self, "缺少表达式", "请输入计算表达式。")
             return
 
-        output_name: str = self._name_edit.text().strip()
-        if not output_name:
-            QMessageBox.warning(self, "缺少名称", "请输入输出图层名称。")
+        if self._output_fields.validation_error() is not None:
+            QMessageBox.warning(
+                self,
+                "输出文件名无效",
+                self._output_fields.validation_error() or "请输入输出文件名。",
+            )
             return
 
-        output_path: Path = Path(self._path_edit.text().strip())
+        output_path: Path = self._output_fields.output_path
         if not str(output_path):
             QMessageBox.warning(self, "缺少路径", "请指定输出文件路径。")
             return
-
-        if output_path.suffix.lower() not in (".tif", ".tiff"):
-            output_path = output_path.with_suffix(".tif")
 
         # 确认数据存在（映射的图层仍在工作区中）
         valid_layer_ids: set[str] = {
@@ -311,10 +317,8 @@ class RasterCalculatorDialog(QDialog):
         仅在对话框以 Accepted 返回后调用。
         """
         expression: str = self._expr_edit.toPlainText().strip()
-        output_name: str = self._name_edit.text().strip()
-        output_path: Path = Path(self._path_edit.text().strip())
-        if output_path.suffix.lower() not in (".tif", ".tiff"):
-            output_path = output_path.with_suffix(".tif")
+        output_name: str = self._output_fields.output_name
+        output_path: Path = self._output_fields.output_path
 
         return RasterCalculatorRequest(
             expression=expression,

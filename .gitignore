@@ -58,3 +58,10 @@ verification_*.png
 
 # 本地测试数据
 /测试数据/
+
+# 本地工程、开发工具和未提交的实验材料
+*.gisproj
+.claude/
+.zcode/
+docs/
+tests/
