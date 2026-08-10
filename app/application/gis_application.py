@@ -11,6 +11,7 @@ from affine import Affine
 from pyproj import CRS
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
+from shapely.ops import split as split_geometry, unary_union
 
 from app.application.analysis_environment import AnalysisEnvironment
 from app.application.buffer_analysis import (
@@ -999,6 +1000,83 @@ class GisApplication:
             raise ApplicationError("未找到目标要素。")
         smoothed = _chaikin_smooth(target.geometry, iterations)
         return self.update_feature_geometry(layer_id, fid, smoothed)
+
+    def merge_features(
+        self, layer_id: str, fids: tuple[FeatureId, ...]
+    ) -> tuple[BaseGeometry, dict[str, AttributeValue]]:
+        """合并同一图层中的多个要素为一个。
+
+        参数:
+            layer_id: 图层编号。
+            fids: 待合并要素编号列表（至少 2 个）。
+
+        返回:
+            (merged_geometry, merged_attributes): 合并后的几何和属性。
+
+        异常:
+            ApplicationError: 图层不存在、非矢量图层或要素不足。
+        """
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ApplicationError("只能合并矢量图层中的要素。")
+        fid_set: set[FeatureId] = set(fids)
+        if len(fid_set) < 2:
+            raise ApplicationError("需要选择至少两个要素进行合并。")
+        geometries: list[BaseGeometry] = []
+        merged_attributes: dict[str, AttributeValue] = {}
+        for f in layer.features:
+            if f.fid in fid_set:
+                if not f.geometry.is_empty:
+                    geometries.append(f.geometry)
+                for k, v in f.attributes.items():
+                    if v is not None and k not in merged_attributes:
+                        merged_attributes[k] = v
+        if len(geometries) < 2:
+            raise ApplicationError("至少需要两个非空要素才能合并。")
+        merged: BaseGeometry = unary_union(geometries)
+        return merged, merged_attributes
+
+    def split_feature(
+        self, layer_id: str, fid: FeatureId, cutting_line: BaseGeometry,
+    ) -> list[BaseGeometry]:
+        """用切割线拆分一个面要素。
+
+        参数:
+            layer_id: 图层编号。
+            fid: 待拆分要素编号。
+            cutting_line: 用于切割的 LineString。
+
+        返回:
+            拆分后的几何列表，至少包含 2 个部分。
+
+        异常:
+            ApplicationError: 拆分失败或要素不是面类型。
+        """
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ApplicationError("只能拆分矢量图层中的要素。")
+        target: Feature | None = next(
+            (f for f in layer.features if f.fid == fid), None
+        )
+        if target is None:
+            raise ApplicationError("未找到目标要素。")
+        geom_type: str = target.geometry.geom_type
+        if geom_type not in ("Polygon", "MultiPolygon"):
+            raise ApplicationError(
+                f"只能拆分面要素，当前要素类型为 {geom_type}。"
+            )
+        result = split_geometry(target.geometry, cutting_line)
+        if result is None or len(result.geoms) < 2:
+            raise ApplicationError(
+                "切割线未将要素分割为多个部分，"
+                "请确保切割线完全穿过要素。"
+            )
+        pieces: list[BaseGeometry] = [
+            g for g in result.geoms if not g.is_empty
+        ]
+        if len(pieces) < 2:
+            raise ApplicationError("拆分结果不足以创建多个要素。")
+        return pieces
 
     def replace_layer_features(
         self, layer_id: str, features: tuple[Feature, ...]

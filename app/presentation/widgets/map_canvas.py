@@ -1,5 +1,7 @@
 """基于领域图层快照的地图画布。"""
 
+import math
+
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
     QRubberBand,
     QVBoxLayout,
 )
+from shapely import affinity
 from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
@@ -53,6 +56,10 @@ class MapCanvas(QGraphicsView):
     feature_digitized = Signal(BaseGeometry)
     # 顶点编辑提交信号：携带修改后的 Shapely 几何。
     geometry_edited = Signal(BaseGeometry)
+    # 拆分请求信号：携带用户绘制的切割线（LineString）。
+    feature_split_requested = Signal(BaseGeometry)
+    # 拓扑编辑提交信号：携带 {fid: new_geometry} 映射。
+    topology_edited = Signal(dict)
     # 地图工具切换信号：供主窗口同步功能区按钮的持续高亮状态。
     tool_changed = Signal(str)
 
@@ -123,6 +130,35 @@ class MapCanvas(QGraphicsView):
         self._vertex_items: list[QGraphicsItem] = []
         # 多选顶点：Ctrl+点击切换，Ctrl+A 全选，拖拽时全部一起移动。
         self._selected_vertex_indices: set[int] = set()
+        # 整要素移动状态。
+        self._move_active: bool = False
+        self._move_geometry: BaseGeometry | None = None
+        self._move_original_geometry: BaseGeometry | None = None
+        self._move_layer_id: str = ""
+        self._move_fid: object = None
+        self._move_start_map: Point | None = None
+        self._move_preview_item: QGraphicsPathItem | None = None
+        # 变换（旋转/缩放）状态。
+        self._transform_active: bool = False
+        self._transform_mode: str = "rotate"
+        self._transform_geometry: BaseGeometry | None = None
+        self._transform_original_geometry: BaseGeometry | None = None
+        self._transform_layer_id: str = ""
+        self._transform_fid: object = None
+        self._transform_centroid: tuple[float, float] = (0.0, 0.0)
+        self._transform_start_pos: QPoint | None = None
+        self._transform_preview_item: QGraphicsPathItem | None = None
+        self._transform_angle: float = 0.0  # 累积旋转角度（度）
+        self._transform_scale: float = 1.0  # 累积缩放比例
+        # 拆分要素状态。
+        self._split_active: bool = False
+        self._split_layer_id: str = ""
+        self._split_fid: object = None
+        self._split_target_geometry: BaseGeometry | None = None
+        # 共享边界拓扑。
+        self._shared_topology: dict[int, list[tuple[object, int]]] = {}
+        self._linked_features: dict[object, list[tuple[float, float]]] = {}
+        self._topology_layer_id: str = ""
         # 选中要素集合：{(layer_id, fid), ...}。
         self._selected_fids: set[tuple[str, object]] = set()
         self._scene.setSceneRect(0, 0, 1000, 700)
@@ -345,7 +381,9 @@ class MapCanvas(QGraphicsView):
         self.tool_changed.emit("digitize_polygon")
 
     def set_vertex_edit_tool(
-        self, geometry: BaseGeometry, layer_id: str = "", fid: object = None
+        self, geometry: BaseGeometry, layer_id: str = "", fid: object = None,
+        shared_topology: dict | None = None,
+        linked_features: dict | None = None,
     ) -> None:
         """进入顶点编辑模式，为指定几何显示可交互顶点标记。
 
@@ -353,12 +391,22 @@ class MapCanvas(QGraphicsView):
             geometry: 待编辑的 Shapely 几何对象。
             layer_id: 要素所属图层 ID（用于实时更新渲染图元）。
             fid: 要素编号。
+            shared_topology: 共享顶点映射 {idx: [(fid, other_idx), ...]}。
+            linked_features: 关联要素坐标快照 {fid: [(x,y), ...]}。
         """
         self._deactivate_all_tools()
         self._vertex_edit_active = True
         self._edit_geometry = geometry
         self._edit_layer_id: str = layer_id
         self._edit_fid: object = fid
+        if shared_topology is not None:
+            self._shared_topology = shared_topology
+            self._linked_features = linked_features or {}
+            self._topology_layer_id = layer_id
+        else:
+            self._shared_topology.clear()
+            self._linked_features.clear()
+            self._topology_layer_id = ""
         self._vertex_drag_idx = -1
         self._hovered_vertex = -1
         self._edit_mode = "drag_vertex"
@@ -384,6 +432,189 @@ class MapCanvas(QGraphicsView):
         self._rebuild_vertex_markers(geometry)
         self.tool_changed.emit("vertex_edit")
 
+    def set_move_feature_tool(
+        self, geometry: BaseGeometry, layer_id: str = "", fid: object = None
+    ) -> None:
+        """进入整要素移动模式。
+
+        参数:
+            geometry: 待移动的 Shapely 几何对象。
+            layer_id: 要素所属图层 ID。
+            fid: 要素编号。
+        """
+        self._deactivate_all_tools()
+        self._move_active = True
+        self._move_geometry = geometry
+        self._move_original_geometry = geometry
+        self._move_layer_id = layer_id
+        self._move_fid = fid
+        self._move_start_map = None
+        # 创建半透明预览图元。
+        path: QPainterPath = self._geometry_to_path(geometry)
+        self._move_preview_item = QGraphicsPathItem(path)
+        color: QColor = QColor("#d97706")
+        color.setAlpha(120)
+        self._move_preview_item.setPen(QPen(color, 0))
+        self._move_preview_item.setBrush(QBrush(color))
+        self._move_preview_item.setZValue(100)
+        self._scene.addItem(self._move_preview_item)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.tool_changed.emit("move_feature")
+
+    def _commit_move(self) -> None:
+        """提交整要素移动，发射平移后的几何。"""
+        if self._move_geometry is None:
+            return
+        # 检查拖拽距离是否足够。
+        if self._move_original_geometry is not None:
+            dx: float = 0.0
+            dy: float = 0.0
+            if self._move_start_map is not None:
+                # 比较原始几何质心与当前几何质心。
+                orig_centroid = self._move_original_geometry.centroid
+                curr_centroid = self._move_geometry.centroid
+                dx = curr_centroid.x - orig_centroid.x
+                dy = curr_centroid.y - orig_centroid.y
+            mupp: float = self._map_units_per_pixel
+            if abs(dx) < mupp * 2 and abs(dy) < mupp * 2:
+                # 拖拽距离不足 2 像素，视为误触，不提交。
+                self.set_pan_tool()
+                return
+        new_geom: BaseGeometry = self._move_geometry
+        self._move_active = False
+        if self._move_preview_item is not None:
+            self._scene.removeItem(self._move_preview_item)
+            self._move_preview_item = None
+        self.geometry_edited.emit(new_geom)
+        self.set_pan_tool()
+
+    def set_transform_tool(
+        self, geometry: BaseGeometry, mode: str,
+        layer_id: str = "", fid: object = None,
+    ) -> None:
+        """进入要素变换模式（旋转或缩放）。
+
+        参数:
+            geometry: 待变换的 Shapely 几何对象。
+            mode: "rotate" 或 "scale"。
+            layer_id: 要素所属图层 ID。
+            fid: 要素编号。
+        """
+        self._deactivate_all_tools()
+        self._transform_active = True
+        self._transform_mode = mode
+        self._transform_geometry = geometry
+        self._transform_original_geometry = geometry
+        self._transform_layer_id = layer_id
+        self._transform_fid = fid
+        self._transform_angle = 0.0
+        self._transform_scale = 1.0
+        centroid = geometry.centroid
+        self._transform_centroid = (centroid.x, centroid.y)
+        # 创建预览。
+        path: QPainterPath = self._geometry_to_path(geometry)
+        self._transform_preview_item = QGraphicsPathItem(path)
+        color: QColor = QColor("#7c3aed")
+        color.setAlpha(120)
+        self._transform_preview_item.setPen(QPen(color, 0))
+        self._transform_preview_item.setBrush(QBrush(color))
+        self._transform_preview_item.setZValue(100)
+        self._scene.addItem(self._transform_preview_item)
+        # 绘制质心十字标记。
+        cx, cy = self._transform_centroid
+        marker: QPainterPath = QPainterPath()
+        r: float = max(self._map_units_per_pixel * 6.0, 1e-6)
+        marker.moveTo(cx - r, -cy)
+        marker.lineTo(cx + r, -cy)
+        marker.moveTo(cx, -(cy - r))
+        marker.lineTo(cx, -(cy + r))
+        marker_item: QGraphicsPathItem = QGraphicsPathItem(marker)
+        marker_item.setPen(QPen(QColor("#7c3aed"), 0))
+        marker_item.setZValue(101)
+        marker_item.setData(0, "transform_marker")
+        self._scene.addItem(marker_item)
+        self._vertex_items.append(marker_item)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        tool_id: str = f"transform_{mode}"
+        self.tool_changed.emit(tool_id)
+
+    def set_split_tool(
+        self, layer_id: str, fid: object, geometry: BaseGeometry,
+    ) -> None:
+        """进入要素拆分模式——绘制切割线。
+
+        复用数字化线的 sketch 系统，以 _split_active 标志区分。
+        """
+        self._deactivate_all_tools()
+        self._split_active = True
+        self._split_layer_id = layer_id
+        self._split_fid = fid
+        self._split_target_geometry = geometry
+        self._digitize_mode = "line"
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.tool_changed.emit("split_feature")
+
+    def _commit_transform(self) -> None:
+        """提交变换，发射变换后的几何。"""
+        if self._transform_geometry is None:
+            return
+        new_geom: BaseGeometry = self._transform_geometry
+        self._transform_active = False
+        if self._transform_preview_item is not None:
+            self._scene.removeItem(self._transform_preview_item)
+            self._transform_preview_item = None
+        # 清理质心标记（已在 _vertex_items 中）。
+        for item in self._vertex_items:
+            if item.data(0) == "transform_marker":
+                self._scene.removeItem(item)
+        self._vertex_items = [
+            item for item in self._vertex_items
+            if item.data(0) != "transform_marker"
+        ]
+        self.geometry_edited.emit(new_geom)
+        self.set_pan_tool()
+
+    def _geometry_to_path(self, geometry: BaseGeometry) -> QPainterPath:
+        """将 Shapely 几何转换为场景坐标的 QPainterPath（Y 轴反转）。"""
+
+        def _append_coords(
+            path: QPainterPath, coords, close: bool = False
+        ) -> None:
+            if not coords:
+                return
+            it = iter(coords)
+            first = next(it)
+            path.moveTo(float(first[0]), -float(first[1]))
+            for c in it:
+                path.lineTo(float(c[0]), -float(c[1]))
+            if close:
+                path.closeSubpath()
+
+        path: QPainterPath = QPainterPath()
+        geom_type: str = geometry.geom_type
+
+        if geom_type == "Point":
+            path.addEllipse(
+                QPointF(geometry.x, -geometry.y), 4.0, 4.0
+            )
+        elif geom_type == "LineString":
+            _append_coords(path, list(geometry.coords))
+        elif geom_type == "Polygon":
+            path.setFillRule(Qt.FillRule.OddEvenFill)
+            _append_coords(path, list(geometry.exterior.coords), close=True)
+            for interior in geometry.interiors:
+                _append_coords(path, list(interior.coords), close=True)
+        elif geom_type in (
+            "MultiPoint", "MultiLineString", "MultiPolygon", "GeometryCollection",
+        ):
+            for member in geometry.geoms:
+                sub_path: QPainterPath = self._geometry_to_path(member)
+                path.addPath(sub_path)
+        return path
+
     def _rebuild_vertex_markers(self, geometry: BaseGeometry) -> None:
         """原地更新顶点标记位置，不删建以避免视觉闪烁。
 
@@ -405,10 +636,17 @@ class MapCanvas(QGraphicsView):
                 self._scene.removeItem(item)
         self._vertex_items.clear()
 
-        # 原地更新或创建顶点标记。选中顶点用金色(#FFD700)，未选中用品红。
+        # 原地更新或创建顶点标记。
+        # 共享顶点用红色(#EF4444)，选中用金色(#FFD700)，普通用品红。
         selected_set: set[int] = self._selected_vertex_indices
+        shared_set: set[int] = set(self._shared_topology.keys())
         for i, (mx, my) in enumerate(coords):
-            color: str = "#FFD700" if i in selected_set else sketch_color().name()
+            if i in shared_set:
+                color: str = "#EF4444"
+            elif i in selected_set:
+                color = "#FFD700"
+            else:
+                color = sketch_color().name()
             if i < len(items_to_keep):
                 item = items_to_keep[i]
                 if isinstance(item, QGraphicsEllipseItem):
@@ -637,6 +875,97 @@ class MapCanvas(QGraphicsView):
         return best
 
     @staticmethod
+    def detect_shared_topology(
+        edit_geometry: BaseGeometry,
+        features: tuple,
+        edit_fid: object,
+        tolerance: float = 1e-8,
+    ) -> tuple[dict[int, list[tuple[object, int]]], dict[object, list[tuple[float, float]]]]:
+        """检测同一图层中与编辑要素共享顶点的相邻要素。
+
+        参数:
+            edit_geometry: 正在编辑的要素几何。
+            features: 同图层所有要素。
+            edit_fid: 编辑要素的 FID（排除自身）。
+            tolerance: 坐标匹配容差。
+
+        返回:
+            (shared_topology, linked_features):
+            - shared_topology: {vertex_idx: [(fid, vertex_idx_in_other), ...]}
+            - linked_features: {fid: coordinate_list}  关联要素的初始坐标快照
+        """
+        # 提取编辑几何的坐标。
+        my_coords: list[tuple[float, float]] = []
+        geom_type: str = edit_geometry.geom_type
+        if geom_type == "Point":
+            my_coords = [(edit_geometry.x, edit_geometry.y)]
+        elif geom_type == "LineString":
+            my_coords = list(edit_geometry.coords)
+        elif geom_type == "Polygon":
+            my_coords = list(edit_geometry.exterior.coords)[:-1]
+        elif geom_type in ("MultiPoint", "MultiLineString", "MultiPolygon", "GeometryCollection"):
+            if hasattr(edit_geometry, "geoms") and edit_geometry.geoms:
+                return MapCanvas.detect_shared_topology(
+                    edit_geometry.geoms[0], features, edit_fid, tolerance
+                )
+        if not my_coords:
+            return {}, {}
+
+        # 为其他要素的顶点建立空间索引（分桶）。
+        bucket_size: float = max(tolerance * 10, 1e-6)
+        bucket: dict[tuple[int, int], list[tuple[object, int, float, float]]] = {}
+        for f in features:
+            if f.fid == edit_fid:
+                continue
+            other_coords: list[tuple[float, float]] = []
+            gt: str = f.geometry.geom_type
+            if gt == "Point":
+                other_coords = [(f.geometry.x, f.geometry.y)]
+            elif gt == "LineString":
+                other_coords = list(f.geometry.coords)
+            elif gt == "Polygon":
+                other_coords = list(f.geometry.exterior.coords)[:-1]
+            elif gt in ("MultiPoint", "MultiLineString", "MultiPolygon", "GeometryCollection"):
+                if hasattr(f.geometry, "geoms") and f.geometry.geoms:
+                    continue  # Multi 类型暂不参与拓扑检测
+            for oi, (ox, oy) in enumerate(other_coords):
+                bk = (int(ox / bucket_size), int(oy / bucket_size))
+                bucket.setdefault(bk, []).append((f.fid, oi, ox, oy))
+
+        # 为每个编辑顶点查找共享。
+        shared: dict[int, list[tuple[object, int]]] = {}
+        linked: dict[object, list[tuple[float, float]]] = {}
+        for mi, (mx, my) in enumerate(my_coords):
+            bk = (int(mx / bucket_size), int(my / bucket_size))
+            candidates: list[tuple[object, int, float, float]] = []
+            for dbx in (-1, 0, 1):
+                for dby in (-1, 0, 1):
+                    candidates.extend(bucket.get((bk[0] + dbx, bk[1] + dby), []))
+            matches: list[tuple[object, int]] = []
+            for fid_other, oi, ox, oy in candidates:
+                dist: float = ((mx - ox) ** 2 + (my - oy) ** 2) ** 0.5
+                if dist <= tolerance:
+                    matches.append((fid_other, oi))
+                    if fid_other not in linked:
+                        # 获取该要素的全部坐标。
+                        for f2 in features:
+                            if f2.fid == fid_other:
+                                if f2.geometry.geom_type == "Polygon":
+                                    linked[fid_other] = list(
+                                        f2.geometry.exterior.coords
+                                    )[:-1]
+                                elif f2.geometry.geom_type == "LineString":
+                                    linked[fid_other] = list(f2.geometry.coords)
+                                elif f2.geometry.geom_type == "Point":
+                                    linked[fid_other] = [
+                                        (f2.geometry.x, f2.geometry.y)
+                                    ]
+                                break
+            if matches:
+                shared[mi] = matches
+        return shared, linked
+
+    @staticmethod
     def _can_delete_vertex(geom_type: str, vertex_count: int) -> bool:
         """判断是否允许删除一个顶点（保留最少顶点数）。"""
         if geom_type in ("Point", "MultiPoint"):
@@ -669,6 +998,34 @@ class MapCanvas(QGraphicsView):
             return Polygon(closed)
         return None
 
+    def _commit_topology_edit(self) -> dict:
+        """构建所有受影响要素的新几何并返回 {fid: new_geometry}。
+
+        包含编辑要素本身和所有共享边界的关联要素。
+        """
+        result: dict = {}
+        # 编辑要素自身。
+        new_self: BaseGeometry | None = self._commit_vertex_edit()
+        if new_self is not None and self._edit_fid is not None:
+            result[self._edit_fid] = new_self
+        # 关联要素。
+        for other_fid, coords in self._linked_features.items():
+            gt: str = ""
+            # 从原几何推断类型（通过快照查找）。
+            for fid_list in [self._linked_features]:
+                gt = "Polygon"  # 默认面
+                break
+            if len(coords) < 3:
+                continue
+            closed: list[tuple[float, float]] = list(coords)
+            if closed[0] != closed[-1]:
+                closed.append(closed[0])
+            try:
+                result[other_fid] = Polygon(closed)
+            except Exception:
+                continue
+        return result
+
     def _deactivate_all_tools(self) -> None:
         """关闭所有特殊工具模式，恢复默认交互状态。"""
         self._zoom_rect_active = False
@@ -694,6 +1051,37 @@ class MapCanvas(QGraphicsView):
         for item in self._vertex_items:
             self._scene.removeItem(item)
         self._vertex_items.clear()
+        # 整要素移动。
+        self._move_active = False
+        if self._move_preview_item is not None:
+            self._scene.removeItem(self._move_preview_item)
+            self._move_preview_item = None
+        self._move_geometry = None
+        self._move_original_geometry = None
+        self._move_layer_id = ""
+        self._move_fid = None
+        self._move_start_map = None
+        # 变换。
+        self._transform_active = False
+        if self._transform_preview_item is not None:
+            self._scene.removeItem(self._transform_preview_item)
+            self._transform_preview_item = None
+        self._transform_geometry = None
+        self._transform_original_geometry = None
+        self._transform_layer_id = ""
+        self._transform_fid = None
+        self._transform_start_pos = None
+        self._transform_angle = 0.0
+        self._transform_scale = 1.0
+        # 拆分。
+        self._split_active = False
+        self._split_layer_id = ""
+        self._split_fid = None
+        self._split_target_geometry = None
+        # 拓扑。
+        self._shared_topology.clear()
+        self._linked_features.clear()
+        self._topology_layer_id = ""
 
     def set_snapping(self, enabled: bool) -> None:
         """启用或禁用顶点捕捉。
@@ -1267,6 +1655,28 @@ class MapCanvas(QGraphicsView):
             event.accept()
             return
 
+        # ── 整要素移动 ──
+        if self._move_active and self._move_geometry is not None:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._move_start_map = self._screen_to_map_point(
+                    event.position().toPoint()
+                )
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return
+            event.accept()
+            return
+
+        # ── 变换要素（旋转/缩放）──
+        if self._transform_active and self._transform_geometry is not None:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._transform_start_pos = event.position().toPoint()
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return
+            event.accept()
+            return
+
         # ── 数字化工具 ──
         digitizing: bool = self._digitize_mode != "none"
         if digitizing:
@@ -1289,7 +1699,10 @@ class MapCanvas(QGraphicsView):
             if event.button() == Qt.MouseButton.RightButton:
                 geometry = self._finish_sketch()
                 if geometry is not None:
-                    self.feature_digitized.emit(geometry)
+                    if self._split_active:
+                        self.feature_split_requested.emit(geometry)
+                    else:
+                        self.feature_digitized.emit(geometry)
                 else:
                     self.set_pan_tool()
                 event.accept()
@@ -1345,7 +1758,10 @@ class MapCanvas(QGraphicsView):
         ):
             geometry: BaseGeometry | None = self._finish_sketch()
             if geometry is not None:
-                self.feature_digitized.emit(geometry)
+                if self._split_active:
+                    self.feature_split_requested.emit(geometry)
+                else:
+                    self.feature_digitized.emit(geometry)
             else:
                 # 顶点不足（如面少于 3 点）时退出数字化工具。
                 self.set_pan_tool()
@@ -1392,9 +1808,116 @@ class MapCanvas(QGraphicsView):
                 if i < len(self._vertex_coords):
                     cx, cy = self._vertex_coords[i]
                     self._vertex_coords[i] = (cx + dx, cy + dy)
+            # 拓扑联动：移动共享顶点时同步更新关联要素坐标。
+            if self._shared_topology and self._linked_features:
+                for i in move_indices:
+                    if i in self._shared_topology:
+                        for other_fid, other_idx in self._shared_topology[i]:
+                            if other_fid in self._linked_features:
+                                lc = self._linked_features[other_fid]
+                                if other_idx < len(lc):
+                                    ox, oy = lc[other_idx]
+                                    lc[other_idx] = (ox + dx, oy + dy)
             # 重建标记和预览。
             self._rebuild_vertex_markers(self._edit_geometry)
             self._update_feature_item_path()
+            event.accept()
+            return
+
+        # ── 整要素移动拖拽 ──
+        if self._move_active and self._move_start_map is not None:
+            current_pt: Point = self._screen_to_map_point(
+                event.position().toPoint()
+            )
+            dx: float = current_pt.x - self._move_start_map.x
+            dy: float = current_pt.y - self._move_start_map.y
+            # 忽略极小拖拽。
+            if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+                event.accept()
+                return
+            translated: BaseGeometry = affinity.translate(
+                self._move_original_geometry, dx, dy
+            )
+            self._move_geometry = translated
+            if self._move_preview_item is not None:
+                self._move_preview_item.prepareGeometryChange()
+                self._move_preview_item.setPath(
+                    self._geometry_to_path(translated)
+                )
+            event.accept()
+            return
+
+        # ── 变换要素拖拽 ──
+        if self._transform_active and self._transform_start_pos is not None:
+            current_pos: QPoint = event.position().toPoint()
+            cx, cy = self._transform_centroid
+            # 质心在场景中的像素位置。
+            centroid_scene: QPointF = QPointF(cx, -cy)
+            centroid_screen: QPoint = self.mapFromScene(centroid_scene)
+
+            if self._transform_mode == "rotate":
+                # 计算当前角度与起始角度之差。
+                start_dx: float = float(
+                    self._transform_start_pos.x() - centroid_screen.x()
+                )
+                start_dy: float = float(
+                    self._transform_start_pos.y() - centroid_screen.y()
+                )
+                curr_dx: float = float(
+                    current_pos.x() - centroid_screen.x()
+                )
+                curr_dy: float = float(
+                    current_pos.y() - centroid_screen.y()
+                )
+                start_angle: float = math.degrees(
+                    math.atan2(-start_dy, start_dx)
+                )
+                curr_angle: float = math.degrees(
+                    math.atan2(-curr_dy, curr_dx)
+                )
+                delta_angle: float = curr_angle - start_angle
+                # Shift 吸附到 15° 倍数。
+                if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    delta_angle = round(delta_angle / 15.0) * 15.0
+                total_angle: float = delta_angle
+                if abs(total_angle) < 0.1:
+                    event.accept()
+                    return
+                transformed: BaseGeometry = affinity.rotate(
+                    self._transform_original_geometry,
+                    total_angle,
+                    origin=self._transform_centroid,
+                )
+                self._transform_geometry = transformed
+                self._transform_angle = total_angle
+            else:  # scale
+                start_dist: float = math.hypot(
+                    self._transform_start_pos.x() - centroid_screen.x(),
+                    self._transform_start_pos.y() - centroid_screen.y(),
+                )
+                curr_dist: float = math.hypot(
+                    current_pos.x() - centroid_screen.x(),
+                    current_pos.y() - centroid_screen.y(),
+                )
+                if start_dist < 5.0:
+                    event.accept()
+                    return
+                scale_factor: float = curr_dist / start_dist
+                scale_factor = max(0.01, min(scale_factor, 100.0))
+                transformed = affinity.scale(
+                    self._transform_original_geometry,
+                    xfact=scale_factor,
+                    yfact=scale_factor,
+                    origin=self._transform_centroid,
+                )
+                self._transform_geometry = transformed
+                self._transform_scale = scale_factor
+
+            if self._transform_preview_item is not None:
+                self._transform_preview_item.prepareGeometryChange()
+                self._transform_preview_item.setPath(
+                    self._geometry_to_path(transformed)
+                )
             event.accept()
             return
 
@@ -1466,6 +1989,20 @@ class MapCanvas(QGraphicsView):
             event.accept()
             return
 
+        # ── 整要素移动释放 ──
+        if self._move_active and self._move_start_map is not None:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._commit_move()
+                event.accept()
+                return
+
+        # ── 变换要素释放 ──
+        if self._transform_active and self._transform_start_pos is not None:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._commit_transform()
+                event.accept()
+                return
+
         # 中键释放：恢复光标样式。
         if self._pan_mode == "middle" and event.button() == Qt.MouseButton.MiddleButton:
             self._pan_mode = "none"
@@ -1522,17 +2059,24 @@ class MapCanvas(QGraphicsView):
         参数:
             event: Qt 键盘事件。
         """
-        # Enter：提交顶点编辑。
-        if (
-            event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
-            and self._vertex_edit_active
-        ):
-            new_geom: BaseGeometry | None = self._commit_vertex_edit()
-            if new_geom is not None:
-                self.geometry_edited.emit(new_geom)
-            self.set_pan_tool()
-            event.accept()
-            return
+        # Enter：提交顶点编辑或变换。
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self._vertex_edit_active:
+                if self._shared_topology:
+                    updates: dict = self._commit_topology_edit()
+                    if updates:
+                        self.topology_edited.emit(updates)
+                else:
+                    new_geom: BaseGeometry | None = self._commit_vertex_edit()
+                    if new_geom is not None:
+                        self.geometry_edited.emit(new_geom)
+                self.set_pan_tool()
+                event.accept()
+                return
+            if self._transform_active:
+                self._commit_transform()
+                event.accept()
+                return
 
         # Ctrl+A：全选所有顶点。
         if (
@@ -1553,6 +2097,8 @@ class MapCanvas(QGraphicsView):
                 or self._zoom_rect_active
                 or self._digitize_mode != "none"
                 or self._vertex_edit_active
+                or self._move_active
+                or self._transform_active
             ):
                 self.set_pan_tool()
                 event.accept()

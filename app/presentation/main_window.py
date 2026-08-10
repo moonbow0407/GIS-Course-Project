@@ -337,6 +337,12 @@ class MainWindow(QMainWindow):
         self._map_canvas.geometry_edited.connect(
             self._on_geometry_edited
         )
+        self._map_canvas.feature_split_requested.connect(
+            self._on_feature_split_requested
+        )
+        self._map_canvas.topology_edited.connect(
+            self._on_topology_edited
+        )
         self._map_canvas.tool_changed.connect(self._on_map_tool_changed)
         self._attribute_table_panel.selection_changed.connect(
             self._on_table_selection_changed
@@ -511,6 +517,12 @@ class MainWindow(QMainWindow):
             "delete_feature": self._delete_selected_features,
             "edit_feature": self._edit_selected_feature,
             "edit_geometry": self._edit_selected_geometry,
+            "move_feature": self._move_selected_feature,
+            "transform_feature": self._rotate_selected_feature,  # 下拉按钮父级默认旋转
+            "rotate_feature": self._rotate_selected_feature,
+            "scale_feature": self._scale_selected_feature,
+            "split_feature": self._split_selected_feature,
+            "merge_features": self._merge_selected_features,
             "simplify_line": self._simplify_selected,
             "smooth_line": self._smooth_selected,
             "toggle_snapping": self._toggle_snapping,
@@ -1567,6 +1579,10 @@ class MainWindow(QMainWindow):
             "digitize_polygon": "add_polygon_feature",
         }.get(tool_id)
         self._set_active_digitize_action(digitize_action)
+        # 移动/变换/拆分工具时清除数字化按钮高亮。
+        if tool_id in ("move_feature", "rotate_feature", "scale_feature", "split_feature"):
+            self._set_active_digitize_action(None)
+            self._set_active_query_action(None)
 
     def _exit_query_mode(self) -> None:
         """退出当前查询模式并恢复默认平移工具。"""
@@ -2079,8 +2095,25 @@ class MainWindow(QMainWindow):
                     self._editing_before_features: tuple[Feature, ...] = (
                         layer.layer.features
                     )
+                    # 检测共享边界拓扑（仅面要素）。
+                    shared_topo: dict | None = None
+                    linked_feats: dict | None = None
+                    if f.geometry.geom_type in ("Polygon", "MultiPolygon"):
+                        tolerance = (
+                            self._map_canvas._map_units_per_pixel * 5.0
+                        )
+                        shared_topo, linked_feats = (
+                            self._map_canvas.detect_shared_topology(
+                                f.geometry,
+                                layer.layer.features,
+                                fid,
+                                tolerance,
+                            )
+                        )
                     self._map_canvas.set_vertex_edit_tool(
-                        f.geometry, layer.layer_id, fid
+                        f.geometry, layer.layer_id, fid,
+                        shared_topology=shared_topo,
+                        linked_features=linked_feats,
                     )
                     # 显示编辑工具栏（主窗口左上角）。
                     global_pos = self.mapToGlobal(QPointF(10, 10))
@@ -2106,13 +2139,372 @@ class MainWindow(QMainWindow):
                             )
                     except Exception:
                         pass
+                    # 拓扑提示。
+                    topo_hint: str = ""
+                    if shared_topo:
+                        linked_count: int = len(linked_feats) if linked_feats else 0
+                        topo_hint = (
+                            f"  |  检测到 {linked_count} 个相邻要素的"
+                            f" {sum(len(v) for v in shared_topo.values())} 个共享顶点"
+                        )
                     self._ready_label.setText(
-                        f"顶点编辑：{geom_type} · {coords_count} 个顶点  "
+                        f"顶点编辑：{geom_type} · {coords_count} 个顶点"
+                        f"{topo_hint}  "
                         "|  拖拽移动  |  右键删除  |  点中点插入  "
                         "|  Enter 提交  |  Esc 取消"
                     )
                     return
         self.statusBar().showMessage("未找到选中要素。", 3500)
+
+    def _move_selected_feature(self) -> None:
+        """激活整要素移动工具。"""
+        self._ready_label.setText("移动要素：检查选中状态…")
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        if snapshot.selection_count == 0:
+            QMessageBox.information(
+                self, "移动要素",
+                "当前没有选中的要素。\n\n请先点击功能区 地图→点选查询，"
+                "在地图上点击一个要素将其选中，\n"
+                "然后再点击 编辑→移动要素。",
+            )
+            self._ready_label.setText("就绪")
+            return
+        if snapshot.selection_count > 1:
+            QMessageBox.information(
+                self, "移动要素", "请只选中一个要素进行移动。\n"
+                "当前选中了多个要素，请先清除选择后重新选取。"
+            )
+            self._ready_label.setText("就绪")
+            return
+        for layer in snapshot.layers:
+            if not layer.selected_feature_ids:
+                continue
+            if not isinstance(layer.layer, VectorLayer):
+                continue
+            fid = layer.selected_feature_ids[0]
+            for f in layer.layer.features:
+                if f.fid == fid:
+                    self._editing_layer_id = layer.layer_id
+                    self._editing_fid = fid
+                    self._editing_before_features = layer.layer.features
+                    self._map_canvas.set_move_feature_tool(
+                        f.geometry, layer.layer_id, fid
+                    )
+                    self._ready_label.setText(
+                        "移动要素：拖拽移动  |  松开提交  |  Esc 取消"
+                    )
+                    return
+        self.statusBar().showMessage("未找到选中要素。", 3500)
+
+    def _rotate_selected_feature(self) -> None:
+        """激活要素旋转工具。"""
+        self._ready_label.setText("旋转要素：检查选中状态…")
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        if snapshot.selection_count != 1:
+            QMessageBox.information(
+                self, "旋转要素", "请只选中一个要素进行旋转。"
+            )
+            self._ready_label.setText("就绪")
+            return
+        for layer in snapshot.layers:
+            if not layer.selected_feature_ids:
+                continue
+            if not isinstance(layer.layer, VectorLayer):
+                continue
+            fid = layer.selected_feature_ids[0]
+            for f in layer.layer.features:
+                if f.fid == fid:
+                    self._editing_layer_id = layer.layer_id
+                    self._editing_fid = fid
+                    self._editing_before_features = layer.layer.features
+                    self._map_canvas.set_transform_tool(
+                        f.geometry, "rotate", layer.layer_id, fid
+                    )
+                    self._ready_label.setText(
+                        "旋转要素：拖拽旋转  |  Shift 吸附15°  "
+                        "|  Enter 提交  |  Esc 取消"
+                    )
+                    return
+
+    def _scale_selected_feature(self) -> None:
+        """激活要素缩放工具。"""
+        self._ready_label.setText("缩放要素：检查选中状态…")
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        if snapshot.selection_count != 1:
+            QMessageBox.information(
+                self, "缩放要素", "请只选中一个要素进行缩放。"
+            )
+            self._ready_label.setText("就绪")
+            return
+        for layer in snapshot.layers:
+            if not layer.selected_feature_ids:
+                continue
+            if not isinstance(layer.layer, VectorLayer):
+                continue
+            fid = layer.selected_feature_ids[0]
+            for f in layer.layer.features:
+                if f.fid == fid:
+                    self._editing_layer_id = layer.layer_id
+                    self._editing_fid = fid
+                    self._editing_before_features = layer.layer.features
+                    self._map_canvas.set_transform_tool(
+                        f.geometry, "scale", layer.layer_id, fid
+                    )
+                    self._ready_label.setText(
+                        "缩放要素：拖拽缩放  |  Enter 提交  |  Esc 取消"
+                    )
+                    return
+
+    def _split_selected_feature(self) -> None:
+        """激活要素拆分工具——绘制切割线。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        if snapshot.selection_count != 1:
+            QMessageBox.information(
+                self, "拆分要素", "请只选中一个面要素进行拆分。"
+            )
+            return
+        for layer in snapshot.layers:
+            if not layer.selected_feature_ids:
+                continue
+            if not isinstance(layer.layer, VectorLayer):
+                continue
+            fid = layer.selected_feature_ids[0]
+            for f in layer.layer.features:
+                if f.fid == fid:
+                    if f.geometry.geom_type not in (
+                        "Polygon", "MultiPolygon"
+                    ):
+                        QMessageBox.information(
+                            self, "拆分要素",
+                            "只能拆分面要素。"
+                        )
+                        return
+                    self._editing_layer_id = layer.layer_id
+                    self._editing_fid = fid
+                    self._editing_before_features = layer.layer.features
+                    self._map_canvas.set_split_tool(
+                        layer.layer_id, fid, f.geometry
+                    )
+                    self._ready_label.setText(
+                        "拆分要素：绘制切割线穿越要素  "
+                        "|  双击完成  |  Esc 取消"
+                    )
+                    return
+
+    def _on_feature_split_requested(
+        self, cutting_line: BaseGeometry
+    ) -> None:
+        """处理拆分请求：用切割线拆分目标要素。"""
+        layer_id: str | None = self._editing_layer_id
+        fid: FeatureId | None = self._editing_fid
+        before_features: tuple[Feature, ...] = getattr(
+            self, "_editing_before_features", ()
+        )
+        self._editing_layer_id = None
+        self._editing_fid = None
+        if layer_id is None or fid is None:
+            return
+        try:
+            pieces: list[BaseGeometry] = self._application.split_feature(
+                layer_id, fid, cutting_line
+            )
+        except ApplicationError as error:
+            QMessageBox.warning(self, "拆分要素失败", str(error))
+            self._map_canvas.set_pan_tool()
+            self._ready_label.setText("就绪")
+            return
+        # 删除原始要素，追加分割结果。
+        remaining: list[Feature] = []
+        orig_attrs: dict[str, AttributeValue] = {}
+        for layer_snap in self._application.snapshot().layers:
+            if layer_snap.layer_id == layer_id and isinstance(
+                layer_snap.layer, VectorLayer
+            ):
+                for f in layer_snap.layer.features:
+                    if f.fid == fid:
+                        orig_attrs = dict(f.attributes)
+                    else:
+                        remaining.append(f)
+                break
+        # 计算新 FID 起始值。
+        max_fid: int = 0
+        for f in remaining:
+            try:
+                max_fid = max(max_fid, int(str(f.fid)))
+            except (ValueError, TypeError):
+                pass
+        new_features: list[Feature] = []
+        for i, piece in enumerate(pieces):
+            new_features.append(
+                Feature(
+                    fid=max_fid + 1 + i,
+                    geometry=piece,
+                    attributes=dict(orig_attrs),
+                )
+            )
+        try:
+            self._application.replace_layer_features(
+                layer_id, tuple(remaining) + tuple(new_features)
+            )
+        except ApplicationError as error:
+            QMessageBox.warning(self, "拆分要素失败", str(error))
+            self._map_canvas.set_pan_tool()
+            return
+        # 刷新。
+        self._map_canvas.setUpdatesEnabled(False)
+        try:
+            self._refresh_workspace()
+        finally:
+            self._map_canvas.setUpdatesEnabled(True)
+        self._refresh_attribute_table()
+        # 撤销。
+        after_snapshot = self._application.snapshot()
+        after_features: tuple[Feature, ...] = ()
+        for layer in after_snapshot.layers:
+            if layer.layer_id == layer_id and isinstance(
+                layer.layer, VectorLayer
+            ):
+                after_features = layer.layer.features
+                break
+        self._push_undo(
+            f"拆分要素 ({len(pieces)} 部分)",
+            undo_action=partial(
+                self._application.replace_layer_features,
+                layer_id,
+                before_features,
+            ),
+            redo_action=partial(
+                self._application.replace_layer_features,
+                layer_id,
+                after_features,
+            ),
+        )
+        self._ready_label.setText(
+            f"拆分要素完成  1 → {len(pieces)} 个要素"
+        )
+
+    def _merge_selected_features(self) -> None:
+        """合并选中的多个要素。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        # 按图层分组选中要素。
+        selected_by_layer: dict[str, list[FeatureId]] = {}
+        for layer in snapshot.layers:
+            if layer.selected_feature_ids and isinstance(
+                layer.layer, VectorLayer
+            ):
+                selected_by_layer[layer.layer_id] = list(
+                    layer.selected_feature_ids
+                )
+        if not selected_by_layer:
+            QMessageBox.information(
+                self, "合并要素", "当前没有选中的要素。"
+            )
+            return
+        if len(selected_by_layer) > 1:
+            QMessageBox.information(
+                self, "合并要素",
+                "选中的要素属于不同图层，请在同一图层内选择要素。"
+            )
+            return
+        layer_id, fids = next(iter(selected_by_layer.items()))
+        if len(fids) < 2:
+            QMessageBox.information(
+                self, "合并要素", "请至少选中 2 个要素进行合并。"
+            )
+            return
+        # 确认对话框。
+        answer = QMessageBox.question(
+            self, "合并要素",
+            f"将选中的 {len(fids)} 个要素合并为 1 个？\n"
+            "合并后保留第一个要素的属性。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        # 捕获合并前状态。
+        before_features: tuple[Feature, ...] = ()
+        for layer in snapshot.layers:
+            if layer.layer_id == layer_id and isinstance(
+                layer.layer, VectorLayer
+            ):
+                before_features = layer.layer.features
+                break
+        try:
+            merged_geom, merged_attrs = self._application.merge_features(
+                layer_id, tuple(fids)
+            )
+        except ApplicationError as error:
+            QMessageBox.warning(self, "合并要素失败", str(error))
+            return
+        # 删除原始要素并追加合并结果。
+        remaining: list[Feature] = []
+        for layer in snapshot.layers:
+            if layer.layer_id == layer_id and isinstance(
+                layer.layer, VectorLayer
+            ):
+                for f in layer.layer.features:
+                    if f.fid not in fids:
+                        remaining.append(f)
+                break
+        merged_feature = Feature(
+            fid=max(
+                (f.fid for f in remaining), key=lambda x: int(x) if isinstance(x, (int, str)) and str(x).isdigit() else 0,  # type: ignore[arg-type]
+                default=-1,
+            ) + 1,
+            geometry=merged_geom,
+            attributes=merged_attrs,
+        )
+        # 使用更稳健的 FID 生成。
+        max_fid: int = 0
+        for f in remaining:
+            try:
+                max_fid = max(max_fid, int(str(f.fid)))
+            except (ValueError, TypeError):
+                pass
+        merged_feature = Feature(
+            fid=max_fid + 1,
+            geometry=merged_geom,
+            attributes=merged_attrs,
+        )
+        try:
+            self._application.replace_layer_features(
+                layer_id, tuple(remaining) + (merged_feature,)
+            )
+        except ApplicationError as error:
+            QMessageBox.warning(self, "合并要素失败", str(error))
+            return
+        # 刷新。
+        self._map_canvas.setUpdatesEnabled(False)
+        try:
+            self._refresh_workspace()
+        finally:
+            self._map_canvas.setUpdatesEnabled(True)
+        self._refresh_attribute_table()
+        # 撤销。
+        after_snapshot = self._application.snapshot()
+        after_features: tuple[Feature, ...] = ()
+        for layer in after_snapshot.layers:
+            if layer.layer_id == layer_id and isinstance(
+                layer.layer, VectorLayer
+            ):
+                after_features = layer.layer.features
+                break
+        self._push_undo(
+            "合并要素",
+            undo_action=partial(
+                self._application.replace_layer_features,
+                layer_id,
+                before_features,
+            ),
+            redo_action=partial(
+                self._application.replace_layer_features,
+                layer_id,
+                after_features,
+            ),
+        )
+        self._ready_label.setText(
+            f"合并要素完成  {len(fids)} → 1 个要素"
+        )
 
     def _get_layer_features(self, layer_id: str) -> tuple[Feature, ...]:
         """获取指定图层的当前要素集合。"""
@@ -2142,12 +2534,17 @@ class MainWindow(QMainWindow):
             )
 
     def _on_geom_edit_commit(self) -> None:
-        """提交几何编辑。"""
+        """提交几何编辑（含拓扑模式）。"""
         self._geom_edit_toolbar.hide()
         if self._map_canvas._vertex_edit_active:
-            new_geom = self._map_canvas._commit_vertex_edit()
-            if new_geom is not None:
-                self._on_geometry_edited(new_geom)
+            if self._map_canvas._shared_topology:
+                updates: dict = self._map_canvas._commit_topology_edit()
+                if updates:
+                    self._map_canvas.topology_edited.emit(updates)
+            else:
+                new_geom = self._map_canvas._commit_vertex_edit()
+                if new_geom is not None:
+                    self._on_geometry_edited(new_geom)
             # 无论成功失败都退出顶点编辑，避免状态残留。
             self._map_canvas.set_pan_tool()
 
@@ -2408,6 +2805,51 @@ class MainWindow(QMainWindow):
             self._map_canvas.setUpdatesEnabled(True)
         self._ready_label.setText(
             f"已修改要素几何  FID {fid}"
+        )
+
+    def _on_topology_edited(self, updates: dict) -> None:
+        """批量更新拓扑编辑中所有受影响要素的几何。"""
+        layer_id: str | None = self._editing_layer_id
+        before_features: tuple[Feature, ...] = getattr(
+            self, "_editing_before_features", ()
+        )
+        self._editing_layer_id = None
+        self._editing_fid = None
+        if layer_id is None or not updates:
+            return
+        try:
+            # 逐个更新每个受影响要素的几何。
+            for fid, new_geom in updates.items():
+                self._application.update_feature_geometry(
+                    layer_id, fid, new_geom
+                )
+        except ApplicationError as error:
+            QMessageBox.warning(self, "修改几何失败", str(error))
+            return
+        after_snapshot = self._application.snapshot()
+        after_features: tuple[Feature, ...] = ()
+        for layer in after_snapshot.layers:
+            if layer.layer_id == layer_id and isinstance(
+                layer.layer, VectorLayer
+            ):
+                after_features = layer.layer.features
+                break
+        self._push_undo(
+            f"拓扑编辑 ({len(updates)} 个要素)",
+            undo_action=partial(
+                self._application.replace_layer_features, layer_id, before_features
+            ),
+            redo_action=partial(
+                self._application.replace_layer_features, layer_id, after_features
+            ),
+        )
+        self._map_canvas.setUpdatesEnabled(False)
+        try:
+            self._refresh_workspace()
+        finally:
+            self._map_canvas.setUpdatesEnabled(True)
+        self._ready_label.setText(
+            f"拓扑编辑完成  更新 {len(updates)} 个要素"
         )
 
     def _on_point_queried(self, point: Point, add_to_selection: bool) -> None:

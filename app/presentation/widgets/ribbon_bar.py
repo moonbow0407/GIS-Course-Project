@@ -331,6 +331,19 @@ class RibbonBar(QWidget):
                         RibbonActionSpec("toggle_snapping", "捕捉", "⊙", checkable=True),
                         RibbonActionSpec("edit_feature", "修改属性", "✎", "#d97706"),
                         RibbonActionSpec("edit_geometry", "编辑几何要素", "⬡", "#d97706"),
+                        RibbonActionSpec("move_feature", "移动要素", "↕", "#d97706"),
+                        RibbonActionSpec(
+                            "transform_feature",
+                            "变换要素",
+                            "↻",
+                            "#7c3aed",
+                            children=(
+                                RibbonActionSpec("rotate_feature", "旋转", "↻"),
+                                RibbonActionSpec("scale_feature", "缩放", "⤢"),
+                            ),
+                        ),
+                        RibbonActionSpec("split_feature", "拆分要素", "✄", "#dc2626"),
+                        RibbonActionSpec("merge_features", "合并要素", "⊞", "#16a34a"),
                         RibbonActionSpec("delete_feature", "删除要素", "×", "#dc2626"),
                     )),
                     RibbonGroupSpec("线处理", (

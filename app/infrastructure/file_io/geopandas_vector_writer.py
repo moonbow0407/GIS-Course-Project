@@ -90,6 +90,11 @@ class GeoPandasVectorWriter:
                 if companion.exists():
                     companion.unlink()
 
+        # Shapefile 的 DBF 字段名限制为 10 字节（非字符）。
+        # 预截断中文等宽字符字段名，避免 pyogrio 写入时产生 RuntimeWarning。
+        if suffix == ".shp":
+            dataframe = self._truncate_shp_field_names(dataframe)
+
         try:
             dataframe.to_file(
                 resolved_path,
@@ -101,3 +106,35 @@ class GeoPandasVectorWriter:
             )
         except Exception as error:
             raise DataWriteFailed(f"矢量数据导出失败：{resolved_path.name}") from error
+
+    @staticmethod
+    def _truncate_shp_field_names(df: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        """将 GeoDataFrame 列名截断为 Shapefile 兼容的 10 字节以内。
+
+        中文等宽字符按 UTF-8 编码后截断；冲突时追加 "_2" "_3" 等后缀。
+        """
+        renamed: dict[str, str] = {}
+        used: set[str] = set()
+        for col in df.columns:
+            if col == "geometry":
+                continue
+            encoded: bytes = col.encode("utf-8")
+            if len(encoded) <= 10:
+                safe: str = col
+            else:
+                # 按字节截断并解码，舍弃可能被截断的不完整字节。
+                truncated: bytes = encoded[:10]
+                safe = truncated.decode("utf-8", errors="ignore")
+            # 冲突去重。
+            base: str = safe
+            counter: int = 1
+            while safe in used or safe == "":
+                counter += 1
+                suffix: str = f"_{counter}"
+                suffix_bytes: bytes = suffix.encode("utf-8")
+                safe = (base.encode("utf-8")[:10 - len(suffix_bytes)]).decode("utf-8", errors="ignore") + suffix
+            renamed[col] = safe
+            used.add(safe)
+        if renamed:
+            df = df.rename(columns=renamed)
+        return df
