@@ -179,7 +179,7 @@ class MainWindow(QMainWindow):
         self._undo_stack: list[tuple[str, Callable[[], object], Callable[[], object]]] = []
         # 重做栈：撤销后暂存被撤销的操作，新操作执行时清空。
         self._redo_stack: list[tuple[str, Callable[[], object], Callable[[], object]]] = []
-        # 正在编辑几何的要素标识，供顶点编辑回调使用。
+        # 正在编辑几何要素的要素标识，供顶点编辑回调使用。
         self._editing_layer_id: str | None = None
         self._editing_fid: FeatureId | None = None
         # 当前数字化模式：供连续创建后重新激活工具。
@@ -192,7 +192,7 @@ class MainWindow(QMainWindow):
         # 当前持续激活的查询入口，用于同步三种查询按钮的互斥高亮状态。
         self._active_query_action: str | None = None
         self._active_digitize_action: str | None = None
-        # 编辑几何悬浮工具栏。
+        # 编辑几何要素悬浮工具栏。
         self._geom_edit_toolbar: GeometryEditToolbar = GeometryEditToolbar()
         self._geom_edit_toolbar.mode_changed.connect(self._on_geom_edit_mode)
         self._geom_edit_toolbar.commit_requested.connect(
@@ -2048,20 +2048,20 @@ class MainWindow(QMainWindow):
 
         先使用点选查询选中一个要素，再点击本按钮进入顶点编辑模式。
         """
-        self._ready_label.setText("编辑几何：检查选中状态…")
+        self._ready_label.setText("编辑几何要素：检查选中状态…")
         snapshot: WorkspaceSnapshot = self._application.snapshot()
         if snapshot.selection_count == 0:
             QMessageBox.information(
-                self, "编辑几何",
+                self, "编辑几何要素",
                 "当前没有选中的要素。\n\n请先点击功能区 地图→点选查询，"
                 "在地图上点击一个要素将其选中（高亮），\n"
-                "然后再点击 编辑→编辑几何。",
+                "然后再点击 编辑→编辑几何要素。",
             )
             self._ready_label.setText("就绪")
             return
         if snapshot.selection_count > 1:
             QMessageBox.information(
-                self, "编辑几何", "请只选中一个要素进行几何编辑。\n"
+                self, "编辑几何要素", "请只选中一个要素进行几何编辑。\n"
                 "当前选中了多个要素，请先清除选择后重新选取。"
             )
             self._ready_label.setText("就绪")
@@ -2129,16 +2129,16 @@ class MainWindow(QMainWindow):
             canvas._rebuild_vertex_markers(canvas._edit_geometry)
 
     def _on_geom_edit_mode(self, mode: str) -> None:
-        """编辑几何模式切换。"""
+        """编辑几何要素模式切换。"""
         self._map_canvas._edit_mode = mode
         self._geom_edit_toolbar.set_mode(mode)
         if mode == "delete_vertex":
             self._ready_label.setText(
-                "编辑几何：点击顶点删除  |  Ctrl+A 全选"
+                "编辑几何要素：点击顶点删除  |  Ctrl+A 全选"
             )
         elif mode == "drag_vertex":
             self._ready_label.setText(
-                "编辑几何：Ctrl+点击多选  |  Ctrl+A 全选  |  拖拽移动"
+                "编辑几何要素：Ctrl+点击多选  |  Ctrl+A 全选  |  拖拽移动"
             )
 
     def _on_geom_edit_commit(self) -> None:
@@ -2155,7 +2155,7 @@ class MainWindow(QMainWindow):
         """取消几何编辑。"""
         self._geom_edit_toolbar.hide()
         self._map_canvas.set_pan_tool()
-        self._ready_label.setText("编辑几何：已取消")
+        self._ready_label.setText("编辑几何要素：已取消")
 
     def _toggle_snapping(self) -> None:
         """切换顶点捕捉开关。"""

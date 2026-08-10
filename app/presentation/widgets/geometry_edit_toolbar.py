@@ -1,4 +1,4 @@
-"""编辑几何悬浮工具栏。"""
+"""编辑几何要素悬浮工具栏。"""
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (

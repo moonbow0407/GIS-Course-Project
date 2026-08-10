@@ -330,7 +330,7 @@ class RibbonBar(QWidget):
                         ),
                         RibbonActionSpec("toggle_snapping", "捕捉", "⊙", checkable=True),
                         RibbonActionSpec("edit_feature", "修改属性", "✎", "#d97706"),
-                        RibbonActionSpec("edit_geometry", "编辑几何", "⬡", "#d97706"),
+                        RibbonActionSpec("edit_geometry", "编辑几何要素", "⬡", "#d97706"),
                         RibbonActionSpec("delete_feature", "删除要素", "×", "#dc2626"),
                     )),
                     RibbonGroupSpec("线处理", (
