@@ -119,6 +119,12 @@ from app.presentation.widgets.raster_calculator_dialog import RasterCalculatorDi
 from app.presentation.widgets.raster_clip_dialog import RasterClipDialog
 from app.presentation.widgets.raster_reclassify_dialog import RasterReclassifyDialog
 from app.presentation.widgets.ribbon_bar import RibbonBar
+from app.presentation.widgets.snapping_settings_dialog import (
+    SnappingSettingsDialog,
+    load_snap_all_layers,
+    load_snap_tolerance,
+    load_snap_types,
+)
 from app.presentation.widgets.startup_dialog import (
     save_recent_project,
 )
@@ -245,8 +251,6 @@ class MainWindow(QMainWindow):
         # 数字化目标图层：启动时锁定，绘制期间画布点击会清除活动图层，
         # 追加必须回到启动数字化时选定的图层而不是当时的活动图层。
         self._digitize_target_layer_id: str | None = None
-        # 捕捉开关：默认关闭。
-        self._snapping_enabled: bool = False
         # 当前持续激活的查询入口，用于同步三种查询按钮的互斥高亮状态。
         self._active_query_action: str | None = None
         self._active_digitize_action: str | None = None
@@ -266,6 +270,8 @@ class MainWindow(QMainWindow):
         self._original_geoms: dict[tuple[str, FeatureId], BaseGeometry] = {}
         self._create_ui()
         self._connect_signals()
+        # 从 QSettings 加载捕捉配置并应用到引擎。
+        self._apply_snap_settings()
         # 初始空栈时功能区撤销/重做按钮禁用。
         self._update_undo_buttons()
         # Ctrl+Z 撤销最近一次地图修改。
@@ -594,6 +600,7 @@ class MainWindow(QMainWindow):
             "simplify_line": self._simplify_selected,
             "smooth_line": self._smooth_selected,
             "toggle_snapping": self._toggle_snapping,
+            "snapping_settings": self._show_snapping_settings,
             "point_query": self._point_query,
             "point_query_fast": lambda: self._point_query(fast=True, toggle=False),
             "point_query_precise": lambda: self._point_query(fast=False, toggle=False),
@@ -2934,23 +2941,43 @@ class MainWindow(QMainWindow):
         self._ready_label.setText("编辑几何要素：已取消")
 
     def _toggle_snapping(self) -> None:
-        """切换顶点捕捉开关。"""
-        snapshot: WorkspaceSnapshot = self._application.snapshot()
-        if not self._snapping_enabled and snapshot.active_layer_id is not None:
-            if not self._application.can_edit_layer(snapshot.active_layer_id):
-                QMessageBox.warning(
-                    self,
-                    "无法启用捕捉",
-                    "活动图层 CRS 与地图显示 CRS 不等价，已禁止编辑和捕捉。",
-                )
-                return
-        self._snapping_enabled = not self._snapping_enabled
-        self._map_canvas.set_snapping(self._snapping_enabled)
+        """切换捕捉开关。"""
+        engine = self._map_canvas.snap_engine
+        if not engine.enabled:
+            snapshot: WorkspaceSnapshot = self._application.snapshot()
+            if snapshot.active_layer_id is not None:
+                if not self._application.can_edit_layer(snapshot.active_layer_id):
+                    QMessageBox.warning(
+                        self,
+                        "无法启用捕捉",
+                        "活动图层 CRS 与地图显示 CRS 不等价，已禁止编辑和捕捉。",
+                    )
+                    return
+        engine.enabled = not engine.enabled
         self._ribbon.set_action_checked(
-            "toggle_snapping", self._snapping_enabled
+            "toggle_snapping", engine.enabled
         )
-        state: str = "开" if self._snapping_enabled else "关"
-        self._ready_label.setText(f"顶点捕捉：{state}")
+        state: str = "开" if engine.enabled else "关"
+        self._ready_label.setText(f"捕捉：{state}")
+
+    def _show_snapping_settings(self) -> None:
+        """打开捕捉设置对话框并将变更应用到引擎。"""
+        dialog: SnappingSettingsDialog = SnappingSettingsDialog(self)
+        dialog.settings_changed.connect(self._apply_snap_settings)
+        dialog.exec()
+
+    def _apply_snap_settings(self) -> None:
+        """将 QSettings 中的捕捉配置同步到引擎。"""
+        engine = self._map_canvas.snap_engine
+        engine.tolerance_pixels = load_snap_tolerance()
+        engine.snap_types = load_snap_types()
+        engine.all_layers = load_snap_all_layers()
+        # 更新功能区按钮勾选状态。
+        self._ribbon.set_action_checked(
+            "toggle_snapping", engine.enabled
+        )
+        state: str = "开" if engine.enabled else "关"
+        self._ready_label.setText(f"捕捉：{state}（容差 {int(engine.tolerance_pixels)} px）")
 
     def _get_single_selected(
         self,

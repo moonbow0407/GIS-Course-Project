@@ -35,9 +35,10 @@ from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.raster_layer import RasterLayer
 from app.domain.vector_layer import Bounds, VectorLayer
-from app.presentation.global_display_settings import sketch_color
+from app.presentation.global_display_settings import sketch_color, snap_color, snap_edge_color
 from app.presentation.renderers.qt_raster_renderer import QtRasterRenderer
 from app.presentation.renderers.qt_vector_renderer import QtVectorRenderer
+from app.presentation.snapping_engine import SnapResult, SnappingEngine
 
 
 class MapCanvas(QGraphicsView):
@@ -113,11 +114,10 @@ class MapCanvas(QGraphicsView):
         self._digitize_vertices: list[QPoint] = []
         # 数字化预览图元：临时场景项，完成或取消后一并移除。
         self._sketch_items: list[QGraphicsItem] = []
-        # 捕捉状态。
-        self._snapping_enabled: bool = False
-        self._snap_coords: list[tuple[float, float]] = []
-        self._snap_layer_ids: tuple[str, ...] = ()
+        # 捕捉引擎：STRtree 空间索引 + 顶点/边捕捉。
+        self._snap_engine: SnappingEngine = SnappingEngine()
         self._snap_marker: QGraphicsPathItem | None = None
+        self._snap_edge_marker: QGraphicsPathItem | None = None
         # 缓存最近一次快照，供缩放后重新渲染使用。
         self._last_snapshot: WorkspaceSnapshot | None = None
         # 图层图元缓存：按图层编号保存该图层全部 Qt 图元，供显示比例过滤使用。
@@ -210,12 +210,12 @@ class MapCanvas(QGraphicsView):
         self._vertex_items.clear()
         self._sketch_items.clear()
         self._snap_marker = None
+        self._snap_edge_marker = None
         self._empty_overlay.setVisible(not snapshot.layers)
         if not snapshot.layers:
             self._last_snapshot = snapshot
             self._selected_fids.clear()
-            self._snap_coords.clear()
-            self._snap_layer_ids = ()
+            self._snap_engine.clear()
             self._map_scene_rect = None
             self._scene.setSceneRect(0, 0, 1000, 700)
             self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
@@ -273,7 +273,10 @@ class MapCanvas(QGraphicsView):
                     self._map_units_per_pixel,
                 )
                 self._layer_items[current_layer.layer_id] = vector_items
-        self._build_snap_index(snapshot)
+        queryable_ids: set[str] = set(self._queryable_layer_ids(snapshot))
+        self._snap_engine.build_index(
+            snapshot, queryable_ids, snapshot.active_layer_id
+        )
         self._last_snapshot = snapshot
         # 更新选中要素集合。
         self._selected_fids.clear()
@@ -1117,36 +1120,19 @@ class MapCanvas(QGraphicsView):
         self._topology_layer_id = ""
 
     def set_snapping(self, enabled: bool) -> None:
-        """启用或禁用顶点捕捉。
+        """启用或禁用顶点/边捕捉。
 
         参数:
-            enabled: True 时数字化光标自动吸附到附近已有顶点。
+            enabled: True 时数字化光标自动吸附到附近已有顶点或边。
         """
-        self._snapping_enabled = enabled
+        self._snap_engine.enabled = enabled
         if not enabled:
             self._clear_snap_marker()
 
-    def _build_snap_index(self, snapshot: WorkspaceSnapshot) -> None:
-        """从工作区快照构建捕捉顶点索引。"""
-        coords: list[tuple[float, float]] = []
-        queryable_layer_ids: tuple[str, ...] = self._queryable_layer_ids(snapshot)
-        queryable_ids: set[str] = set(queryable_layer_ids)
-        for layer in snapshot.layers:
-            if layer.layer_id not in queryable_ids:
-                continue
-            if isinstance(layer.display_payload, VectorDisplayPayload):
-                display_features = layer.display_payload.features
-            elif isinstance(layer.layer, VectorLayer):
-                # 兼容旧调用方直接构造未附带显示载荷的快照。
-                display_features = layer.layer.features
-            else:
-                continue
-            for feature in display_features:
-                if feature.geometry.is_empty:
-                    continue
-                self._collect_coords(feature.geometry, coords)
-        self._snap_coords = coords
-        self._snap_layer_ids = queryable_layer_ids
+    @property
+    def snap_engine(self) -> SnappingEngine:
+        """暴露捕捉引擎供主窗口配置容差、捕捉类型等。"""
+        return self._snap_engine
 
     def _queryable_layer_ids(self, snapshot: WorkspaceSnapshot) -> tuple[str, ...]:
         """按当前视图比例返回可参与查询和捕捉的图层编号。"""
@@ -1174,7 +1160,7 @@ class MapCanvas(QGraphicsView):
     def _collect_coords(
         geometry: BaseGeometry, coords: list[tuple[float, float]]
     ) -> None:
-        """递归收集几何中所有顶点。"""
+        """递归收集几何中所有顶点。（保留供共享拓扑编辑等内部使用。）"""
         gtype: str = geometry.geom_type
         if gtype == "Point":
             coords.append((geometry.x, geometry.y))
@@ -1191,56 +1177,69 @@ class MapCanvas(QGraphicsView):
             for member in geometry.geoms:
                 MapCanvas._collect_coords(member, coords)
 
-    def _find_snap_target(self, cursor_point: Point) -> Point | None:
-        """在容差内查找最近的捕捉顶点。
+    def _show_snap_marker(self, result: SnapResult) -> None:
+        """按捕捉类型绘制不同标记。
+
+        顶点捕捉：实心方块；边捕捉：空心菱形 + 边高亮虚线。
 
         参数:
-            cursor_point: 当前光标在地图坐标系下的位置。
-
-        返回:
-            最近的捕捉点；无命中返回 None。
+            result: 捕捉命中结果。
         """
-        if not self._snapping_enabled or not self._snap_coords:
-            return None
-        tol: float = self._map_units_per_pixel * 10.0
-        best_dist: float = tol
-        best: tuple[float, float] | None = None
-        px, py = cursor_point.x, cursor_point.y
-        for sx, sy in self._snap_coords:
-            d: float = ((px - sx) ** 2 + (py - sy) ** 2) ** 0.5
-            if d < best_dist:
-                best_dist = d
-                best = (sx, sy)
-        return Point(best[0], best[1]) if best else None
-
-    def _show_snap_marker(self, point: Point) -> None:
-        """在捕捉位置显示品红十字标记。"""
         self._clear_snap_marker()
-        item: QGraphicsPathItem = QGraphicsPathItem()
+        px, py = result.map_point.x, result.map_point.y
+        s: float = self._map_units_per_pixel * 6.0
         path: QPainterPath = QPainterPath()
-        s: float = self._map_units_per_pixel * 5.0
-        px, py = point.x, point.y
-        path.moveTo(px - s, -py - s)
-        path.lineTo(px + s, -py + s)
-        path.moveTo(px + s, -py - s)
-        path.lineTo(px - s, -py + s)
-        pen: QPen = QPen(sketch_color(), 2)
-        pen.setCosmetic(True)
-        item.setPen(pen)
+
+        if result.snap_type == "vertex":
+            # 实心方块。
+            path.addRect(QRectF(px - s, -py - s, s * 2, s * 2))
+            item: QGraphicsPathItem = QGraphicsPathItem(path)
+            pen: QPen = QPen(snap_color(), 1.5)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+            item.setBrush(QBrush(snap_color()))
+        else:
+            # 边捕捉：空心菱形。
+            diamond: QPainterPath = QPainterPath()
+            diamond.moveTo(px, -py - s)
+            diamond.lineTo(px + s, -py)
+            diamond.lineTo(px, -py + s)
+            diamond.lineTo(px - s, -py)
+            diamond.closeSubpath()
+            item = QGraphicsPathItem(diamond)
+            pen = QPen(snap_edge_color(), 1.5)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+            item.setBrush(Qt.BrushStyle.NoBrush)
+
+            # 边高亮虚线。
+            if len(result.source_coords) >= 2:
+                (ax, ay), (bx, by) = result.source_coords[:2]
+                edge_path: QPainterPath = QPainterPath()
+                edge_path.moveTo(ax, -ay)
+                edge_path.lineTo(bx, -by)
+                edge_pen: QPen = QPen(snap_edge_color(), 1.5, Qt.PenStyle.DashLine)
+                edge_pen.setCosmetic(True)
+                edge_item: QGraphicsPathItem = QGraphicsPathItem(edge_path)
+                edge_item.setPen(edge_pen)
+                edge_item.setZValue(2999)
+                self._scene.addItem(edge_item)
+                self._snap_edge_marker = edge_item
+
         item.setZValue(3000)
         self._scene.addItem(item)
         self._snap_marker = item
 
     def _snapped_position(self, screen_pos: QPoint) -> QPoint:
         """返回捕捉后的屏幕坐标；未启用或无命中时返回原坐标。"""
-        if not self._snapping_enabled:
-            return screen_pos
-        snap_pt: Point | None = self._find_snap_target(
-            self._screen_to_map_point(screen_pos)
+        snap_result: SnapResult | None = self._snap_engine.find_snap(
+            self._screen_to_map_point(screen_pos),
+            self._map_units_per_pixel,
+            self._last_snapshot.active_layer_id if self._last_snapshot else None,
         )
-        if snap_pt is None:
+        if snap_result is None:
             return screen_pos
-        snap_scene: QPointF = QPointF(snap_pt.x, -snap_pt.y)
+        snap_scene: QPointF = QPointF(snap_result.map_point.x, -snap_result.map_point.y)
         return self.mapFromScene(snap_scene)
 
     def _update_feature_item_path(self) -> None:
@@ -1278,10 +1277,13 @@ class MapCanvas(QGraphicsView):
         return path
 
     def _clear_snap_marker(self) -> None:
-        """清除捕捉标记。"""
+        """清除捕捉标记和边高亮。"""
         if self._snap_marker is not None:
             self._scene.removeItem(self._snap_marker)
             self._snap_marker = None
+        if self._snap_edge_marker is not None:
+            self._scene.removeItem(self._snap_edge_marker)
+            self._snap_edge_marker = None
 
     def _clear_sketch(self) -> None:
         """清除数字化顶点和全部预览图元。"""
@@ -1976,17 +1978,21 @@ class MapCanvas(QGraphicsView):
             "measure_polygon",
         ):
             cursor_pos: QPoint = event.position().toPoint()
-            if self._snapping_enabled:
-                snap_pt: Point | None = self._find_snap_target(
-                    self._screen_to_map_point(cursor_pos)
+            active_id: str | None = (
+                self._last_snapshot.active_layer_id if self._last_snapshot else None
+            )
+            snap_result: SnapResult | None = self._snap_engine.find_snap(
+                self._screen_to_map_point(cursor_pos),
+                self._map_units_per_pixel,
+                active_id,
+            )
+            if snap_result is not None:
+                self._show_snap_marker(snap_result)
+                # 把捕捉点反算回屏幕坐标用于预览。
+                snap_scene: QPointF = QPointF(
+                    snap_result.map_point.x, -snap_result.map_point.y
                 )
-                if snap_pt is not None:
-                    self._show_snap_marker(snap_pt)
-                    # 把捕捉点反算回屏幕坐标用于预览。
-                    snap_scene: QPointF = QPointF(snap_pt.x, -snap_pt.y)
-                    cursor_pos = self.mapFromScene(snap_scene)
-                else:
-                    self._clear_snap_marker()
+                cursor_pos = self.mapFromScene(snap_scene)
             else:
                 self._clear_snap_marker()
             self._rebuild_sketch_preview(cursor_pos)
@@ -2305,8 +2311,11 @@ class MapCanvas(QGraphicsView):
                 continue
             for item in items:
                 item.setVisible(layer_visible)
-        if queryable_layer_ids != self._snap_layer_ids:
-            self._build_snap_index(self._last_snapshot)
+        if queryable_ids != self._snap_engine.indexed_layer_ids:
+            self._snap_engine.build_index(
+                self._last_snapshot, queryable_ids,
+                self._last_snapshot.active_layer_id,
+            )
 
     def _ensure_pan_area(self) -> None:
         """确保当前视口周围存在可供手形拖动的场景范围。"""

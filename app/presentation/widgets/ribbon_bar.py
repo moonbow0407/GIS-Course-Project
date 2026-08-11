@@ -332,7 +332,17 @@ class RibbonBar(QWidget):
                                 RibbonActionSpec("add_polygon_feature", "面", "▣"),
                             ),
                         ),
-                        RibbonActionSpec("toggle_snapping", "捕捉", "⊙", checkable=True),
+                        RibbonActionSpec(
+                            "toggle_snapping",
+                            "捕捉",
+                            "⊙",
+                            checkable=True,
+                            children=(
+                                RibbonActionSpec(
+                                    "snapping_settings", "捕捉设置…", "⚙"
+                                ),
+                            ),
+                        ),
                         RibbonActionSpec("edit_feature", "修改属性", "✎", "#d97706"),
                         RibbonActionSpec("edit_geometry", "编辑几何要素", "⬡", "#d97706"),
                         RibbonActionSpec("move_feature", "移动要素", "↕", "#d97706"),

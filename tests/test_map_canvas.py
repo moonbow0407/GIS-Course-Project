@@ -162,7 +162,8 @@ def test_scale_hidden_layers_are_excluded_from_query_and_snapping() -> None:
 
     assert application is not None
     assert canvas.queryable_layer_ids() == (visible_layer.layer_id,)
-    assert canvas._snap_coords == [(0.0, 0.0)]
+    # 捕捉引擎仅索引可见且未超比例范围的图层；尺度受限图层不在索引中。
+    assert canvas.snap_engine.indexed_layer_ids == frozenset({visible_layer.layer_id})
 
 
 def test_canvas_full_extent_uses_relative_margin_for_small_geographic_bounds() -> None:
