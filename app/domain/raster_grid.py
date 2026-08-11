@@ -86,7 +86,7 @@ class RasterGrid:
         return (
             self.width == other.width
             and self.height == other.height
-            and self.crs == other.crs
+            and self.crs.equals(other.crs, ignore_axis_order=True)
             and _affine_close(self.transform, other.transform)
         )
 

@@ -10,16 +10,20 @@ from app.application.gis_application import GisApplication
 from app.application.symbology_service import (
     apply_raster_symbology,
     create_graduated_symbology,
+    create_raster_classified_symbology,
     create_unique_value_symbology,
 )
 from app.domain.feature import Feature
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.symbology import (
+    RasterClass,
     RasterRendererType,
     RasterSymbology,
     StretchType,
     VectorRendererType,
+    raster_symbology_from_dict,
+    symbology_to_dict,
 )
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.file_io.auto_reader import AutoDataReader
@@ -109,6 +113,55 @@ def test_single_band_raster_stretch_generates_color_ramp_and_transparent_nodata(
     assert styled.image_data[0, 0, :3].tolist() == [247, 251, 255]
     assert styled.image_data[1, 0, :3].tolist() == [8, 48, 107]
     assert styled.image_data[1, 1, 3] == 0
+
+
+def test_classified_raster_uses_discrete_colors_and_round_trips() -> None:
+    """重分类值应按离散颜色渲染，工程保存后分类配置仍可恢复。"""
+    data = np.asarray([[[1.0, 2.0], [3.0, 99.0]]])
+    valid = np.asarray([[True, True], [True, False]], dtype=np.bool_)
+    layer = RasterLayer.create(
+        name="重分类",
+        raster_data=data,
+        image_data=np.zeros((2, 2, 4), dtype=np.uint8),
+        valid_mask=valid,
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0, 0, 2, 2),
+    )
+    config = create_raster_classified_symbology((1.0, 2.0, 3.0))
+
+    styled = apply_raster_symbology(layer, config)
+
+    assert styled.image_data[0, 0, :3].tolist() == [78, 121, 167]
+    assert styled.image_data[0, 1, :3].tolist() == [242, 142, 43]
+    assert styled.image_data[1, 0, :3].tolist() == [89, 161, 79]
+    assert styled.image_data[1, 1, 3] == 0
+    restored = raster_symbology_from_dict(symbology_to_dict(config))
+    assert restored == config
+
+
+def test_raster_classification_accepts_custom_class_visibility() -> None:
+    """分类渲染器应支持隐藏某个等级并显示未匹配值颜色。"""
+    data = np.asarray([[[1.0, 2.0]]])
+    layer = RasterLayer.create(
+        name="分类",
+        raster_data=data,
+        image_data=np.zeros((1, 2, 4), dtype=np.uint8),
+        valid_mask=np.ones((1, 2), dtype=np.bool_),
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0, 0, 2, 1),
+    )
+    config = RasterSymbology(
+        renderer_type=RasterRendererType.CLASSIFIED,
+        classes=(RasterClass(1.0, "一级", "#FF0000", visible=False),),
+        other_color="#00FF00",
+    )
+
+    styled = apply_raster_symbology(layer, config)
+
+    assert styled.image_data[0, 0, 3] == 0
+    assert styled.image_data[0, 1, :3].tolist() == [0, 255, 0]
 
 
 def test_application_replaces_symbology_without_changing_layer_identity() -> None:

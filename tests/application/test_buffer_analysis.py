@@ -13,6 +13,7 @@ from app.application.buffer_analysis import (
     BufferRequest,
     BufferSideTypeName,
 )
+from app.application.display_projection_service import DisplayProjectionService
 from app.application.errors import DataWriteFailed, InvalidBufferParameters
 from app.application.gis_application import GisApplication
 from app.application.ports import DataReader, DataWriter
@@ -20,6 +21,9 @@ from app.domain.feature import Feature
 from app.domain.spatial_layer import SpatialLayer
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.file_io.geopandas_vector_writer import GeoPandasVectorWriter
+from app.infrastructure.projection.pyproj_coordinate_transformer import (
+    PyprojCoordinateTransformer,
+)
 
 
 class InMemoryDataReader(DataReader):
@@ -242,6 +246,9 @@ def test_buffer_distance_unit_works_for_geographic_input_crs(tmp_path: Path) -> 
     application: GisApplication = GisApplication(
         InMemoryDataReader(geographic_layer),
         data_writer=writer,
+        display_projection_service=DisplayProjectionService(
+            coordinate_transformer=PyprojCoordinateTransformer()
+        ),
     )
     application.open_data(Path("geographic_points.geojson"))
 
@@ -256,9 +263,11 @@ def test_buffer_distance_unit_works_for_geographic_input_crs(tmp_path: Path) -> 
 
     output_layer = cast(VectorLayer, writer.layer)
     bounds = output_layer.features[0].geometry.bounds
-    assert 0.008 < abs(bounds[0]) < 0.010
-    assert 0.008 < abs(bounds[1]) < 0.010
-    assert output_layer.crs == CRS.from_epsg(4326)
+    assert 164000.0 < bounds[0] < 166000.0
+    assert output_layer.crs is not None
+    assert output_layer.crs.is_projected
+    assert application.analysis_runs[0].parameters["calculation_crs"] == output_layer.crs.to_string()
+    assert 0.0 < abs(bounds[1]) < 1000.1
 
 
 def test_line_buffer_supports_left_side_only(tmp_path: Path) -> None:

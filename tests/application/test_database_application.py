@@ -11,6 +11,7 @@ from app.application.database_models import (
     DatabaseLayerInfo,
     DatabaseServerInfo,
 )
+from app.application.display_projection_service import DisplayProjectionService
 from app.application.errors import DatabaseNotConfigured, DatabaseNotConnected
 from app.application.gis_application import GisApplication
 from app.application.results import OpenDataResult
@@ -18,6 +19,9 @@ from app.domain.feature import Feature
 from app.domain.map_document import MapDocument
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.file_io.auto_reader import AutoDataReader
+from app.infrastructure.projection.pyproj_coordinate_transformer import (
+    PyprojCoordinateTransformer,
+)
 
 
 @dataclass
@@ -92,29 +96,33 @@ def test_database_import_uses_active_vector_layer() -> None:
     assert service.imported_layer.layer_id == "source"
 
 
-def test_database_load_uses_current_display_crs_and_adds_layer() -> None:
-    """数据库图层加载应请求当前显示 CRS，并通过工作区规则加入地图。"""
+def test_database_load_keeps_source_crs_and_display_switch_is_cache_only() -> None:
+    """数据库图层加载保留源 CRS，地图显示 CRS 切换不重新读取数据库。"""
     service: FakeDatabaseService = FakeDatabaseService()
     document: MapDocument = MapDocument()
-    document.set_display_crs(CRS.from_epsg(3857))
     application: GisApplication = GisApplication(
         AutoDataReader(),
         document=document,
         database_service=service,  # type: ignore[arg-type]
+        display_projection_service=DisplayProjectionService(
+            coordinate_transformer=PyprojCoordinateTransformer()
+        ),
     )
 
     result: OpenDataResult = application.load_database_layer(8)
 
     assert result.layer_id == "db-layer-8"
-    assert service.loaded_target_crs == CRS.from_epsg(3857)
+    assert service.loaded_target_crs is None
     assert application.snapshot().layers[0].layer.name == "数据库点图层"
-    assert application.snapshot().display_crs == CRS.from_epsg(3857)
-
-    application.set_display_crs(CRS.from_epsg(4326))
-
-    assert service.loaded_target_crs == CRS.from_epsg(4326)
-    assert application.snapshot().layers[0].layer.layer_id == "db-layer-8"
+    assert application.snapshot().layers[0].layer.crs == CRS.from_epsg(4326)
     assert application.snapshot().display_crs == CRS.from_epsg(4326)
+
+    application.set_display_crs(CRS.from_epsg(3857))
+
+    assert service.loaded_target_crs is None
+    assert application.snapshot().layers[0].layer.layer_id == "db-layer-8"
+    assert application.snapshot().layers[0].layer.crs == CRS.from_epsg(4326)
+    assert application.snapshot().display_crs == CRS.from_epsg(3857)
 
 
 def test_database_methods_fail_explicitly_when_service_is_not_configured() -> None:

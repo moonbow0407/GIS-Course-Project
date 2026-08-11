@@ -45,9 +45,12 @@ from PySide6.QtWidgets import (
 from shapely.geometry import Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
+from app.application.crs_utils import crs_equivalent
 from app.application.database_service import DatabaseService
-from app.application.errors import ApplicationError
+from app.application.display_projection_service import DisplayProjectionService
+from app.application.errors import ApplicationError, CoordinateReferenceSystemRequired
 from app.application.gis_application import GisApplication, _chaikin_smooth
+from app.application.measurement import MeasurementResult
 from app.application.project_models import MapViewState
 from app.application.raster_analysis import (
     DemAnalysisRequest,
@@ -77,6 +80,12 @@ from app.infrastructure.database.postgis_database_gateway import PostgisDatabase
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
 from app.infrastructure.project.json_project_store import JsonProjectStore
+from app.infrastructure.projection.pyproj_coordinate_transformer import (
+    PyprojCoordinateTransformer,
+)
+from app.infrastructure.projection.rasterio_raster_projector import (
+    RasterioRasterProjector,
+)
 from app.presentation.widgets.analysis_history_panel import AnalysisHistoryPanel
 from app.presentation.widgets.attribute_query_dialog import (
     AttributeQueryDialog,
@@ -96,6 +105,7 @@ from app.presentation.widgets.edit_feature_dialog import EditFeatureDialog
 from app.presentation.widgets.geometry_edit_toolbar import GeometryEditToolbar
 from app.presentation.widgets.labeling_dialog import LabelingDialog
 from app.presentation.widgets.layer_panel import LayerPanel
+from app.presentation.widgets.layer_properties_dialog import LayerPropertiesDialog
 from app.presentation.widgets.layout_toolbar import LayoutToolbar
 from app.presentation.widgets.layout_view import LayoutView
 from app.presentation.widgets.map_canvas import MapCanvas
@@ -145,11 +155,16 @@ class MainWindow(QMainWindow):
         super().__init__()
         # 应用服务：统一编排空间数据读取和地图文档操作。
         self._data_reader: AutoDataReader = AutoDataReader()
+        display_projection_service = DisplayProjectionService(
+            PyprojCoordinateTransformer(),
+            RasterioRasterProjector(),
+        )
         self._application: GisApplication = GisApplication(
             self._data_reader,
             AutoDataWriter(),
             project_store=JsonProjectStore(),
             database_service=DatabaseService(PostgisDatabaseGateway),
+            display_projection_service=display_projection_service,
         )
         # 顶部功能区：集中呈现文档规划的全部现有及预留功能入口。
         self._ribbon: RibbonBar = RibbonBar()
@@ -359,6 +374,7 @@ class MainWindow(QMainWindow):
         self._layer_panel.layer_removed.connect(self._remove_layer)
         self._layer_panel.layer_folder_requested.connect(self._open_layer_folder)
         self._layer_panel.layer_attribute_requested.connect(self._show_attribute_table)
+        self._layer_panel.layer_properties_requested.connect(self._show_layer_properties)
         self._layer_panel.layer_zoom_requested.connect(self._zoom_to_layer)
         self._layer_panel.layer_symbology_requested.connect(self._show_symbology)
         self._layer_panel.layer_labeling_changed.connect(self._change_labeling_visibility)
@@ -379,6 +395,9 @@ class MainWindow(QMainWindow):
         self._map_canvas.rectangle_queried.connect(self._on_rectangle_queried)
         self._map_canvas.feature_digitized.connect(
             self._on_feature_digitized
+        )
+        self._map_canvas.measurement_completed.connect(
+            self._on_measurement_completed
         )
         self._map_canvas.geometry_edited.connect(
             self._on_geometry_edited
@@ -580,6 +599,8 @@ class MainWindow(QMainWindow):
             "point_query_precise": lambda: self._point_query(fast=False, toggle=False),
             "rectangle_query": self._rectangle_query,
             "attribute_query": self._attribute_query,
+            "measure_length": self._measure_length,
+            "measure_area": self._measure_area,
             "show_attributes": self._show_active_attribute_table,
             "set_crs": self._set_display_crs,
             "map_settings": self._show_display_settings,
@@ -664,8 +685,21 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         db_layer_id: int = dialog.selected_layer_id()
+        source_crs_override: CRS | None = None
         try:
             result = self._application.load_database_layer(db_layer_id)
+        except CoordinateReferenceSystemRequired:
+            source_crs_override = self._prompt_layer_crs(f"数据库图层 {db_layer_id}")
+            if source_crs_override is None:
+                return
+            try:
+                result = self._application.load_database_layer(
+                    db_layer_id,
+                    source_crs_override,
+                )
+            except (ApplicationError, ValueError) as error:
+                QMessageBox.warning(self, "加载数据库图层失败", str(error))
+                return
         except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "加载数据库图层失败", str(error))
             return
@@ -678,6 +712,7 @@ class MainWindow(QMainWindow):
                 self._reload_database_layer,
                 db_layer_id,
                 current_layer_id,
+                source_crs_override,
             ),
         )
         self._refresh_workspace()
@@ -717,11 +752,26 @@ class MainWindow(QMainWindow):
         warnings: list[str] = []
         for path_string in path_strings:
             data_path: Path = Path(path_string)
+            source_crs_override: CRS | None = None
             try:
                 layer_name, accepted = self._select_geopackage_layer(data_path)
                 if not accepted:
                     continue
                 result = self._application.open_data(data_path, layer_name)
+            except CoordinateReferenceSystemRequired:
+                source_crs_override = self._prompt_layer_crs(data_path.name)
+                if source_crs_override is None:
+                    failures.append(f"{data_path.name}：未定义 CRS，已跳过。")
+                    continue
+                try:
+                    result = self._application.open_data(
+                        data_path,
+                        layer_name,
+                        source_crs_override,
+                    )
+                except (ApplicationError, ValueError) as error:
+                    failures.append(f"{data_path.name}：{error}")
+                    continue
             except (ApplicationError, ValueError) as error:
                 failures.append(f"{data_path.name}：{error}")
                 continue
@@ -738,6 +788,7 @@ class MainWindow(QMainWindow):
                     data_path,
                     layer_name,
                     current_layer_id,
+                    source_crs_override,
                 ),
             )
 
@@ -753,6 +804,25 @@ class MainWindow(QMainWindow):
         if failures:
             title: str = "部分数据打开失败" if loaded_paths else "打开数据失败"
             QMessageBox.warning(self, title, "\n".join(failures))
+
+    def _prompt_layer_crs(self, layer_name: str) -> CRS | None:
+        """在未知 CRS 数据导入前要求用户定义坐标系。"""
+        dialog: QDialog = QDialog(self)
+        dialog.setWindowTitle(f"定义数据 CRS · {layer_name}")
+        crs_widget: CrsSelectWidget = CrsSelectWidget()
+        crs_widget.set_placeholder("输入 EPSG、PROJ 或 WKT")
+        buttons: QDialogButtonBox = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout: QVBoxLayout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("数据未声明 CRS。定义只改变坐标解释，不修改坐标值。"))
+        layout.addWidget(crs_widget)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return crs_widget.crs()
 
     def _select_geopackage_layer(self, data_path: Path) -> tuple[str | None, bool]:
         """为 GeoPackage 选择内部图层，其他格式直接允许读取。
@@ -984,17 +1054,43 @@ class MainWindow(QMainWindow):
             project_path = Path(path_string)
         if not project_path.suffix:
             project_path = project_path.with_suffix(".gisproj")
+        temporary_layer_names: tuple[str, ...] = tuple(
+            layer.layer.name
+            for layer in self._application.snapshot().layers
+            if layer.layer.source_path is None
+        )
+        persist_temporary: bool = False
+        if temporary_layer_names:
+            choice = QMessageBox.question(
+                self,
+                "保存临时图层",
+                (
+                    "当前工程包含临时图层："
+                    + "、".join(temporary_layer_names)
+                    + "。是否将它们持久化到工程目录？"
+                ),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes,
+            )
+            if choice == QMessageBox.StandardButton.Cancel:
+                return False
+            persist_temporary = choice == QMessageBox.StandardButton.Yes
         try:
             result = self._application.save_project(
                 project_path,
                 self._map_canvas.capture_view_state(),
                 self._layout_view.document(),
+                persist_temporary=persist_temporary,
             )
         except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "保存工程失败", str(error))
             return False
         self._ready_label.setText(f"工程已保存  {result.path.name}")
         save_recent_project(result.path)
+        if result.warnings:
+            QMessageBox.warning(self, "工程已保存但有警告", "\n".join(result.warnings))
         return True
 
     def _save_project_action(self) -> None:
@@ -1102,6 +1198,157 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(source_path.parent)))
             return
 
+    def _show_layer_properties(self, layer_id: str) -> None:
+        """显示指定工作区图层的只读属性窗口。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        layer_snapshot: LayerSnapshot | None = next(
+            (layer for layer in snapshot.layers if layer.layer_id == layer_id),
+            None,
+        )
+        if layer_snapshot is None:
+            self.statusBar().showMessage("图层已不在当前工作区中。", 3500)
+            return
+        dialog: LayerPropertiesDialog = LayerPropertiesDialog(
+            layer_snapshot,
+            snapshot.display_crs,
+            self,
+        )
+        dialog.crs_definition_requested.connect(self._define_layer_crs)
+        dialog.reprojection_requested.connect(self._reproject_layer)
+        dialog.raster_resampling_requested.connect(
+            self._set_raster_display_resampling
+        )
+        dialog.exec()
+
+    def _set_raster_display_resampling(
+        self, layer_id: str, resampling: str
+    ) -> None:
+        """更新栅格显示重采样并重建对应显示载荷。"""
+        try:
+            self._application.set_raster_display_resampling(
+                layer_id,
+                resampling or None,
+            )
+            self._refresh_workspace()
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "设置显示重采样失败", str(error))
+
+    def _define_layer_crs(self, layer_id: str) -> None:
+        """使用 CRS 选择控件定义工程内图层 CRS 覆盖。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        layer_snapshot: LayerSnapshot | None = next(
+            (layer for layer in snapshot.layers if layer.layer_id == layer_id),
+            None,
+        )
+        if layer_snapshot is None:
+            return
+        dialog: QDialog = QDialog(self)
+        dialog.setWindowTitle("定义/修正图层 CRS")
+        crs_widget: CrsSelectWidget = CrsSelectWidget()
+        crs_widget.set_placeholder("输入 EPSG、PROJ 或 WKT")
+        if layer_snapshot.layer.crs is not None:
+            crs_widget.set_crs(layer_snapshot.layer.crs)
+        buttons: QDialogButtonBox = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout: QVBoxLayout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("该操作只保存工程内 CRS 解释，不修改源文件坐标。"))
+        layout.addWidget(crs_widget)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        crs: CRS | None = crs_widget.crs()
+        if crs is None:
+            QMessageBox.warning(self, "CRS 无效", "请输入有效的 CRS 标识。")
+            return
+        try:
+            self._application.define_layer_crs(layer_id, crs)
+            self._refresh_workspace()
+        except ApplicationError as error:
+            QMessageBox.warning(self, "定义 CRS 失败", str(error))
+
+    def _reproject_layer(self, layer_id: str) -> None:
+        """选择目标 CRS 和新文件，创建独立重投影图层。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        layer_snapshot: LayerSnapshot | None = next(
+            (layer for layer in snapshot.layers if layer.layer_id == layer_id),
+            None,
+        )
+        if layer_snapshot is None:
+            return
+        crs_dialog: QDialog = QDialog(self)
+        crs_dialog.setWindowTitle("选择重投影目标 CRS")
+        crs_widget: CrsSelectWidget = CrsSelectWidget()
+        crs_widget.set_placeholder("输入 EPSG、PROJ 或 WKT")
+        buttons: QDialogButtonBox = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(crs_dialog.accept)
+        buttons.rejected.connect(crs_dialog.reject)
+        layout: QVBoxLayout = QVBoxLayout(crs_dialog)
+        layout.addWidget(crs_widget)
+        layout.addWidget(buttons)
+        if crs_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        target_crs: CRS | None = crs_widget.crs()
+        if target_crs is None:
+            QMessageBox.warning(self, "CRS 无效", "请输入有效的目标 CRS。")
+            return
+        output_path: Path | None = None
+        persist_choice = QMessageBox.question(
+            self,
+            "重投影输出",
+            "是否将重投影结果保存为新的数据文件？选择“否”将作为临时图层加入当前工程。",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        )
+        if persist_choice == QMessageBox.StandardButton.Cancel:
+            return
+        if persist_choice == QMessageBox.StandardButton.Yes:
+            suffix: str = ".tif" if layer_snapshot.is_raster else ".gpkg"
+            filter_text: str = (
+                "GeoTIFF (*.tif *.tiff)"
+                if layer_snapshot.is_raster
+                else "GeoPackage (*.gpkg)"
+            )
+            output_text, _selected_filter = QFileDialog.getSaveFileName(
+                self,
+                "保存重投影图层",
+                f"{layer_snapshot.name}_reprojected{suffix}",
+                filter_text,
+            )
+            if not output_text:
+                return
+            output_path = Path(output_text)
+            if not output_path.suffix:
+                output_path = output_path.with_suffix(suffix)
+        try:
+            result = self._application.reproject_layer(
+                layer_id,
+                target_crs,
+                output_path,
+            )
+            self._refresh_workspace()
+            metadata = result.reprojection_metadata
+            detail: str = ""
+            if metadata is not None:
+                detail = f"；转换操作：{metadata.operation}"
+                if metadata.output_shape is not None:
+                    detail += (
+                        f"；输出网格：{metadata.output_shape[1]} × "
+                        f"{metadata.output_shape[0]}"
+                    )
+            self.statusBar().showMessage(
+                f"已创建重投影图层：{result.snapshot.layers[-1].name}{detail}",
+                5000,
+            )
+        except ApplicationError as error:
+            QMessageBox.warning(self, "重投影失败", str(error))
+
     def _restore_deleted_layer(
         self,
         layer_snapshot: LayerSnapshot,
@@ -1146,6 +1393,7 @@ class MainWindow(QMainWindow):
         data_path: Path,
         layer_name: str | None,
         current_layer_id: list[str],
+        source_crs_override: CRS | None = None,
     ) -> None:
         """重做打开数据：重新读取文件并刷新当前图层编号。
 
@@ -1156,11 +1404,21 @@ class MainWindow(QMainWindow):
             layer_name: 首次加载时解析的容器内部图层名；为空表示非容器格式。
             current_layer_id: 可变单元，更新为该次重开产生的图层编号。
         """
-        result = self._application.open_data(data_path, layer_name)
+        if source_crs_override is None:
+            result = self._application.open_data(data_path, layer_name)
+        else:
+            result = self._application.open_data(
+                data_path,
+                layer_name,
+                source_crs_override,
+            )
         current_layer_id[0] = result.layer_id
 
     def _reload_database_layer(
-        self, db_layer_id: int, current_layer_id: list[str]
+        self,
+        db_layer_id: int,
+        current_layer_id: list[str],
+        source_crs_override: CRS | None = None,
     ) -> None:
         """重做加载数据库图层：重新按数据库编号加载并刷新当前图层编号。
 
@@ -1168,7 +1426,7 @@ class MainWindow(QMainWindow):
             db_layer_id: 数据库中的图层编号。
             current_layer_id: 可变单元，更新为该次加载产生的图层编号。
         """
-        result = self._application.load_database_layer(db_layer_id)
+        result = self._application.load_database_layer(db_layer_id, source_crs_override)
         current_layer_id[0] = result.layer_id
 
     def _move_layer(self, layer_id: str, target_index: int) -> None:
@@ -1721,6 +1979,48 @@ class MainWindow(QMainWindow):
             f"属性查询：匹配 {result.count} 个要素"
         )
 
+    def _measure_length(self) -> None:
+        """激活线测量工具，结果按当前地图显示 CRS 计算。"""
+        self._start_measurement("length")
+
+    def _measure_area(self) -> None:
+        """激活面测量工具，结果按当前地图显示 CRS 计算。"""
+        self._start_measurement("area")
+
+    def _start_measurement(self, measurement_kind: str) -> None:
+        """检查地图状态并启动一次临时测量草图。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        if snapshot.display_crs is None:
+            QMessageBox.information(self, "测量", "请先打开具有 CRS 的图层。")
+            return
+        if not snapshot.layers:
+            QMessageBox.information(self, "测量", "请先打开一个图层。")
+            return
+        self._set_active_query_action(None)
+        self._set_active_digitize_action(None)
+        if measurement_kind == "length":
+            self._map_canvas.set_measure_length_tool()
+            self._ready_label.setText("测量长度：单击添加顶点，双击完成，Esc 取消")
+        else:
+            self._map_canvas.set_measure_area_tool()
+            self._ready_label.setText("测量面积：单击添加顶点，双击完成，Esc 取消")
+
+    def _on_measurement_completed(self, measurement_kind: str, geometry: BaseGeometry) -> None:
+        """接收显示 CRS 下的临时几何并显示测地或平面测量结果。"""
+        try:
+            result: MeasurementResult = (
+                self._application.measure_length(geometry)
+                if measurement_kind == "length"
+                else self._application.measure_area(geometry)
+            )
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "测量失败", str(error))
+            return
+        method_name: str = "椭球测地" if result.method == "ellipsoidal" else "平面"
+        self._ready_label.setText(
+            f"测量结果：{result.value:,.3f} {result.unit}（{method_name}）"
+        )
+
     def _add_point_feature(self) -> None:
         """激活点要素数字化工具。"""
         self._start_digitize("point", "点")
@@ -1761,6 +2061,8 @@ class MainWindow(QMainWindow):
         options: list[TargetLayerOption] = []
         for layer in snapshot.layers:
             if not isinstance(layer.layer, VectorLayer):
+                continue
+            if not self._application.can_edit_layer(layer.layer_id):
                 continue
             family: GeometryFamily | None = layer.geometry_family
             if family != GeometryFamily.MIXED and family != expected_family:
@@ -2136,6 +2438,13 @@ class MainWindow(QMainWindow):
                 continue
             if not isinstance(layer.layer, VectorLayer):
                 continue
+            if not self._application.can_edit_layer(layer.layer_id):
+                QMessageBox.warning(
+                    self,
+                    "无法编辑",
+                    "活动图层 CRS 与地图显示 CRS 不等价，请先切换地图 CRS 或重投影图层。",
+                )
+                return
             fid = layer.selected_feature_ids[0]
             for f in layer.layer.features:
                 if f.fid == fid:
@@ -2230,6 +2539,13 @@ class MainWindow(QMainWindow):
                 continue
             if not isinstance(layer.layer, VectorLayer):
                 continue
+            if not self._application.can_edit_layer(layer.layer_id):
+                QMessageBox.warning(
+                    self,
+                    "无法编辑",
+                    "活动图层 CRS 与地图显示 CRS 不等价，请先切换地图 CRS 或重投影图层。",
+                )
+                return
             fid = layer.selected_feature_ids[0]
             for f in layer.layer.features:
                 if f.fid == fid:
@@ -2260,6 +2576,13 @@ class MainWindow(QMainWindow):
                 continue
             if not isinstance(layer.layer, VectorLayer):
                 continue
+            if not self._application.can_edit_layer(layer.layer_id):
+                QMessageBox.warning(
+                    self,
+                    "无法编辑",
+                    "活动图层 CRS 与地图显示 CRS 不等价，请先切换地图 CRS 或重投影图层。",
+                )
+                return
             fid = layer.selected_feature_ids[0]
             for f in layer.layer.features:
                 if f.fid == fid:
@@ -2290,6 +2613,13 @@ class MainWindow(QMainWindow):
                 continue
             if not isinstance(layer.layer, VectorLayer):
                 continue
+            if not self._application.can_edit_layer(layer.layer_id):
+                QMessageBox.warning(
+                    self,
+                    "无法编辑",
+                    "活动图层 CRS 与地图显示 CRS 不等价，请先切换地图 CRS 或重投影图层。",
+                )
+                return
             fid = layer.selected_feature_ids[0]
             for f in layer.layer.features:
                 if f.fid == fid:
@@ -2605,6 +2935,15 @@ class MainWindow(QMainWindow):
 
     def _toggle_snapping(self) -> None:
         """切换顶点捕捉开关。"""
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        if not self._snapping_enabled and snapshot.active_layer_id is not None:
+            if not self._application.can_edit_layer(snapshot.active_layer_id):
+                QMessageBox.warning(
+                    self,
+                    "无法启用捕捉",
+                    "活动图层 CRS 与地图显示 CRS 不等价，已禁止编辑和捕捉。",
+                )
+                return
         self._snapping_enabled = not self._snapping_enabled
         self._map_canvas.set_snapping(self._snapping_enabled)
         self._ribbon.set_action_checked(
@@ -3103,6 +3442,9 @@ class MainWindow(QMainWindow):
 
     def _set_display_crs(self) -> None:
         """弹出坐标系选择对话框，并后台重建已有图层的显示坐标系。"""
+        if self._editing_layer_id is not None or self._digitize_target_layer_id is not None:
+            QMessageBox.warning(self, "无法切换 CRS", "请先提交或取消当前编辑。")
+            return
         snapshot: WorkspaceSnapshot = self._application.snapshot()
 
         dialog: QDialog = QDialog(self)
@@ -3133,7 +3475,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "坐标系设置失败", "请输入有效的坐标系标识。")
             return
 
-        if snapshot.display_crs == target_crs:
+        if crs_equivalent(snapshot.display_crs, target_crs):
             self._application.set_display_crs(target_crs)
             self._ready_label.setText(f"地图 CRS 已设置为 {self._format_crs(target_crs)}")
             return
@@ -3779,9 +4121,9 @@ class MainWindow(QMainWindow):
         page = document.page
 
         if selected_filter.startswith("PDF"):
+            from PySide6.QtCore import QMarginsF, QRectF, QSizeF
             from PySide6.QtGui import QPageSize
             from PySide6.QtPrintSupport import QPrinter
-            from PySide6.QtCore import QMarginsF, QRectF, QSizeF
 
             pixmap = render_full_page(document, snapshot, view_dpi=self._layout_view._view_dpi)
 

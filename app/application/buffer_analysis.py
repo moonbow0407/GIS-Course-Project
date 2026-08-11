@@ -10,6 +10,7 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as transform_geometry
 from shapely.ops import unary_union
 
+from app.application.crs_utils import crs_equivalent
 from app.application.errors import (
     BufferAnalysisFailed,
     EmptyBufferResult,
@@ -228,7 +229,7 @@ def reproject_vector_layer(layer: VectorLayer, target_crs: CRS) -> VectorLayer:
         raise InvalidBufferParameters(
             f"输入图层“{layer.name}”没有坐标参考系统，无法执行带单位的缓冲区分析。"
         )
-    if layer.crs == target_crs:
+    if crs_equivalent(layer.crs, target_crs):
         return layer
     try:
         projected_features: tuple[Feature, ...] = reproject_features(
@@ -326,7 +327,7 @@ def reproject_features(
     target_crs: CRS,
 ) -> tuple[Feature, ...]:
     """将分析结果几何转换回地图 CRS，属性和要素编号保持不变。"""
-    if source_crs == target_crs:
+    if crs_equivalent(source_crs, target_crs):
         return features
     try:
         transformer: Transformer = Transformer.from_crs(

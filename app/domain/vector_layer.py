@@ -73,6 +73,9 @@ class VectorLayer:
     # 动态标注配置：为空表示该图层尚未配置标注。
     labeling: LabelingConfig | None = None
 
+    # CRS 是否来自工程内定义/修正覆盖，而非源文件声明。
+    crs_override: bool = False
+
     # 图层范围：根据全部有效几何计算得到的最小包围矩形。
     bounds: Bounds = field(init=False)
 
@@ -166,6 +169,7 @@ class VectorLayer:
         symbology: VectorSymbology | None = None,
         labeling: LabelingConfig | None = None,
         geometry_family: GeometryFamily | None = None,
+        crs_override: bool = False,
     ) -> "VectorLayer":
         """创建矢量图层，并在未提供编号时生成稳定的随机编号。
 
@@ -184,4 +188,5 @@ class VectorLayer:
             symbology=symbology,
             labeling=labeling,
             geometry_family=geometry_family,
+            crs_override=crs_override,
         )

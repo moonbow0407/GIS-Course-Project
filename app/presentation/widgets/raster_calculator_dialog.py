@@ -138,6 +138,12 @@ class RasterCalculatorDialog(QDialog):
         self._name_edit: QLineEdit = QLineEdit("栅格计算结果")
         out_form.addRow("图层名称:", self._name_edit)
 
+        self._reference_combo: QComboBox = QComboBox()
+        self._reference_combo.addItem("不指定（要求输入网格完全一致）", None)
+        for layer in self._raster_layers:
+            self._reference_combo.addItem(f"{layer.name}（参考网格）", layer.layer_id)
+        out_form.addRow("参考栅格:", self._reference_combo)
+
         path_row: QHBoxLayout = QHBoxLayout()
         self._path_edit: QLineEdit = QLineEdit(
             str(Path.cwd() / "raster_calc_result.tif")
@@ -325,4 +331,9 @@ class RasterCalculatorDialog(QDialog):
             band_mappings=tuple(self._mappings),
             output_layer_name=output_name,
             output_path=output_path,
+            reference_layer_id=(
+                str(self._reference_combo.currentData())
+                if self._reference_combo.currentData() is not None
+                else None
+            ),
         )

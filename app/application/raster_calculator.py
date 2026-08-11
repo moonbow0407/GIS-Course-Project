@@ -16,6 +16,9 @@ from pathlib import Path
 import numpy as np
 from affine import Affine
 from numpy.typing import NDArray
+from pyproj import CRS
+
+from app.application.crs_utils import crs_equivalent
 
 # ---------------------------------------------------------------------------
 # 数据结构
@@ -88,6 +91,9 @@ class RasterCalculatorRequest:
     nodata: float | None = None
     """可选的统一 NoData 值。"""
 
+    reference_layer_id: str | None = None
+    """可选的显式参考栅格；其他同 CRS 网格会临时对齐到它。"""
+
     def __post_init__(self) -> None:
         if not self.expression.strip():
             raise ValueError("表达式不能为空。")
@@ -106,7 +112,7 @@ class RasterCalculatorRequest:
 
 def validate_band_alignment(
     transforms: tuple[Affine, ...],
-    crss: tuple[object | None, ...],
+    crss: tuple[CRS | None, ...],
     shapes: tuple[tuple[int, int], ...],
     layer_names: tuple[str, ...],
 ) -> list[str]:
@@ -126,7 +132,7 @@ def validate_band_alignment(
     if len(crss) >= 2:
         first_crs = crss[0]
         for i in range(1, len(crss)):
-            if first_crs != crss[i]:
+            if not crs_equivalent(first_crs, crss[i]):
                 warnings.append(
                     f"坐标系不一致：{layer_names[0]} 与 "
                     f"{layer_names[i]} 的 CRS 不同。"
@@ -144,15 +150,16 @@ def validate_band_alignment(
     if len(transforms) >= 2:
         first_tf = transforms[0]
         for i in range(1, len(transforms)):
-            if (
-                abs(first_tf.a - transforms[i].a) > 1e-9
-                or abs(first_tf.e - transforms[i].e) > 1e-9
+            current_tf = transforms[i]
+            if any(
+                abs(left - right) > 1e-9
+                for left, right in zip(first_tf[:], current_tf[:], strict=True)
             ):
                 warnings.append(
-                    f"像元大小不一致：{layer_names[0]} 为 "
+                    f"像元网格不一致：{layer_names[0]} 为 "
                     f"{first_tf.a:.6f}×{abs(first_tf.e):.6f}，"
                     f"{layer_names[i]} 为 "
-                    f"{transforms[i].a:.6f}×{abs(transforms[i].e):.6f}。"
+                    f"{current_tf.a:.6f}×{abs(current_tf.e):.6f}。"
                 )
                 break
 

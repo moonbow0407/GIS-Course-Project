@@ -63,6 +63,9 @@ class RasterLayer:
     # 符号系统：为空时根据波段数量生成默认 RGB 或灰度拉伸配置。
     symbology: RasterSymbology | None = None
 
+    # CRS 是否来自工程内定义/修正覆盖，而非源文件声明。
+    crs_override: bool = False
+
     # 与 image_data 同行列的低分辨率原始像元，用于不加载全图的符号重建。
     # 读取器可以只保留用于首屏显示的波段，display_band_indexes 记录其原始波段编号。
     display_values: NDArray[np.generic] | None = field(
@@ -248,6 +251,7 @@ class RasterLayer:
         display_values: NDArray[np.generic] | None = None,
         display_valid_mask: NDArray[np.bool_] | None = None,
         display_band_indexes: tuple[int, ...] = (),
+        crs_override: bool = False,
     ) -> "RasterLayer":
         """创建已经加载完整分析像元的栅格图层。"""
         return cls(
@@ -266,6 +270,7 @@ class RasterLayer:
             display_values=display_values,
             display_valid_mask=display_valid_mask,
             display_band_indexes=display_band_indexes,
+            crs_override=crs_override,
         )
 
     @classmethod
@@ -287,6 +292,7 @@ class RasterLayer:
         display_values: NDArray[np.generic] | None = None,
         display_valid_mask: NDArray[np.bool_] | None = None,
         display_band_indexes: tuple[int, ...] = (),
+        crs_override: bool = False,
     ) -> "RasterLayer":
         """创建只含显示预览的栅格图层，并注册完整像元延迟加载器。"""
         return cls(
@@ -305,6 +311,7 @@ class RasterLayer:
             display_values=display_values,
             display_valid_mask=display_valid_mask,
             display_band_indexes=display_band_indexes,
+            crs_override=crs_override,
             _analysis_loader=analysis_loader,
             _raster_shape_hint=raster_shape,
             _band_count_hint=band_count,
@@ -317,6 +324,7 @@ class RasterLayer:
         name: str,
         source_path: Path | None,
         symbology: RasterSymbology | None,
+        crs_override: bool | None = None,
     ) -> "RasterLayer":
         """复制图层身份而不触发延迟加载。"""
         return type(self)(
@@ -332,6 +340,31 @@ class RasterLayer:
             nodata=self.nodata,
             source_path=source_path,
             symbology=symbology,
+            crs_override=self.crs_override if crs_override is None else crs_override,
+            display_values=self.display_values,
+            display_valid_mask=self.display_valid_mask,
+            display_band_indexes=self.display_band_indexes,
+            _analysis_loader=self._analysis_loader,
+            _raster_shape_hint=self.raster_shape,
+            _band_count_hint=self.band_count,
+        )
+
+    def with_crs(self, crs: CRS, *, crs_override: bool = True) -> "RasterLayer":
+        """只更新 CRS 解释，不修改栅格像元、仿射变换或源文件。"""
+        return type(self)(
+            layer_id=self.layer_id,
+            name=self.name,
+            _raster_data=self._raster_data,
+            image_data=self.image_data,
+            _valid_mask=self._valid_mask,
+            transform=self.transform,
+            display_transform=self.display_transform,
+            crs=crs,
+            bounds=self.bounds,
+            nodata=self.nodata,
+            source_path=self.source_path,
+            symbology=self.symbology,
+            crs_override=crs_override,
             display_values=self.display_values,
             display_valid_mask=self.display_valid_mask,
             display_band_indexes=self.display_band_indexes,

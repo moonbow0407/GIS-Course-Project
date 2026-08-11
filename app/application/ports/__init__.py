@@ -23,8 +23,9 @@ class VectorReader(Protocol):
         path: Path,
         target_crs: CRS | None = None,
         layer_name: str | None = None,
+        source_crs_override: CRS | None = None,
     ) -> VectorLayer:
-        """读取指定文件，并在需要时转换到目标坐标参考系统。"""
+        """读取指定文件，可定义源 CRS，并可选转换到目标 CRS。"""
         ...
 
 
@@ -36,8 +37,9 @@ class DataReader(Protocol):
         path: Path,
         target_crs: CRS | None = None,
         layer_name: str | None = None,
+        source_crs_override: CRS | None = None,
     ) -> SpatialLayer:
-        """读取指定空间数据，并在需要时转换到目标坐标参考系统。"""
+        """读取指定空间数据，可定义源 CRS，并可选转换到目标 CRS。"""
         ...
 
 

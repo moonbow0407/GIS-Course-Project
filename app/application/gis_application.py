@@ -1,6 +1,7 @@
 """GIS 应用功能统一入口。"""
 
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -11,7 +12,8 @@ from affine import Affine
 from pyproj import CRS
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import split as split_geometry, unary_union
+from shapely.ops import split as split_geometry
+from shapely.ops import unary_union
 
 from app.application.analysis_environment import AnalysisEnvironment
 from app.application.buffer_analysis import (
@@ -19,19 +21,23 @@ from app.application.buffer_analysis import (
     buffer_features,
     distance_to_crs_units,
     distance_to_meters,
-    reproject_features,
     reproject_vector_layer,
     resolve_buffer_analysis_crs,
 )
+from app.application.crs_utils import crs_equivalent
 from app.application.database_models import (
     DatabaseConnectionConfig,
     DatabaseLayerInfo,
     DatabaseServerInfo,
 )
 from app.application.database_service import DatabaseService
+from app.application.display_projection_service import (
+    DisplayCacheManager,
+    DisplayProjectionService,
+)
 from app.application.errors import (
     ApplicationError,
-    BufferAnalysisFailed,
+    CoordinateReferenceSystemRequired,
     DatabaseImportFailed,
     DatabaseNotConfigured,
     DataWriteFailed,
@@ -51,6 +57,7 @@ from app.application.errors import (
     UnsupportedOverlayInput,
     WorkspaceOperationCancelled,
 )
+from app.application.measurement import MeasurementResult, measure_area, measure_length
 from app.application.overlay_analysis import (
     OverlayRequest,
     operation_label,
@@ -82,6 +89,7 @@ from app.application.raster_calculator import (
     generate_display_image,
     validate_band_alignment,
 )
+from app.application.reprojection_service import ReprojectionService
 from app.application.results import (
     AnalysisResultPersisted,
     BufferAnalysisResult,
@@ -97,6 +105,7 @@ from app.application.results import (
     RasterCalculatorResult,
     RasterClipResult,
     RasterReclassifyResult,
+    ReprojectionMetadata,
     SelectedFeature,
     SelectionResult,
     WorkspaceSnapshot,
@@ -260,12 +269,17 @@ class GisApplication:
         document: MapDocument | None = None,
         project_store: ProjectStore | None = None,
         database_service: DatabaseService | None = None,
+        display_projection_service: DisplayProjectionService | None = None,
     ) -> None:
         """使用空间数据读取端口和可选地图文档初始化应用入口。"""
         self.data_reader = data_reader
         self.data_writer = data_writer
         self.project_store = project_store
         self.database_service = database_service
+        self._display_projection_service = (
+            display_projection_service or DisplayProjectionService()
+        )
+        self._display_cache = DisplayCacheManager(self._display_projection_service)
 
         # 地图文档：作为图层、显隐、活动状态和选择集的唯一事实来源。
         self._document: MapDocument = document or MapDocument()
@@ -322,11 +336,21 @@ class GisApplication:
             for name, view_state in self._bookmarks.items()
         )
 
-    def open_vector(self, path: Path, layer_name: str | None = None) -> OpenVectorResult:
+    def open_vector(
+        self,
+        path: Path,
+        layer_name: str | None = None,
+        source_crs_override: CRS | None = None,
+    ) -> OpenVectorResult:
         """兼容旧调用方式读取矢量文件，并返回打开数据结果。"""
-        return self.open_data(path, layer_name)
+        return self.open_data(path, layer_name, source_crs_override)
 
-    def open_data(self, path: Path, layer_name: str | None = None) -> OpenDataResult:
+    def open_data(
+        self,
+        path: Path,
+        layer_name: str | None = None,
+        source_crs_override: CRS | None = None,
+    ) -> OpenDataResult:
         """读取空间文件并原子加入地图文档。
 
         参数:
@@ -339,29 +363,129 @@ class GisApplication:
             ApplicationError: 文件不存在、格式不支持或数据无法读取时抛出。
             ValueError: 图层坐标系与地图文档无法安全叠加时抛出。
         """
-        if layer_name is None:
-            layer = self.data_reader.read(path, self._document.display_crs)
+        if source_crs_override is None:
+            # 保留旧版测试/插件读取器的三参数调用兼容性；新读取器仍返回原始 CRS。
+            if layer_name is None:
+                layer = self.data_reader.read(path)
+            else:
+                layer = self.data_reader.read(path, None, layer_name)
         else:
-            layer = self.data_reader.read(path, self._document.display_crs, layer_name)
+            layer = self.data_reader.read(
+                path,
+                None,
+                layer_name,
+                source_crs_override,
+            )
+        if layer.crs is None:
+            raise CoordinateReferenceSystemRequired(
+                "数据未声明坐标参考系统，请先定义或修正 CRS 后再导入。"
+            )
+        if source_crs_override is not None:
+            layer = self._with_crs_override(layer, True)
         self._document.add_layer(layer)
         self._modified = True
-        warning: str | None = "数据未声明坐标参考系统。" if layer.crs is None else None
         return OpenDataResult(
             layer_id=layer.layer_id,
             snapshot=self.snapshot(),
-            warning=warning,
         )
 
     def add_layer(self, layer: SpatialLayer) -> OpenDataResult:
         """将已经由其他数据源构造好的图层加入当前地图文档。"""
+        if layer.crs is None:
+            raise CoordinateReferenceSystemRequired(
+                "图层未定义 CRS，请先定义或修正 CRS 后再加入地图。"
+            )
         self._document.add_layer(layer)
         self._modified = True
-        warning: str | None = "数据未声明坐标参考系统。" if layer.crs is None else None
         return OpenDataResult(
             layer_id=layer.layer_id,
             snapshot=self.snapshot(),
-            warning=warning,
         )
+
+    def define_layer_crs(self, layer_id: str, crs: CRS) -> WorkspaceSnapshot:
+        """定义或修正图层 CRS，只保存工程内解释，不改写源数据坐标。"""
+        layer: SpatialLayer = self._find_layer(layer_id)
+        corrected_layer: SpatialLayer = self._with_crs_override(layer, True, crs)
+        self._document.replace_layer(corrected_layer)
+        if self._document.display_crs is None:
+            self._document.set_display_crs(crs)
+        self._modified = True
+        return self.snapshot()
+
+    def can_edit_layer(self, layer_id: str) -> bool:
+        """返回图层是否可在当前地图显示 CRS 下编辑和捕捉。"""
+        layer: SpatialLayer = self._find_layer(layer_id)
+        return (
+            isinstance(layer, VectorLayer)
+            and layer.crs is not None
+            and self._document.display_crs is not None
+            and crs_equivalent(layer.crs, self._document.display_crs)
+        )
+
+    def reproject_layer(
+        self,
+        layer_id: str,
+        target_crs: CRS,
+        output_path: Path | None = None,
+        raster_resampling: str | None = None,
+    ) -> OpenDataResult:
+        """创建独立重投影图层；输入图层和源文件保持不变。"""
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if output_path is not None:
+            resolved_output_path: Path = output_path.expanduser().resolve()
+            if (
+                layer.source_path is not None
+                and resolved_output_path == layer.source_path.expanduser().resolve()
+            ):
+                raise LayerReprojectionFailed("重投影输出不能覆盖输入数据源。")
+            if resolved_output_path.exists():
+                raise LayerReprojectionFailed(
+                    f"重投影输出已存在：{resolved_output_path.name}。请使用新文件。"
+                )
+        resolved_resampling = raster_resampling
+        if (
+            resolved_resampling is None
+            and isinstance(layer, RasterLayer)
+            and layer.symbology is not None
+            and layer.symbology.renderer_type is RasterRendererType.CLASSIFIED
+        ):
+            resolved_resampling = "nearest"
+        service = ReprojectionService(self._display_projection_service, self.data_writer)
+        projected = service.execute(
+            layer,
+            target_crs,
+            output_path=output_path,
+            raster_resampling=resolved_resampling,
+        )
+        if output_path is not None:
+            output_layer_name = (
+                projected.source_layer_name if isinstance(projected, VectorLayer) else None
+            )
+            service.persist(projected, output_path, output_layer_name)
+        result: OpenDataResult = self.add_layer(projected)
+        metadata: ReprojectionMetadata | None = service.metadata
+        if metadata is not None:
+            reprojection_parameters: dict[str, object] = {
+                "source_crs": metadata.source_crs,
+                "target_crs": metadata.target_crs,
+                "operation": metadata.operation,
+                "resampling": metadata.resampling,
+                "output_shape": metadata.output_shape,
+                "output_transform": metadata.output_transform,
+                "output_bounds": metadata.output_bounds,
+                "feature_count": metadata.feature_count,
+            }
+            run = self._create_analysis_run(
+                algorithm_id="reproject",
+                input_layer_ids=(layer_id,),
+                parameters=reprojection_parameters,
+                output_layer_id=projected.layer_id,
+                output_path=output_path,
+                output_layer_name=projected.name,
+            )
+            self._analysis_runs = self._analysis_runs + (run,)
+            self._modified = True
+        return replace(result, reprojection_metadata=metadata)
 
     def create_empty_layer(
         self,
@@ -427,10 +551,32 @@ class GisApplication:
             raise DatabaseImportFailed("数据库模块当前只支持导入矢量图层。")
         return self._require_database_service().import_layer(layer)
 
-    def load_database_layer(self, layer_id: int) -> OpenDataResult:
-        """加载数据库图层，并按当前地图 CRS 统一后加入工作区。"""
-        target_crs: CRS | None = self._document.display_crs
-        layer: VectorLayer = self._require_database_service().load_layer(layer_id, target_crs)
+    def load_database_layer(
+        self,
+        layer_id: int,
+        source_crs_override: CRS | None = None,
+    ) -> OpenDataResult:
+        """加载数据库图层，保留数据库源 CRS 后加入工作区。"""
+        layer: VectorLayer = self._require_database_service().load_layer(layer_id, None)
+        if source_crs_override is not None:
+            if layer.crs is None:
+                overridden_layer: SpatialLayer = self._with_crs_override(
+                    layer, True, source_crs_override
+                )
+                if not isinstance(overridden_layer, VectorLayer):
+                    raise DatabaseImportFailed("数据库图层 CRS 修正后不是矢量图层。")
+                layer = overridden_layer
+            elif not crs_equivalent(layer.crs, source_crs_override):
+                overridden_layer = self._with_crs_override(
+                    layer, True, source_crs_override
+                )
+                if not isinstance(overridden_layer, VectorLayer):
+                    raise DatabaseImportFailed("数据库图层 CRS 修正后不是矢量图层。")
+                layer = overridden_layer
+        if layer.crs is None:
+            raise CoordinateReferenceSystemRequired(
+                "数据库图层未声明坐标参考系统，请先定义或修正 CRS 后再导入。"
+            )
         return self.add_layer(layer)
 
     def remove_layer(self, layer_id: str) -> WorkspaceSnapshot:
@@ -531,6 +677,7 @@ class GisApplication:
             database_layer_id=layer.database_layer_id,
             symbology=symbology,
             labeling=layer.labeling,
+            crs_override=layer.crs_override,
         )
         self._document.replace_layer(updated_layer)
         self._modified = True
@@ -555,6 +702,7 @@ class GisApplication:
             database_layer_id=layer.database_layer_id,
             symbology=layer.symbology,
             labeling=labeling,
+            crs_override=layer.crs_override,
         )
         self._document.replace_layer(updated_layer)
         self._modified = True
@@ -611,6 +759,25 @@ class GisApplication:
         self._modified = True
         return self.snapshot()
 
+    def set_raster_display_resampling(
+        self, layer_id: str, resampling: str | None
+    ) -> WorkspaceSnapshot:
+        """设置栅格显示重采样覆盖，不改变分析像元和领域图层 CRS。"""
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, RasterLayer):
+            raise ValueError("显示重采样设置只能应用到栅格图层。")
+        if resampling is not None and resampling not in {
+            "nearest",
+            "bilinear",
+            "cubic",
+            "average",
+            "mode",
+        }:
+            raise ValueError(f"不支持的显示重采样方法：{resampling}")
+        self._document.set_raster_display_resampling(layer_id, resampling)
+        self._modified = True
+        return self.snapshot()
+
     def identify_features(
         self,
         point: Point,
@@ -633,18 +800,20 @@ class GisApplication:
             set(query_layer_ids) if query_layer_ids is not None else None
         )
         # 几何类型罚分系数：点 0、线 1、面 2，每级罚 tolerance/100。
-        type_penalty: float = tolerance * 0.01
         ordered_layers: tuple[VectorLayer, ...] = self._point_query_order()
         for layer in ordered_layers:
             if not self._document.is_visible(layer.layer_id) or (
                 queryable_ids is not None and layer.layer_id not in queryable_ids
             ):
                 continue
+            layer_point: BaseGeometry = self._query_geometry_for_layer(point, layer)
+            layer_tolerance: float = self._query_tolerance_for_layer(point, layer, tolerance)
+            type_penalty: float = layer_tolerance * 0.01
             for feature in layer.features:
                 if feature.geometry.is_empty:
                     continue
-                distance: float = float(feature.geometry.distance(point))
-                if distance <= tolerance:
+                distance: float = float(feature.geometry.distance(layer_point))
+                if distance <= layer_tolerance:
                     effective: float = (
                         distance
                         + _geometry_priority(feature.geometry.geom_type) * type_penalty
@@ -687,7 +856,6 @@ class GisApplication:
             self._document.clear_selection()
         self._modified = True
         # 几何类型罚分系数。
-        type_penalty: float = tolerance * 0.01
         queryable_ids: set[str] | None = (
             set(query_layer_ids) if query_layer_ids is not None else None
         )
@@ -699,14 +867,17 @@ class GisApplication:
                 queryable_ids is not None and layer.layer_id not in queryable_ids
             ):
                 continue
+            layer_point: BaseGeometry = self._query_geometry_for_layer(point, layer)
+            layer_tolerance: float = self._query_tolerance_for_layer(point, layer, tolerance)
+            type_penalty: float = layer_tolerance * 0.01
             nearest_feature: Feature | None = None
             nearest_effective: float = float("inf")
             feature: Feature
             for feature in layer.features:
                 if feature.geometry.is_empty:
                     continue
-                distance: float = float(feature.geometry.distance(point))
-                if distance > tolerance:
+                distance: float = float(feature.geometry.distance(layer_point))
+                if distance > layer_tolerance:
                     continue
                 effective: float = (
                     distance
@@ -768,10 +939,11 @@ class GisApplication:
                 queryable_ids is not None and layer.layer_id not in queryable_ids
             ):
                 continue
+            layer_rectangle: BaseGeometry = self._query_geometry_for_layer(rectangle, layer)
             feature_ids: list[FeatureId] = []
             feature: Feature
             for feature in layer.features:
-                if not feature.geometry.is_empty and feature.geometry.intersects(rectangle):
+                if not feature.geometry.is_empty and feature.geometry.intersects(layer_rectangle):
                     feature_ids.append(feature.fid)
                     selected_features.append(
                         SelectedFeature(
@@ -855,6 +1027,7 @@ class GisApplication:
         layer: SpatialLayer = self._find_layer(layer_id)
         if not isinstance(layer, VectorLayer):
             raise ApplicationError("只能向矢量图层追加要素。")
+        self._ensure_editable_layer(layer)
         self._validate_append_geometry(layer, geometry)
         if layer.source_path is None:
             raise ApplicationError(
@@ -883,6 +1056,7 @@ class GisApplication:
             database_layer_id=layer.database_layer_id,
             symbology=layer.symbology,
             labeling=layer.labeling,
+            crs_override=layer.crs_override,
         )
         self._document.replace_layer(updated)
         self._write_layer_to_source(updated)
@@ -897,6 +1071,7 @@ class GisApplication:
         layer: SpatialLayer = self._find_layer(layer_id)
         if not isinstance(layer, VectorLayer):
             raise ApplicationError("只能删除矢量图层中的要素。")
+        self._ensure_editable_layer(layer)
         remaining: tuple[Feature, ...] = tuple(
             f for f in layer.features if f.fid != fid
         )
@@ -912,6 +1087,7 @@ class GisApplication:
             database_layer_id=layer.database_layer_id,
             symbology=layer.symbology,
             labeling=layer.labeling,
+            crs_override=layer.crs_override,
         )
         self._document.replace_layer(updated)
         self._document.clear_selection()
@@ -929,6 +1105,7 @@ class GisApplication:
         layer: SpatialLayer = self._find_layer(layer_id)
         if not isinstance(layer, VectorLayer):
             raise ApplicationError("只能修改矢量图层中的要素属性。")
+        self._ensure_editable_layer(layer)
         updated_features: tuple[Feature, ...] = tuple(
             Feature(fid=f.fid, geometry=f.geometry, attributes=attributes)
             if f.fid == fid
@@ -945,6 +1122,7 @@ class GisApplication:
             database_layer_id=layer.database_layer_id,
             symbology=layer.symbology,
             labeling=layer.labeling,
+            crs_override=layer.crs_override,
         )
         self._document.replace_layer(updated_layer)
         self._write_layer_to_source(updated_layer)
@@ -958,6 +1136,7 @@ class GisApplication:
         layer: SpatialLayer = self._find_layer(layer_id)
         if not isinstance(layer, VectorLayer):
             raise ApplicationError("只能修改矢量图层中的要素几何。")
+        self._ensure_editable_layer(layer)
         updated_features: tuple[Feature, ...] = tuple(
             Feature(fid=f.fid, geometry=geometry, attributes=f.attributes)
             if f.fid == fid
@@ -974,6 +1153,7 @@ class GisApplication:
             database_layer_id=layer.database_layer_id,
             symbology=layer.symbology,
             labeling=layer.labeling,
+            crs_override=layer.crs_override,
         )
         self._document.replace_layer(updated_layer)
         self._write_layer_to_source(updated_layer)
@@ -1072,6 +1252,7 @@ class GisApplication:
         layer: SpatialLayer = self._find_layer(layer_id)
         if not isinstance(layer, VectorLayer):
             raise ApplicationError("只能拆分矢量图层中的要素。")
+        self._ensure_editable_layer(layer)
         target: Feature | None = next(
             (f for f in layer.features if f.fid == fid), None
         )
@@ -1103,11 +1284,12 @@ class GisApplication:
         用于撤销/重做等需要批量恢复要素的场景。
         若 features 为空则移除整个图层。
         """
-        if not features:
-            return self.remove_layer(layer_id)
         layer: SpatialLayer = self._find_layer(layer_id)
         if not isinstance(layer, VectorLayer):
             raise ApplicationError("只能替换矢量图层的要素。")
+        self._ensure_editable_layer(layer)
+        if not features:
+            return self.remove_layer(layer_id)
         updated: VectorLayer = VectorLayer.create(
             layer_id=layer.layer_id,
             name=layer.name,
@@ -1118,6 +1300,7 @@ class GisApplication:
             database_layer_id=layer.database_layer_id,
             symbology=layer.symbology,
             labeling=layer.labeling,
+            crs_override=layer.crs_override,
         )
         self._document.replace_layer(updated)
         self._write_layer_to_source(updated)
@@ -1133,6 +1316,15 @@ class GisApplication:
         self.data_writer.write(
             layer, layer.source_path, (), layer.source_layer_name
         )
+
+    def _ensure_editable_layer(self, layer: VectorLayer) -> None:
+        """禁止在显示 CRS 与活动图层 CRS 不等价时写入几何。"""
+        display_crs: CRS | None = self._document.display_crs
+        if display_crs is None or layer.crs is None or not crs_equivalent(layer.crs, display_crs):
+            raise ApplicationError(
+                f"图层「{layer.name}」与地图显示 CRS 不等价，已禁用编辑和捕捉；"
+                "请先重投影图层或切换地图 CRS。"
+            )
 
     @staticmethod
     def _validate_append_geometry(
@@ -1224,6 +1416,7 @@ class GisApplication:
     def new_project(self) -> WorkspaceSnapshot:
         """创建空白工程会话，不加载演示数据。"""
         self._document = MapDocument()
+        self._display_cache.clear()
         self._project_path = None
         self._project_name = "未命名工程"
         self._project_created_at = self._now()
@@ -1236,9 +1429,12 @@ class GisApplication:
         project_service: ProjectService = ProjectService(
             self.data_reader,
             self._require_project_store(),
+            self.data_writer,
+            self.database_service,
         )
         loaded = project_service.load(path)
         self._document = loaded.document
+        self._display_cache.clear()
         self._project_path = loaded.path
         self._project_name = loaded.manifest.name
         self._project_created_at = loaded.manifest.created_at
@@ -1258,6 +1454,7 @@ class GisApplication:
         path: Path | None = None,
         view_state: MapViewState | None = None,
         layout_document: LayoutDocument | None = None,
+        persist_temporary: bool = False,
     ) -> ProjectSaveResult:
         """保存当前工程快照；未传路径时使用当前工程路径。"""
         target_path: Path | None = path or self._project_path
@@ -1268,7 +1465,18 @@ class GisApplication:
         project_name: str = (
             self._project_name if self._project_path is not None else resolved_path.stem
         )
-        project_service: ProjectService = ProjectService(self.data_reader, project_store)
+        project_service: ProjectService = ProjectService(
+            self.data_reader,
+            project_store,
+            self.data_writer,
+            self.database_service,
+        )
+        temporary_layer_names: tuple[str, ...] = tuple(
+            layer.name
+            for layer in self._document.layers
+            if layer.source_path is None
+            and not (isinstance(layer, VectorLayer) and layer.database_layer_id is not None)
+        )
         manifest = project_service.build_manifest(
             document=self._document,
             project_path=resolved_path,
@@ -1277,15 +1485,24 @@ class GisApplication:
             analysis_runs=self._analysis_runs,
             view_state=view_state,
             layout_document=layout_document,
+            persist_temporary=persist_temporary,
         )
         project_store.save(resolved_path, manifest)
         self._project_path = resolved_path
         self._project_name = manifest.name
         self._modified = False
+        save_warnings: tuple[str, ...] = ()
+        if temporary_layer_names and not persist_temporary:
+            save_warnings = (
+                "未持久化临时图层："
+                + "、".join(temporary_layer_names)
+                + "。它们仍保留在当前会话，重新打开工程时不会恢复。",
+            )
         return ProjectSaveResult(
             path=resolved_path,
             layer_count=len(manifest.layers),
             analysis_run_count=len(manifest.analysis_runs),
+            warnings=save_warnings,
         )
 
     def persist_vector_analysis_result(
@@ -1384,10 +1601,6 @@ class GisApplication:
             raise UnsupportedBufferInput(
                 f"输入图层“{input_layer.name}”没有坐标参考系统，无法安全执行缓冲区分析。"
             )
-        display_crs: CRS | None = self._document.display_crs
-        if display_crs is None:
-            raise UnsupportedBufferInput("当前地图没有坐标参考系统，无法加入缓冲区结果。")
-
         output_path: Path = request.output_path.expanduser().resolve()
         output_name: str = request.output_layer_name.strip()
         if not output_name:
@@ -1413,16 +1626,8 @@ class GisApplication:
             request,
             distance=calculation_distance,
         )
-        try:
-            output_features = reproject_features(
-                calculated_features,
-                calculation_crs,
-                display_crs,
-            )
-        except BufferAnalysisFailed:
-            raise
-        except Exception as error:
-            raise BufferAnalysisFailed("缓冲区结果无法转换到地图显示坐标系。") from error
+        # 结果保留实际分析 CRS；地图显示 CRS 只由显示缓存负责转换。
+        output_features = calculated_features
 
         source_layer_name: str | None = (
             output_name if output_path.suffix.lower() == ".gpkg" else None
@@ -1430,7 +1635,7 @@ class GisApplication:
         output_layer: VectorLayer = VectorLayer.create(
             name=output_name,
             features=output_features,
-            crs=display_crs,
+            crs=calculation_crs,
             source_path=output_path,
             source_layer_name=source_layer_name,
         )
@@ -1485,8 +1690,10 @@ class GisApplication:
         target_crs: CRS,
         progress_callback: ProgressCallback | None = None,
     ) -> WorkspaceSnapshot:
-        """设置地图显示坐标系，并从原始数据源原子重建已有图层。"""
-        if self._document.display_crs == target_crs or not self._document.layers:
+        """设置地图显示坐标系，只重建显示载荷，不替换领域图层。"""
+        if not self._document.layers:
+            raise ValueError("空地图没有显示 CRS；请先加入已定义 CRS 的图层。")
+        if crs_equivalent(self._document.display_crs, target_crs):
             self._document.set_display_crs(target_crs)
             self._modified = True
             return self.snapshot()
@@ -1498,7 +1705,7 @@ class GisApplication:
         target_crs: CRS,
         progress_callback: ProgressCallback | None = None,
     ) -> DisplayCrsPreparation:
-        """在不修改工作区的前提下准备全部图层的目标 CRS 副本。
+        """在不修改工作区的前提下准备全部图层的显示载荷。
 
         参数:
             target_crs: 目标显示坐标系。
@@ -1509,90 +1716,97 @@ class GisApplication:
 
         异常:
             WorkspaceOperationCancelled: 用户在提交前取消转换。
-            LayerReprojectionFailed: 某个图层无法从原始数据源转换。
+            LayerReprojectionFailed: 某个图层无法转换到显示坐标系。
         """
         old_layers: tuple[SpatialLayer, ...] = self._document.layers
         total: int = len(old_layers)
-        if self._document.display_crs == target_crs:
-            return DisplayCrsPreparation(
-                target_crs=target_crs,
-                source_layer_ids=tuple(layer.layer_id for layer in old_layers),
-                projected_layers=old_layers,
-            )
         if progress_callback is not None and not progress_callback(0, total):
             raise WorkspaceOperationCancelled("已取消坐标系转换。")
 
-        projected_layers: list[SpatialLayer] = []
+        display_payloads = []
+        source_layer_revisions: list[int] = []
         for index, layer in enumerate(old_layers, start=1):
-            projected_layers.append(self._project_layer_from_source(layer, target_crs))
+            revision: int = self._document.layer_revision(layer.layer_id)
+            source_layer_revisions.append(revision)
+            display_payloads.append(
+                self._display_cache.get_or_create(
+                    layer,
+                    revision,
+                    target_crs,
+                    (
+                        self._document.raster_display_resampling(layer.layer_id)
+                        if isinstance(layer, RasterLayer)
+                        else None
+                    ),
+                )
+            )
             if progress_callback is not None and not progress_callback(index, total):
                 raise WorkspaceOperationCancelled("已取消坐标系转换。")
         return DisplayCrsPreparation(
             target_crs=target_crs,
             source_layer_ids=tuple(layer.layer_id for layer in old_layers),
-            projected_layers=tuple(projected_layers),
+            display_payloads=tuple(display_payloads),
+            source_layer_revisions=tuple(source_layer_revisions),
         )
 
     def commit_display_crs(
         self,
         preparation: DisplayCrsPreparation,
     ) -> WorkspaceSnapshot:
-        """在主线程把已准备好的 CRS 结果一次性提交到地图文档。"""
+        """在主线程原子提交显示 CRS，保留领域图层及其源 CRS。"""
         current_layer_ids: tuple[str, ...] = tuple(
             layer.layer_id for layer in self._document.layers
         )
         if current_layer_ids != preparation.source_layer_ids:
             raise ValueError("坐标系转换期间工作区发生变化，请重试。")
-        if self._document.display_crs == preparation.target_crs or not current_layer_ids:
-            self._document.set_display_crs(preparation.target_crs)
-            self._modified = True
-            return self.snapshot()
-
-        old_layers: tuple[SpatialLayer, ...] = self._document.layers
-        projected_layers: tuple[SpatialLayer, ...] = preparation.projected_layers
-        if len(old_layers) != len(projected_layers):
-            raise ValueError("坐标系转换结果与当前图层数量不一致，请重试。")
-        replacement_document: MapDocument = MapDocument()
-        replacement_document.set_display_crs(preparation.target_crs)
-        for old_layer, projected_layer in zip(old_layers, projected_layers, strict=True):
-            replacement_document.add_layer(projected_layer)
-            replacement_document.set_layer_visibility(
-                projected_layer.layer_id,
-                self._document.is_visible(old_layer.layer_id),
+        current_revisions: tuple[int, ...] = tuple(
+            self._document.layer_revision(layer_id) for layer_id in current_layer_ids
+        )
+        if (
+            preparation.source_layer_revisions
+            and current_revisions != preparation.source_layer_revisions
+        ):
+            raise ValueError("坐标系转换期间图层内容发生变化，请重试。")
+        self._document.set_display_crs(preparation.target_crs)
+        for layer, revision, payload in zip(
+            self._document.layers,
+            preparation.source_layer_revisions,
+            preparation.display_payloads,
+            strict=True,
+        ):
+            self._display_cache.store(
+                layer,
+                revision,
+                preparation.target_crs,
+                payload,
+                (
+                    self._document.raster_display_resampling(layer.layer_id)
+                    if isinstance(layer, RasterLayer)
+                    else None
+                ),
             )
-            old_min_scale, old_max_scale = self._document.layer_scale_range(
-                old_layer.layer_id
-            )
-            replacement_document.set_layer_opacity(
-                projected_layer.layer_id,
-                self._document.layer_opacity(old_layer.layer_id),
-            )
-            replacement_document.set_layer_blend_mode(
-                projected_layer.layer_id,
-                self._document.layer_blend_mode(old_layer.layer_id),
-            )
-            replacement_document.set_layer_scale_range(
-                projected_layer.layer_id,
-                old_min_scale,
-                old_max_scale,
-            )
-            if isinstance(projected_layer, VectorLayer):
-                replacement_document.set_selection(
-                    projected_layer.layer_id,
-                    self._document.selected_feature_ids(old_layer.layer_id),
-                )
-        if self._document.active_layer_id is not None:
-            replacement_document.set_active_layer(self._document.active_layer_id)
-        self._document = replacement_document
         self._modified = True
         return self.snapshot()
 
     def create_analysis_environment(self, analysis_crs: CRS | None = None) -> AnalysisEnvironment:
-        """创建分析环境；未指定时使用当前地图 CRS 作为明确兜底。"""
-        resolved_crs: CRS | None = analysis_crs or self._document.display_crs
-        if resolved_crs is None:
-            raise ValueError("当前地图没有可用坐标系，请先指定分析坐标系。")
-        return AnalysisEnvironment(analysis_crs=resolved_crs)
+        """创建分析环境；分析 CRS 必须由调用方明确指定。"""
+        if analysis_crs is None:
+            raise ValueError("请显式指定独立的分析 CRS。")
+        return AnalysisEnvironment(analysis_crs=analysis_crs)
+
+    def measure_length(self, geometry: BaseGeometry) -> MeasurementResult:
+        """按当前地图显示 CRS 测量长度，不把显示 CRS 写入任何图层。"""
+        display_crs: CRS | None = self._document.display_crs
+        if display_crs is None:
+            raise ApplicationError("当前地图没有 CRS，无法进行测量。")
+        return measure_length(geometry, display_crs)
+
+    def measure_area(self, geometry: BaseGeometry) -> MeasurementResult:
+        """按当前地图显示 CRS 测量面积。"""
+        display_crs: CRS | None = self._document.display_crs
+        if display_crs is None:
+            raise ApplicationError("当前地图没有 CRS，无法进行测量。")
+        return measure_area(geometry, display_crs)
 
     def prepare_analysis_layers(
         self,
@@ -1601,9 +1815,18 @@ class GisApplication:
     ) -> tuple[SpatialLayer, ...]:
         """按分析目标 CRS 准备输入临时副本，不修改工作区原始图层。"""
         prepared_layers: list[SpatialLayer] = []
+        reference_crs: CRS | None = None
         for layer_id in layer_ids:
             layer: SpatialLayer = self._find_layer(layer_id)
-            if layer.crs == environment.analysis_crs:
+            if layer.crs is None:
+                raise ApplicationError(f"图层“{layer.name}”没有 CRS，无法参与多输入分析。")
+            if reference_crs is None:
+                reference_crs = layer.crs
+            elif not crs_equivalent(reference_crs, layer.crs):
+                raise ApplicationError(
+                    "多输入分析的 CRS 不一致，请先手动重投影统一输入图层。"
+                )
+            if crs_equivalent(layer.crs, environment.analysis_crs):
                 prepared_layers.append(layer)
             else:
                 prepared_layers.append(
@@ -1649,6 +1872,7 @@ class GisApplication:
                 layer.source_path,
                 target_crs,
                 source_layer_name,
+                layer.crs if layer.crs_override else None,
             )
         except Exception as error:
             if isinstance(error, ApplicationError):
@@ -1699,6 +1923,34 @@ class GisApplication:
                 return layer
         raise LayerNotFound(f"图层不存在：{layer_id}")
 
+    @staticmethod
+    def _with_crs_override(
+        layer: SpatialLayer,
+        crs_override: bool,
+        crs: CRS | None = None,
+    ) -> SpatialLayer:
+        """复制图层的 CRS 元数据，保持几何、像元和源路径不变。"""
+        resolved_crs: CRS | None = crs if crs is not None else layer.crs
+        if isinstance(layer, VectorLayer):
+            return VectorLayer.create(
+                layer_id=layer.layer_id,
+                name=layer.name,
+                features=layer.features,
+                crs=resolved_crs,
+                source_path=layer.source_path,
+                source_layer_name=layer.source_layer_name,
+                database_layer_id=layer.database_layer_id,
+                symbology=layer.symbology,
+                labeling=layer.labeling,
+                geometry_family=layer.geometry_family,
+                crs_override=crs_override,
+            )
+        if isinstance(layer, RasterLayer):
+            if resolved_crs is None:
+                raise CoordinateReferenceSystemRequired("栅格图层 CRS 不能为空。")
+            return layer.with_crs(resolved_crs, crs_override=crs_override)
+        return layer
+
     def export_active_layer(
         self,
         path: Path,
@@ -1741,21 +1993,43 @@ class GisApplication:
     def snapshot(self) -> WorkspaceSnapshot:
         """构造供界面一次性刷新的不可变工作区快照。"""
         layer_snapshots: tuple[LayerSnapshot, ...] = tuple(
-            LayerSnapshot(
-                layer=layer,
-                visible=self._document.is_visible(layer.layer_id),
-                selected_feature_ids=self._document.selected_feature_ids(layer.layer_id),
-                opacity=self._document.layer_opacity(layer.layer_id),
-                blend_mode=self._document.layer_blend_mode(layer.layer_id),
-                min_scale_percent=self._document.layer_scale_range(layer.layer_id)[0],
-                max_scale_percent=self._document.layer_scale_range(layer.layer_id)[1],
-            )
+            self._snapshot_layer(layer)
             for layer in self._document.layers
         )
         return WorkspaceSnapshot(
             layers=layer_snapshots,
             active_layer_id=self._document.active_layer_id,
             display_crs=self._document.display_crs,
+        )
+
+    def _snapshot_layer(self, layer: SpatialLayer) -> LayerSnapshot:
+        """构造单个领域图层快照并取得对应的显示载荷。"""
+        display_payload = self._display_cache.get_or_create(
+            layer,
+            self._document.layer_revision(layer.layer_id),
+            self._document.display_crs,
+            (
+                self._document.raster_display_resampling(layer.layer_id)
+                if isinstance(layer, RasterLayer)
+                else None
+            ),
+        )
+        min_scale, max_scale = self._document.layer_scale_range(layer.layer_id)
+        return LayerSnapshot(
+            layer=layer,
+            visible=self._document.is_visible(layer.layer_id),
+            selected_feature_ids=self._document.selected_feature_ids(layer.layer_id),
+            display_payload=display_payload,
+            display_bounds=display_payload.bounds,
+            opacity=self._document.layer_opacity(layer.layer_id),
+            blend_mode=self._document.layer_blend_mode(layer.layer_id),
+            min_scale_percent=min_scale,
+            max_scale_percent=max_scale,
+            raster_display_resampling=(
+                self._document.raster_display_resampling(layer.layer_id)
+                if isinstance(layer, RasterLayer)
+                else None
+            ),
         )
 
     def _point_query_order(self) -> tuple[VectorLayer, ...]:
@@ -1772,6 +2046,38 @@ class GisApplication:
             if isinstance(layer, VectorLayer) and layer.layer_id != active_layer_id
         )
         return active_layers + remaining_layers
+
+    def _query_geometry_for_layer(
+        self,
+        geometry: BaseGeometry,
+        layer: VectorLayer,
+    ) -> BaseGeometry:
+        """将地图显示 CRS 下的查询几何转换到领域图层 CRS。"""
+        display_crs: CRS | None = self._document.display_crs
+        if display_crs is None or layer.crs is None:
+            return geometry
+        return self._display_projection_service.transform_geometry(
+            geometry,
+            display_crs,
+            layer.crs,
+        )
+
+    def _query_tolerance_for_layer(
+        self,
+        point: Point,
+        layer: VectorLayer,
+        tolerance: float,
+    ) -> float:
+        """把显示 CRS 中的点选容差换算为图层 CRS 的距离单位。"""
+        display_crs: CRS | None = self._document.display_crs
+        if display_crs is None or layer.crs is None or crs_equivalent(display_crs, layer.crs):
+            return tolerance
+        edge = self._query_geometry_for_layer(
+            Point(point.x + tolerance, point.y),
+            layer,
+        )
+        layer_point = self._query_geometry_for_layer(point, layer)
+        return max(float(layer_point.distance(edge)), 1e-12)
 
     def _require_project_store(self) -> ProjectStore:
         """返回工程存储端口，未组装时给出应用层错误。"""
@@ -1932,14 +2238,10 @@ class GisApplication:
             raise UnsupportedOverlayInput(
                 f"叠加图层“{overlay_layer.name}”没有坐标参考系统，无法执行叠加分析。"
             )
-        if input_layer.crs != overlay_layer.crs:
+        if not crs_equivalent(input_layer.crs, overlay_layer.crs):
             raise UnsupportedOverlayInput(
                 "两个输入图层的坐标参考系统不一致，无法执行叠加分析。"
             )
-        display_crs: CRS | None = self._document.display_crs
-        if display_crs is None:
-            raise UnsupportedOverlayInput("当前地图没有坐标参考系统，无法加入叠加分析结果。")
-
         output_path: Path = request.output_path.expanduser().resolve()
         output_name: str = request.output_layer_name.strip()
         if not output_name:
@@ -1959,7 +2261,7 @@ class GisApplication:
         if output_path.exists() and output_path.suffix.lower() != ".gpkg":
             raise InvalidOverlayParameters("分析结果输出已存在，请使用新的结果文件或图层名称。")
 
-        # 叠加分析不需要 CRS 转换：两个图层已通过 MapDocument 验证为同一 CRS。
+        # 叠加分析不自动跨 CRS；用户应先手动重投影统一输入。
         try:
             calculated_features = overlay_features(input_layer, overlay_layer, request)
         except EmptyOverlayResult:
@@ -1975,7 +2277,7 @@ class GisApplication:
         output_layer: VectorLayer = VectorLayer.create(
             name=output_name,
             features=calculated_features,
-            crs=display_crs,
+            crs=input_layer.crs,
             source_path=output_path,
             source_layer_name=source_layer_name,
         )
@@ -2087,13 +2389,25 @@ class GisApplication:
 
         # 1. 查找所有引用的栅格图层并提取数据。
         band_arrays: dict[str, np.ndarray] = {}
+        band_masks: dict[str, np.ndarray] = {}
         transforms: list[Affine] = []
-        crss: list[object | None] = []
+        crss: list[CRS | None] = []
         shapes: list[tuple[int, int]] = []
         layer_names: list[str] = []
         input_layer_ids: list[str] = []
-        reference_transform = None
-        reference_crs = None
+        reference_transform: Affine | None = None
+        reference_crs: CRS | None = None
+        reference_shape: tuple[int, int] | None = None
+
+        if request.reference_layer_id is not None:
+            reference_candidate: SpatialLayer = self._find_layer(request.reference_layer_id)
+            if not isinstance(reference_candidate, RasterLayer):
+                raise InvalidRasterCalculatorParameters("参考栅格必须是栅格图层。")
+            reference_transform = reference_candidate.transform
+            reference_crs = reference_candidate.crs
+            reference_shape = reference_candidate.raster_shape
+            if reference_crs is None:
+                raise RasterBandAlignmentError("参考栅格没有 CRS，无法进行多栅格计算。")
 
         for mapping in request.band_mappings:
             layer: SpatialLayer = self._find_layer(mapping.layer_id)
@@ -2107,31 +2421,62 @@ class GisApplication:
                     f"图层「{layer.name}」没有波段 {mapping.band_index}"
                     f"（共 {layer.band_count} 个波段）。"
                 )
-            # 提取单波段 2D 数据
-            band_2d: np.ndarray = layer.raster_data[band_idx]
+            if layer.crs is None:
+                raise RasterBandAlignmentError(
+                    f"输入栅格“{layer.name}”没有 CRS，无法进行多栅格计算。"
+                )
+            if reference_crs is None:
+                reference_crs = layer.crs
+                reference_transform = layer.transform
+                reference_shape = layer.raster_shape
+            elif not crs_equivalent(layer.crs, reference_crs):
+                raise RasterBandAlignmentError(
+                    "输入栅格 CRS 不一致；请先手动重投影到统一 CRS。"
+                )
+            # 提取单波段 2D 数据；有显式参考栅格时只在内存中临时对齐。
+            raster_data: np.ndarray = layer.raster_data
+            raster_mask: np.ndarray = layer.valid_mask
+            if (
+                request.reference_layer_id is not None
+                and reference_shape is not None
+                and reference_transform is not None
+                and (
+                    layer.raster_shape != reference_shape
+                    or layer.transform != reference_transform
+                )
+            ):
+                aligned_data, raster_mask = self._display_projection_service.project_raster_grid(
+                    raster_data,
+                    raster_mask,
+                    layer.transform,
+                    layer.crs,
+                    reference_crs,
+                    reference_transform,
+                    reference_shape,
+                    nodata=layer.nodata,
+                )
+                raster_data = aligned_data
+            band_2d: np.ndarray = raster_data[band_idx]
             band_arrays[mapping.alias] = band_2d
-            transforms.append(layer.transform)
-            crss.append(layer.crs)
+            band_masks[mapping.alias] = raster_mask
+            assert reference_transform is not None
+            transforms.append(reference_transform)
+            crss.append(reference_crs)
             shapes.append(band_2d.shape)
             layer_names.append(layer.name)
             if mapping.layer_id not in input_layer_ids:
                 input_layer_ids.append(mapping.layer_id)
-            if reference_transform is None:
-                reference_transform = layer.transform
-                reference_crs = layer.crs
 
         # 2. 校验对齐。
         warnings_list: list[str] = validate_band_alignment(
             tuple(transforms), tuple(crss), tuple(shapes), tuple(layer_names)
         )
         if warnings_list:
-            # 检查是否有 CRS 不一致（硬错误）
-            if crss and len(set(crss)) > 1:
-                raise RasterBandAlignmentError(
-                    "输入栅格波段坐标系不一致，无法执行逐像素计算。\n"
-                    + "\n".join(warnings_list)
-                )
-            # 其他不一致仅记录（尺寸/分辨率），由 np 广播处理
+            raise RasterBandAlignmentError(
+                "输入栅格网格不一致；请指定参考栅格进行临时对齐，"
+                "或先手动重投影/对齐后再计算。\n"
+                + "\n".join(warnings_list)
+            )
 
         # 3. 执行表达式求值。
         try:
@@ -2144,9 +2489,7 @@ class GisApplication:
         # 4. 构建有效掩码（所有输入波段掩码 AND 结果有限性）。
         combined_mask: np.ndarray = np.ones(shapes[0], dtype=bool)
         for mapping in request.band_mappings:
-            layer_ref: SpatialLayer = self._find_layer(mapping.layer_id)
-            if isinstance(layer_ref, RasterLayer):
-                combined_mask &= layer_ref.valid_mask
+            combined_mask &= band_masks[mapping.alias]
         combined_mask &= np.isfinite(result_data)
         if request.nodata is not None:
             combined_mask &= ~np.isclose(result_data, request.nodata)
@@ -2160,6 +2503,7 @@ class GisApplication:
         import rasterio.transform
 
         height, width = result_data.shape
+        assert reference_transform is not None
         output_bounds: tuple[float, float, float, float] = rasterio.transform.array_bounds(
             height, width, reference_transform
         )
@@ -2192,6 +2536,7 @@ class GisApplication:
                 "expression": request.expression,
                 "variable_count": len(request.band_mappings),
                 "aliases": {m.alias: m.band_index for m in request.band_mappings},
+                "reference_layer_id": request.reference_layer_id,
                 "output_path": str(output_path),
                 "nodata": request.nodata,
             },
@@ -2231,6 +2576,7 @@ class GisApplication:
             parameters={
                 "expression": request.expression,
                 "variable_count": len(request.band_mappings),
+                "reference_layer_id": request.reference_layer_id,
                 "output_path": str(request.output_path.expanduser().resolve()),
             },
             status="failed",

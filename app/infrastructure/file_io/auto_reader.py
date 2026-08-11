@@ -33,6 +33,7 @@ class AutoDataReader:
         path: Path,
         target_crs: CRS | None = None,
         layer_name: str | None = None,
+        source_crs_override: CRS | None = None,
     ) -> SpatialLayer:
         """根据扩展名自动识别并读取矢量或栅格数据。
 
@@ -50,10 +51,14 @@ class AutoDataReader:
         suffix: str = path.suffix.lower()
         if suffix in self.VECTOR_SUFFIXES:
             if suffix in KmlVectorReader.SUPPORTED_SUFFIXES:
-                return self._kml_reader.read(path, target_crs, layer_name)
-            return self._vector_reader.read(path, target_crs, layer_name)
+                return self._kml_reader.read(
+                    path, target_crs, layer_name, source_crs_override
+                )
+            return self._vector_reader.read(
+                path, target_crs, layer_name, source_crs_override
+            )
         if suffix in self.RASTER_SUFFIXES:
-            return self._raster_reader.read(path, target_crs)
+            return self._raster_reader.read(path, target_crs, source_crs_override)
         raise UnsupportedVectorFormat(f"无法识别空间数据类型：{suffix or '无扩展名'}")
 
     def list_layers(self, path: Path) -> tuple[str, ...]:

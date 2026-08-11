@@ -12,6 +12,7 @@ from rasterio.io import DatasetReader
 from rasterio.transform import array_bounds
 from rasterio.vrt import WarpedVRT
 
+from app.application.crs_utils import crs_equivalent
 from app.application.errors import (
     IncompatibleCoordinateReferenceSystem,
     RasterFileNotFound,
@@ -34,12 +35,18 @@ class RasterioRasterReader:
     # 小栅格直接缓存完整数组，大栅格首读只缓存预览，避免一次性占用大量内存。
     MAX_EAGER_ANALYSIS_BYTES: int = 64 * 1024 * 1024
 
-    def read(self, path: Path, target_crs: CRS | None = None) -> RasterLayer:
+    def read(
+        self,
+        path: Path,
+        target_crs: CRS | None = None,
+        source_crs_override: CRS | None = None,
+    ) -> RasterLayer:
         """读取栅格，按需重投影，并以预览级别生成显示影像。
 
         参数:
             path: 待读取的本地栅格文件路径。
-            target_crs: 地图显示坐标系；为空时保留源栅格坐标系。
+            target_crs: 输出坐标系；为空时保留源栅格坐标系。
+            source_crs_override: 工程内覆盖的源坐标系，只改变坐标解释。
 
         返回:
             包含显示预览、完整像元元数据、仿射变换和空间范围的栅格图层。
@@ -59,18 +66,34 @@ class RasterioRasterReader:
 
         try:
             with rasterio.open(resolved_path) as source:
-                source_crs: CRS | None = (
+                declared_crs: CRS | None = (
                     CRS.from_user_input(source.crs) if source.crs is not None else None
                 )
+                source_crs: CRS | None = source_crs_override or declared_crs
                 if target_crs is not None and source_crs is None:
                     raise IncompatibleCoordinateReferenceSystem(
                         "源栅格未声明坐标参考系统，无法转换到地图显示坐标系。"
                     )
-                if target_crs is not None and source_crs != target_crs:
+                if target_crs is not None and not crs_equivalent(source_crs, target_crs):
                     # WarpedVRT 在读取阶段完成重投影，预览只读取降采样后的像元。
-                    with WarpedVRT(source, crs=target_crs) as projected:
-                        return self._read_dataset(projected, resolved_path, target_crs)
-                return self._read_dataset(source, resolved_path, source_crs)
+                    with WarpedVRT(
+                        source,
+                        src_crs=source_crs,
+                        crs=target_crs,
+                    ) as projected:
+                        return self._read_dataset(
+                            projected,
+                            resolved_path,
+                            target_crs,
+                            crs_override=False,
+                        )
+                return self._read_dataset(
+                    source,
+                    resolved_path,
+                    source_crs,
+                    crs_override=source_crs_override is not None,
+                    source_crs_override=source_crs_override,
+                )
         except IncompatibleCoordinateReferenceSystem:
             raise
         except Exception as error:
@@ -81,6 +104,8 @@ class RasterioRasterReader:
         dataset: DatasetReader,
         path: Path,
         crs: CRS | None,
+        crs_override: bool = False,
+        source_crs_override: CRS | None = None,
     ) -> RasterLayer:
         """读取预览并创建完整分析像元的延迟加载器。"""
         indexes: tuple[int, ...] = self._display_band_indexes(dataset.count)
@@ -115,7 +140,7 @@ class RasterioRasterReader:
         analysis_loader: RasterDataLoader | None = None
         if self._analysis_byte_size(dataset) > self.MAX_EAGER_ANALYSIS_BYTES:
             def load_analysis_data() -> tuple[NDArray[np.generic], NDArray[np.bool_]]:
-                return self._read_analysis_data(path, crs)
+                return self._read_analysis_data(path, crs, source_crs_override)
 
             analysis_loader = load_analysis_data
         if analysis_loader is None:
@@ -134,6 +159,7 @@ class RasterioRasterReader:
                 display_values=display_values,
                 display_valid_mask=display_valid_mask,
                 display_band_indexes=display_band_indexes,
+                crs_override=crs_override,
             )
         return RasterLayer.create_lazy(
             name=path.stem,
@@ -150,25 +176,32 @@ class RasterioRasterReader:
             display_values=display_values,
             display_valid_mask=display_valid_mask,
             display_band_indexes=display_band_indexes,
+            crs_override=crs_override,
         )
 
     def _read_analysis_data(
         self,
         path: Path,
         target_crs: CRS | None,
+        source_crs_override: CRS | None = None,
     ) -> tuple[NDArray[np.generic], NDArray[np.bool_]]:
         """重新打开源文件并读取完整分析数组和有效掩膜。"""
         try:
             with rasterio.open(path) as source:
-                source_crs: CRS | None = (
+                declared_crs: CRS | None = (
                     CRS.from_user_input(source.crs) if source.crs is not None else None
                 )
+                source_crs: CRS | None = source_crs_override or declared_crs
                 if target_crs is not None and source_crs is None:
                     raise IncompatibleCoordinateReferenceSystem(
                         "源栅格未声明坐标参考系统，无法转换到地图显示坐标系。"
                     )
-                if target_crs is not None and source_crs != target_crs:
-                    with WarpedVRT(source, crs=target_crs) as projected:
+                if target_crs is not None and not crs_equivalent(source_crs, target_crs):
+                    with WarpedVRT(
+                        source,
+                        src_crs=source_crs,
+                        crs=target_crs,
+                    ) as projected:
                         return self._read_full_analysis_data(projected)
                 return self._read_full_analysis_data(source)
         except IncompatibleCoordinateReferenceSystem:

@@ -11,6 +11,7 @@ from shapely.geometry import GeometryCollection, LineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform
 
+from app.application.crs_utils import crs_equivalent
 from app.application.errors import (
     EmptyVectorDataset,
     IncompatibleCoordinateReferenceSystem,
@@ -46,13 +47,15 @@ class KmlVectorReader:
         path: Path,
         target_crs: CRS | None = None,
         layer_name: str | None = None,
+        source_crs_override: CRS | None = None,
     ) -> VectorLayer:
         """读取 KML 文件，并按需转换坐标参考系统。
 
         参数:
             path: KML 文件路径。
-            target_crs: 地图显示坐标系；为空时保留 WGS 84 源坐标系。
+            target_crs: 输出坐标系；为空时保留源坐标系。
             layer_name: KML 没有多图层概念，该参数仅用于保持统一签名。
+            source_crs_override: 工程内覆盖的源坐标系，只改变坐标解释。
 
         返回:
             由 KML 要素构造的矢量领域图层。
@@ -104,8 +107,9 @@ class KmlVectorReader:
             raise NoUsableGeometry(f"KML 文档不包含可用几何：{resolved_path.name}")
 
         resolved_features: tuple[Feature, ...] = tuple(features)
-        resolved_crs: CRS = CRS.from_epsg(4326)
-        if target_crs is not None and target_crs != resolved_crs:
+        declared_crs: CRS = CRS.from_epsg(4326)
+        resolved_crs: CRS = source_crs_override or declared_crs
+        if target_crs is not None and not crs_equivalent(resolved_crs, target_crs):
             resolved_features = self._reproject_features(
                 resolved_features,
                 resolved_crs,
@@ -118,6 +122,7 @@ class KmlVectorReader:
             features=resolved_features,
             crs=resolved_crs,
             source_path=resolved_path,
+            crs_override=source_crs_override is not None,
         )
 
     # ── XML 遍历 ──────────────────────────────────────────────

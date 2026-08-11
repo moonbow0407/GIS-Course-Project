@@ -14,6 +14,7 @@ from shapely.geometry import LineString, Point
 from app.application.results import LayerSnapshot
 from app.application.symbology_service import (
     create_graduated_symbology,
+    create_raster_classified_symbology,
     create_unique_value_symbology,
 )
 from app.domain.feature import Feature
@@ -303,4 +304,29 @@ def test_raster_panel_uses_preview_and_hides_irrelevant_class_card() -> None:
     assert classes is not None and classes.isHidden()
     assert panel._scheme.currentData() == "terrain"
     assert not panel._scheme.itemIcon(panel._scheme.currentIndex()).isNull()
+    assert application is not None
+
+
+def test_classified_raster_panel_shows_discrete_levels() -> None:
+    """重分类结果应在符号面板显示分类值和离散类别表。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = RasterLayer.create(
+        name="重分类结果",
+        raster_data=np.asarray([[[1.0, 2.0], [3.0, 1.0]]]),
+        image_data=np.zeros((2, 2, 4), dtype=np.uint8),
+        valid_mask=np.ones((2, 2), dtype=np.bool_),
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0, 0, 2, 2),
+        symbology=create_raster_classified_symbology((1.0, 2.0, 3.0)),
+    )
+    panel = SymbologyPanel()
+    panel.set_layer(LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()))
+
+    classes = panel.findChild(QFrame, "symbologyClassesCard")
+
+    assert panel._renderer.currentData() == RasterRendererType.CLASSIFIED.value
+    assert classes is not None and not classes.isHidden()
+    assert panel._classes.rowCount() == 4
+    assert panel._classes.item(0, 1).text() == "1"
     assert application is not None

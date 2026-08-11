@@ -21,10 +21,12 @@ from uuid import uuid4
 import numpy as np
 from affine import Affine
 from numpy.typing import NDArray
+from pyproj import CRS
 from rasterio.enums import Resampling
 from rasterio.windows import Window, from_bounds
 from rasterio.windows import bounds as window_bounds
 
+from app.application.crs_utils import crs_equivalent
 from app.application.errors import (
     EmptyRasterResult,
     InvalidRasterAnalysisParameters,
@@ -122,7 +124,22 @@ class RasterAnalysisService:
                 )
             inputs.append((mapping.alias, layer, mapping.band_index))
 
-        target_grid = grid_from_layer(inputs[0][1])
+        reference_layer: RasterLayer = inputs[0][1]
+        if request.reference_layer_id is not None:
+            reference_candidate = self._require_raster(layers, request.reference_layer_id)
+            reference_layer = reference_candidate
+        target_grid = grid_from_layer(reference_layer)
+        for _alias, layer, _band_index in inputs:
+            if not crs_equivalent(layer.crs, target_grid.crs):
+                raise InvalidRasterAnalysisParameters(
+                    "输入栅格 CRS 不一致；请先手动重投影到统一 CRS。"
+                )
+            if request.reference_layer_id is None and not grid_from_layer(layer).matches(
+                target_grid
+            ):
+                raise InvalidRasterAnalysisParameters(
+                    "输入栅格网格不一致；请指定显式参考栅格后再临时对齐。"
+                )
 
         def kernel(
             arrays: dict[str, NDArray[np.generic]],
@@ -327,6 +344,10 @@ class RasterAnalysisService:
         if mask_layer.crs is None:
             raise UnsupportedRasterAnalysisInput(
                 f"掩膜图层「{mask_layer.name}」没有坐标参考系统。"
+            )
+        if raster_layer.crs is None or not crs_equivalent(mask_layer.crs, raster_layer.crs):
+            raise UnsupportedRasterAnalysisInput(
+                "栅格与掩膜 CRS 不一致；请先手动重投影后再裁剪。"
             )
 
         from shapely.geometry.base import BaseGeometry
@@ -624,10 +645,9 @@ class RasterAnalysisService:
 class _InputSource:
     """单个输入栅格的窗口读取策略。
 
-    三种读取模式：
+    两种读取模式：
     - 源网格与目标网格一致：按目标窗口直接读取；
-    - CRS 不同：一次性重投影到目标网格后按窗口切片；
-    - CRS 相同但范围不同（裁剪场景）：按窗口换算源坐标读取。
+    - CRS 相同但范围不同（参考栅格临时对齐）：按窗口换算源坐标读取；
     """
 
     def __init__(
@@ -655,8 +675,10 @@ class _InputSource:
         )
         if source_grid.matches(target_grid):
             self._mode = "window"
-        elif source_crs != target_grid.crs:
-            self._mode = "reproject"
+        elif not crs_equivalent(source_crs, target_grid.crs):
+            raise UnsupportedRasterAnalysisInput(
+                "多源栅格 CRS 不一致；请先手动重投影到统一 CRS。"
+            )
         else:
             self._mode = "translate"
             if source_crs is None:
@@ -671,13 +693,6 @@ class _InputSource:
         """读取目标窗口对应的输入像元和有效掩膜。"""
         if self._mode == "window":
             return self._reader.read_band_window(self._band_index, read_win)
-        if self._mode == "reproject":
-            return self._reader.read_window_reprojected(
-                self._band_index,
-                self._target_grid,
-                read_win,
-                self._resampling,
-            )
         # translate：同 CRS 不同范围，将目标窗口换算为源窗口读取。
         win_bounds = window_bounds(read_win, self._target_grid.transform)
         source_win = (
@@ -734,14 +749,14 @@ def _is_projected_crs(crs: object) -> bool:
 
 
 def _transform_geometries(
-    shapes: list[object], source_crs: object, target_crs: object
+    shapes: list[object], source_crs: CRS, target_crs: CRS
 ) -> list[object]:
     """将几何列表从源 CRS 临时转换到目标 CRS。"""
     from pyproj import Transformer
     from shapely.geometry.base import BaseGeometry
     from shapely.ops import transform as shp_transform
 
-    if source_crs == target_crs:
+    if crs_equivalent(source_crs, target_crs):
         return list(shapes)
     transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
     result: list[BaseGeometry] = []

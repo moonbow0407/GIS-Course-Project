@@ -15,6 +15,7 @@ from PySide6.QtGui import QImage, QMouseEvent, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QGraphicsPathItem
 from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry.base import BaseGeometry
 
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
@@ -624,4 +625,25 @@ def test_map_canvas_declutters_labels_when_zoomed_out() -> None:
     ]
 
     assert not overlapping_pairs
+    assert application is not None
+
+
+def test_measurement_tools_emit_temporary_geometry_without_editing_layers() -> None:
+    """长度/面积工具应只发出临时几何，不触发要素写回信号。"""
+    application = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    measurements: list[tuple[str, BaseGeometry]] = []
+    canvas.measurement_completed.connect(
+        lambda kind, geometry: measurements.append((kind, geometry))
+    )
+
+    canvas.set_measure_length_tool()
+    canvas._emit_completed_sketch(LineString([(0.0, 0.0), (10.0, 0.0)]))
+    canvas.set_measure_area_tool()
+    canvas._emit_completed_sketch(
+        Polygon([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 0.0)])
+    )
+
+    assert [kind for kind, _geometry in measurements] == ["length", "area"]
+    assert canvas._digitize_mode == "none"
     assert application is not None

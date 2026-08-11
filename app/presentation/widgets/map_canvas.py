@@ -30,6 +30,7 @@ from shapely import affinity
 from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
+from app.application.display_models import RasterDisplayPayload, VectorDisplayPayload
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.raster_layer import RasterLayer
@@ -54,6 +55,8 @@ class MapCanvas(QGraphicsView):
     rectangle_queried = Signal(Polygon, bool)
     # 数字化完成信号：携带用户绘制的 Shapely 几何（Point/LineString/Polygon）。
     feature_digitized = Signal(BaseGeometry)
+    # 测量完成信号：(length/area, 地图显示 CRS 下的临时几何)。
+    measurement_completed = Signal(str, BaseGeometry)
     # 顶点编辑提交信号：携带修改后的 Shapely 几何。
     geometry_edited = Signal(BaseGeometry)
     # 拆分请求信号：携带用户绘制的切割线（LineString）。
@@ -243,7 +246,21 @@ class MapCanvas(QGraphicsView):
         self._ensure_pan_area()
         self._update_map_units_per_pixel()
         for z_value, current_layer in enumerate(layer_snapshot):
-            if isinstance(current_layer.layer, RasterLayer):
+            if isinstance(current_layer.display_payload, RasterDisplayPayload):
+                raster_item = self._raster_renderer.render_layer(
+                    self._scene, current_layer, float(z_value)
+                )
+                self._layer_items[current_layer.layer_id] = [raster_item]
+            elif isinstance(current_layer.display_payload, VectorDisplayPayload):
+                vector_items = self._vector_renderer.render_layer(
+                    self._scene,
+                    current_layer,
+                    float(z_value),
+                    self._map_units_per_pixel,
+                )
+                self._layer_items[current_layer.layer_id] = vector_items
+            elif isinstance(current_layer.layer, RasterLayer):
+                # 兼容旧调用方直接构造未附带显示载荷的快照。
                 raster_item = self._raster_renderer.render_layer(
                     self._scene, current_layer, float(z_value)
                 )
@@ -379,6 +396,22 @@ class MapCanvas(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.tool_changed.emit("digitize_polygon")
+
+    def set_measure_length_tool(self) -> None:
+        """切换到临时线测量工具，不修改任何图层。"""
+        self._deactivate_all_tools()
+        self._digitize_mode = "measure_line"
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.tool_changed.emit("measure_length")
+
+    def set_measure_area_tool(self) -> None:
+        """切换到临时面测量工具，不修改任何图层。"""
+        self._deactivate_all_tools()
+        self._digitize_mode = "measure_polygon"
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.tool_changed.emit("measure_area")
 
     def set_vertex_edit_tool(
         self, geometry: BaseGeometry, layer_id: str = "", fid: object = None,
@@ -1101,9 +1134,14 @@ class MapCanvas(QGraphicsView):
         for layer in snapshot.layers:
             if layer.layer_id not in queryable_ids:
                 continue
-            if not isinstance(layer.layer, VectorLayer):
+            if isinstance(layer.display_payload, VectorDisplayPayload):
+                display_features = layer.display_payload.features
+            elif isinstance(layer.layer, VectorLayer):
+                # 兼容旧调用方直接构造未附带显示载荷的快照。
+                display_features = layer.layer.features
+            else:
                 continue
-            for feature in layer.layer.features:
+            for feature in display_features:
                 if feature.geometry.is_empty:
                     continue
                 self._collect_coords(feature.geometry, coords)
@@ -1275,11 +1313,11 @@ class MapCanvas(QGraphicsView):
             return self._screen_to_map_point(vertices[0])
         map_pts: list[Point] = [self._screen_to_map_point(v) for v in vertices]
         coords: list[tuple[float, float]] = [(p.x, p.y) for p in map_pts]
-        if mode == "line":
+        if mode in ("line", "measure_line"):
             if len(coords) < 2:
                 return None
             return LineString(coords)
-        if mode == "polygon":
+        if mode in ("polygon", "measure_polygon"):
             if len(coords) < 3:
                 return None
             # 确保闭合。
@@ -1287,6 +1325,21 @@ class MapCanvas(QGraphicsView):
                 coords.append(coords[0])
             return Polygon(coords)
         return None
+
+    def _emit_completed_sketch(self, geometry: BaseGeometry) -> None:
+        """按当前草图工具分发数字化或测量结果。"""
+        if self._digitize_mode == "measure_line":
+            self.measurement_completed.emit("length", geometry)
+            self.set_pan_tool()
+            return
+        if self._digitize_mode == "measure_polygon":
+            self.measurement_completed.emit("area", geometry)
+            self.set_pan_tool()
+            return
+        if self._split_active:
+            self.feature_split_requested.emit(geometry)
+            return
+        self.feature_digitized.emit(geometry)
 
     def _rebuild_sketch_preview(
         self, cursor_pos: QPoint | None = None
@@ -1340,7 +1393,7 @@ class MapCanvas(QGraphicsView):
             all_pts.append((cp.x, cp.y))
 
         preview_path: QPainterPath = QPainterPath()
-        is_polygon: bool = self._digitize_mode == "polygon" and len(all_pts) >= 3
+        is_polygon: bool = self._digitize_mode in ("polygon", "measure_polygon") and len(all_pts) >= 3
 
         preview_path.moveTo(all_pts[0][0], -all_pts[0][1])
         for mx, my in all_pts[1:]:
@@ -1689,7 +1742,7 @@ class MapCanvas(QGraphicsView):
                     self._clear_snap_marker()
                     geometry: BaseGeometry | None = self._finish_sketch()
                     if geometry is not None:
-                        self.feature_digitized.emit(geometry)
+                        self._emit_completed_sketch(geometry)
                 else:
                     self._add_sketch_vertex(
                         self._snapped_position(event.position().toPoint())
@@ -1699,10 +1752,7 @@ class MapCanvas(QGraphicsView):
             if event.button() == Qt.MouseButton.RightButton:
                 geometry = self._finish_sketch()
                 if geometry is not None:
-                    if self._split_active:
-                        self.feature_split_requested.emit(geometry)
-                    else:
-                        self.feature_digitized.emit(geometry)
+                    self._emit_completed_sketch(geometry)
                 else:
                     self.set_pan_tool()
                 event.accept()
@@ -1753,15 +1803,12 @@ class MapCanvas(QGraphicsView):
         这里直接使用已收集的顶点完成草图，避免放置两个相同顶点。
         """
         if (
-            self._digitize_mode in ("line", "polygon")
+            self._digitize_mode in ("line", "polygon", "measure_line", "measure_polygon")
             and event.button() == Qt.MouseButton.LeftButton
         ):
             geometry: BaseGeometry | None = self._finish_sketch()
             if geometry is not None:
-                if self._split_active:
-                    self.feature_split_requested.emit(geometry)
-                else:
-                    self.feature_digitized.emit(geometry)
+                self._emit_completed_sketch(geometry)
             else:
                 # 顶点不足（如面少于 3 点）时退出数字化工具。
                 self.set_pan_tool()
@@ -1922,7 +1969,12 @@ class MapCanvas(QGraphicsView):
             return
 
         # ── 数字化预览（含捕捉）──
-        if self._digitize_mode in ("line", "polygon"):
+        if self._digitize_mode in (
+            "line",
+            "polygon",
+            "measure_line",
+            "measure_polygon",
+        ):
             cursor_pos: QPoint = event.position().toPoint()
             if self._snapping_enabled:
                 snap_pt: Point | None = self._find_snap_target(
@@ -2105,7 +2157,12 @@ class MapCanvas(QGraphicsView):
                 return
 
         # 数字化模式下的顶点撤销。
-        if self._digitize_mode in ("line", "polygon"):
+        if self._digitize_mode in (
+            "line",
+            "polygon",
+            "measure_line",
+            "measure_polygon",
+        ):
             is_ctrl_z: bool = (
                 event.key() == Qt.Key.Key_Z
                 and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)

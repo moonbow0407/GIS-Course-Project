@@ -719,6 +719,52 @@ QDialog#labelingDialog QPushButton:hover {
     color: #0f5f9f;
 }
 
+/* 对话框内未单独命名的容器（分组框、页签、页签页）统一使用浅色主题：
+   系统深色模式下这些控件会回退到深色调色板，导致深色文字无法辨认。 */
+QDialog QWidget {
+    background: #ffffff;
+    color: #263548;
+}
+
+QDialog QGroupBox {
+    border: 1px solid #d9e1ea;
+    border-radius: 6px;
+    margin-top: 14px;
+}
+
+QDialog QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 6px;
+    color: #263548;
+    font-weight: 600;
+}
+
+QDialog QTabWidget::pane {
+    border: none;
+    background: #ffffff;
+}
+
+QDialog QTabBar::tab {
+    min-height: 30px;
+    padding: 0 14px;
+    border: 1px solid #d9e1ea;
+    border-bottom: none;
+    background: #f3f6f9;
+    color: #526277;
+}
+
+QDialog QTabBar::tab:hover {
+    background: #edf5fc;
+    color: #0f6cbd;
+}
+
+QDialog QTabBar::tab:selected {
+    background: #ffffff;
+    color: #0f5f9f;
+    font-weight: 600;
+}
+
 QDialog QLabel,
 QMessageBox QLabel {
     background: transparent;

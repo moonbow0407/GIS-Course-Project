@@ -98,41 +98,91 @@ def test_hiding_layer_clears_its_selection() -> None:
     assert document.selected_feature_ids("roads") == ()
 
 
-def test_add_layer_rejects_incompatible_coordinate_reference_system() -> None:
-    """进入地图文档的图层坐标系必须与显示坐标系一致。"""
+def test_add_layer_allows_known_mixed_coordinate_reference_systems() -> None:
+    """地图文档应允许不同已知 CRS 图层共存，并保持首个显示 CRS。"""
     document: MapDocument = MapDocument()
     document.add_layer(make_layer("wgs84", 4326))
 
-    with pytest.raises(ValueError, match="坐标参考系统不一致"):
-        document.add_layer(make_layer("web_mercator", 3857))
+    document.add_layer(make_layer("web_mercator", 3857))
+
+    assert tuple(layer.layer_id for layer in document.layers) == (
+        "wgs84",
+        "web_mercator",
+    )
+    assert document.display_crs == CRS.from_epsg(4326)
 
 
-def test_known_crs_cannot_follow_unknown_crs_document() -> None:
-    """已有未知坐标系图层时不能静默加入已知坐标系图层。"""
+def test_unknown_crs_layer_is_rejected_before_entering_document() -> None:
+    """未知 CRS 图层必须在进入地图文档前完成定义。"""
     document: MapDocument = MapDocument()
-    document.add_layer(make_layer("unknown", None))
 
-    with pytest.raises(ValueError, match="无法与未知坐标系"):
-        document.add_layer(make_layer("wgs84", 4326))
+    with pytest.raises(ValueError, match="未定义 CRS"):
+        document.add_layer(make_layer("unknown", None))
 
 
-def test_user_defined_display_crs_survives_removing_all_layers() -> None:
-    """用户指定的地图 CRS 在图层清空后应保留。"""
+def test_empty_document_has_no_display_crs() -> None:
+    """空地图没有显示 CRS，必须先加入已定义 CRS 的图层。"""
     document: MapDocument = MapDocument()
     display_crs: CRS = CRS.from_epsg(3857)
-    document.set_display_crs(display_crs)
+    with pytest.raises(ValueError, match="空地图"):
+        document.set_display_crs(display_crs)
+
     document.add_layer(make_layer("roads", 3857))
-
     document.remove_layer("roads")
-
-    assert document.display_crs == display_crs
     assert document.layers == ()
+    assert document.display_crs is None
 
 
-def test_user_defined_display_crs_rejects_unprojected_first_layer() -> None:
-    """预先指定地图 CRS 后，首个图层也必须使用该坐标系。"""
+def test_display_crs_can_change_after_first_layer() -> None:
+    """首个图层建立显示 CRS 后，用户可以切换地图显示 CRS。"""
     document: MapDocument = MapDocument()
+    document.add_layer(make_layer("wgs84", 4326))
     document.set_display_crs(CRS.from_epsg(3857))
 
-    with pytest.raises(ValueError, match="坐标参考系统不一致"):
-        document.add_layer(make_layer("wgs84", 4326))
+    assert document.display_crs == CRS.from_epsg(3857)
+
+
+# ── 图层版本号 ─────────────────────────────────────────
+
+
+def test_add_layer_starts_revision_at_one() -> None:
+    """新加入的图层应具有初始版本号一。"""
+    document: MapDocument = MapDocument()
+    document.add_layer(make_layer("roads"))
+
+    assert document.layer_revision("roads") == 1
+
+
+def test_replace_layer_increments_revision() -> None:
+    """替换图层内容应使版本号递增，使显示缓存失效。"""
+    document: MapDocument = MapDocument()
+    document.add_layer(make_layer("roads"))
+    document.replace_layer(make_layer("roads"))
+
+    assert document.layer_revision("roads") == 2
+
+
+def test_remove_layer_cleans_up_revision() -> None:
+    """移除图层后其版本号应被清理，不再可查询。"""
+    document: MapDocument = MapDocument()
+    document.add_layer(make_layer("roads"))
+    document.remove_layer("roads")
+
+    with pytest.raises(KeyError, match="图层不存在"):
+        document.layer_revision("roads")
+
+
+def test_display_state_changes_do_not_increment_revision() -> None:
+    """显隐、选择、活动状态和显示设置变化不应影响内容版本号。"""
+    document: MapDocument = MapDocument()
+    document.add_layer(make_layer("roads"))
+    document.set_layer_visibility("roads", False)
+    document.set_layer_visibility("roads", True)
+    document.set_selection("roads", (1,))
+    document.set_active_layer("roads")
+    document.set_layer_opacity("roads", 0.5)
+    document.set_layer_blend_mode("roads", "multiply")
+    document.set_layer_scale_range("roads", 10.0, 100.0)
+    document.move_layer("roads", 0)
+
+    assert document.layer_revision("roads") == 1

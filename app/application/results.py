@@ -7,12 +7,27 @@ from typing import TypeAlias
 
 from pyproj import CRS
 
+from app.application.display_models import DisplayPayload
 from app.application.project_models import AnalysisRun, MapViewState
 from app.domain.feature import Feature, FeatureId
 from app.domain.layer_style import GeometryFamily
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
 from app.domain.vector_layer import Bounds, VectorLayer
+
+
+@dataclass(frozen=True, slots=True)
+class ReprojectionMetadata:
+    """记录一次独立重投影采用的操作和输出网格摘要。"""
+
+    source_crs: str
+    target_crs: str
+    operation: str
+    resampling: str | None
+    output_shape: tuple[int, int] | None
+    output_transform: tuple[float, float, float, float, float, float] | None
+    output_bounds: Bounds
+    feature_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +43,14 @@ class LayerSnapshot:
     # 已选要素编号：保存该图层当前选择集的稳定编号。
     selected_feature_ids: tuple[FeatureId, ...]
 
+    # 显示载荷：几何或像元已经位于地图显示 CRS，只供绘制和显示索引使用。
+    # 领域图层仍保留在 layer 字段中，不能用显示载荷替换它。
+    display_payload: DisplayPayload | None = None
+
+    # 显示范围：与 display_payload 使用同一显示 CRS；旧调用构造快照时为空，
+    # 由 bounds 属性回退到领域图层范围。
+    display_bounds: Bounds | None = None
+
     # 显示透明度：界面用于整体淡化图层，取值范围为零到一。
     opacity: float = 1.0
 
@@ -37,6 +60,9 @@ class LayerSnapshot:
     # 显示比例范围：视图比例低于最小值或高于最大值时不绘制该图层。
     min_scale_percent: float | None = None
     max_scale_percent: float | None = None
+
+    # 栅格显示重采样覆盖；为空时按分类/连续数据自动选择。
+    raster_display_resampling: str | None = None
 
     @property
     def layer_id(self) -> str:
@@ -65,7 +91,11 @@ class LayerSnapshot:
 
     @property
     def bounds(self) -> Bounds:
-        """返回图层空间范围。"""
+        """返回显示坐标系下的图层空间范围。"""
+        if self.display_bounds is not None:
+            return self.display_bounds
+        if self.display_payload is not None:
+            return self.display_payload.bounds
         return self.layer.bounds
 
 
@@ -90,11 +120,15 @@ class WorkspaceSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class DisplayCrsPreparation:
-    """表示已完成读取但尚未提交到地图文档的坐标系转换结果。"""
+    """表示已完成显示缓存准备但尚未提交的显示 CRS 变更。"""
 
     target_crs: CRS
     source_layer_ids: tuple[str, ...]
-    projected_layers: tuple[SpatialLayer, ...]
+    display_payloads: tuple[DisplayPayload, ...] = ()
+    source_layer_revisions: tuple[int, ...] = ()
+
+    # 保留字段以兼容尚未迁移的调用方；显示 CRS 提交不再替换领域图层。
+    projected_layers: tuple[SpatialLayer, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +173,9 @@ class OpenDataResult:
 
     # 用户警告：为空表示加载过程不需要额外提醒。
     warning: str | None = None
+
+    # 独立重投影工具的自动转换操作和输出网格摘要；普通打开数据为空。
+    reprojection_metadata: ReprojectionMetadata | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +260,7 @@ class ProjectSaveResult:
     path: Path
     layer_count: int
     analysis_run_count: int
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

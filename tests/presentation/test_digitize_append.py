@@ -290,16 +290,15 @@ def test_digitize_appends_to_locked_target_when_canvas_click_clears_active(
     window.close()
 
 
-def test_start_digitize_shows_hint_without_eligible_layer(monkeypatch) -> None:
-    """没有可承载点要素的图层时应提示用户，不进入数字化。"""
+def test_start_digitize_requires_map_crs(monkeypatch) -> None:
+    """空地图没有显示 CRS 时应先提示用户打开已定义 CRS 的图层。"""
     document: MapDocument = MapDocument()
-    document.set_display_crs(CRS_4549)
     window: MainWindow = _make_window(document)
     messages: list[str] = _collect_messages(monkeypatch)
 
     window._start_digitize("point", "点")
 
-    assert any("没有可用于添加点要素的图层" in message for message in messages)
+    assert any("请先打开一个具有坐标系的图层" in message for message in messages)
     assert window._map_canvas._digitize_mode == "none"
     window.close()
 

@@ -10,6 +10,7 @@ import geopandas as gpd
 import pandas as pd
 from shapely.geometry.base import BaseGeometry
 
+from app.application.crs_utils import crs_equivalent
 from app.application.errors import (
     EmptyOverlayResult,
     InvalidOverlayParameters,
@@ -150,8 +151,12 @@ def overlay_features(
     input_gdf: gpd.GeoDataFrame = _vector_layer_to_geodataframe(input_layer)
     overlay_gdf: gpd.GeoDataFrame = _vector_layer_to_geodataframe(overlay_layer)
 
-    if input_gdf.crs is not None and overlay_gdf.crs is not None and input_gdf.crs != overlay_gdf.crs:
-        overlay_gdf = overlay_gdf.to_crs(input_gdf.crs)
+    if input_gdf.crs is None or overlay_gdf.crs is None:
+        raise InvalidOverlayParameters("叠加分析输入必须具有 CRS。")
+    if not crs_equivalent(input_gdf.crs, overlay_gdf.crs):
+        raise InvalidOverlayParameters(
+            "叠加分析输入 CRS 不一致，请先手动重投影统一 CRS。"
+        )
 
     try:
         if request.operation in _GEOMETRIC_OVERLAY_OPS:

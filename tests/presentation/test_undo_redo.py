@@ -5,6 +5,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 # 必须在导入 Qt 前启用无界面平台，测试才能在没有显示器的环境运行。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -300,17 +302,18 @@ def test_undo_failure_drops_record_and_does_not_crash() -> None:
     window.close()
 
 
-def test_undo_after_crs_change_drops_record_without_crash() -> None:
-    """删除图层后变更显示坐标系再撤销，应提示失败并丢弃记录。"""
+def test_empty_map_rejects_display_crs_change_without_affecting_undo() -> None:
+    """删除最后图层后不能设置显示 CRS，且原有撤销操作仍可执行。"""
     document: MapDocument = MapDocument()
     document.add_layer(_make_layer("a", "图层A"))
     window: MainWindow = _make_window(document)
 
     window._remove_layer("a")
-    window._application.set_display_crs(CRS.from_epsg(4326))
+    with pytest.raises(ValueError, match="空地图"):
+        window._application.set_display_crs(CRS.from_epsg(4326))
     window._undo()
     assert len(window._undo_stack) == 0
-    assert "撤销失败" in window.statusBar().currentMessage()
+    assert len(document.layers) == 1
     window.close()
 
 

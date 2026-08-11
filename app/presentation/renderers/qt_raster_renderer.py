@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.application.display_models import RasterDisplayPayload, bounds_from_transform
 from app.application.results import LayerSnapshot
 from app.domain.raster_layer import RasterLayer
 
@@ -69,13 +70,28 @@ class QtRasterRenderer:
         if not isinstance(snapshot.layer, RasterLayer):
             raise TypeError("栅格渲染器只能绘制栅格图层。")
         layer: RasterLayer = snapshot.layer
+        if snapshot.display_payload is None:
+            display_payload = RasterDisplayPayload(
+                layer_id=layer.layer_id,
+                image_data=layer.image_data,
+                transform=layer.display_transform or layer.transform,
+                bounds=bounds_from_transform(
+                    layer.display_transform or layer.transform,
+                    layer.image_data.shape[1],
+                    layer.image_data.shape[0],
+                ),
+            )
+        elif isinstance(snapshot.display_payload, RasterDisplayPayload):
+            display_payload = snapshot.display_payload
+        else:
+            raise TypeError("栅格快照的显示载荷类型无效。")
         # RGBA 数组的三个维度依次为高度、宽度和颜色通道。
-        height: int = int(layer.image_data.shape[0])
-        width: int = int(layer.image_data.shape[1])
-        bytes_per_line: int = int(layer.image_data.strides[0])
+        height: int = int(display_payload.image_data.shape[0])
+        width: int = int(display_payload.image_data.shape[1])
+        bytes_per_line: int = int(display_payload.image_data.strides[0])
         # copy() 使 QImage 独立保存像素，避免继续依赖 NumPy 数组的内存。
         image: QImage = QImage(
-            layer.image_data.data,
+            display_payload.image_data.data,
             width,
             height,
             bytes_per_line,
@@ -93,7 +109,7 @@ class QtRasterRenderer:
             else QGraphicsPixmapItem(pixmap)
         )
         # 预览像元可能是降采样结果，使用其独立变换仍覆盖完整栅格范围。
-        transform = layer.display_transform or layer.transform
+        transform = display_payload.transform
         # Qt 的 Y 轴向下，地图坐标的 Y 轴通常向上，因此对 Y 方向取反。
         item.setTransform(
             QTransform(

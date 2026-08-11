@@ -43,12 +43,16 @@ class LayerReference:
 
     layer_id: str
     name: str
-    source_path: str
+    source_path: str | None
     source_layer_name: str | None
     layer_kind: str
     visible: bool
     selected_feature_ids: tuple[FeatureId, ...]
     fingerprint: SourceFingerprint | None
+    # 工程内 CRS 覆盖；为空表示使用数据源声明的 CRS。
+    crs_override: str | None = None
+    # 栅格显示重采样覆盖；为空表示按栅格类型自动选择。
+    display_resampling: str | None = None
     symbology: Mapping[str, object] | None = None
     # 矢量图层动态标注配置；缺失时兼容旧版工程并视为未配置。
     labeling: Mapping[str, object] | None = None
@@ -59,6 +63,11 @@ class LayerReference:
     # 图层显示比例范围；空值表示不限制。
     min_scale_percent: float | None = None
     max_scale_percent: float | None = None
+    # 数据源类型：file、database 或 temporary。临时图层仅在用户确认持久化后写入工程。
+    source_kind: str = "file"
+    # 数据库图层使用稳定的目录 ID；密码和连接配置永不写入工程文件。
+    database_layer_id: int | None = None
+    database_connection_identity: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

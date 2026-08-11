@@ -29,6 +29,10 @@ class IncompatibleCoordinateReferenceSystem(ApplicationError):
     """表示待加载图层无法安全转换到地图显示坐标系。"""
 
 
+class CoordinateReferenceSystemRequired(ApplicationError):
+    """表示数据没有 CRS，必须先由用户定义或修正。"""
+
+
 class LayerNotFound(ApplicationError):
     """表示业务操作引用了不存在的图层。"""
 

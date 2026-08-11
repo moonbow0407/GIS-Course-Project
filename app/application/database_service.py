@@ -27,11 +27,17 @@ class DatabaseService:
         """注入数据库网关工厂，保持应用层不依赖具体驱动实现。"""
         self._gateway_factory: DatabaseGatewayFactory = gateway_factory
         self._gateway: DatabaseGateway | None = None
+        self._connection_identity: str | None = None
 
     @property
     def is_connected(self) -> bool:
         """返回当前是否存在已经通过连接测试的数据库网关。"""
         return self._gateway is not None
+
+    @property
+    def connection_identity(self) -> str | None:
+        """返回不含密码的连接身份，用于工程匹配数据库图层引用。"""
+        return self._connection_identity
 
     def connect(self, config: DatabaseConnectionConfig) -> DatabaseServerInfo:
         """创建并测试一个新的数据库连接。
@@ -53,6 +59,7 @@ class DatabaseService:
 
         previous: DatabaseGateway | None = self._gateway
         self._gateway = candidate
+        self._connection_identity = self._identity(config)
         if previous is not None:
             previous.close()
         return server_info
@@ -61,6 +68,7 @@ class DatabaseService:
         """断开当前数据库连接；重复断开视为幂等操作。"""
         gateway: DatabaseGateway | None = self._gateway
         self._gateway = None
+        self._connection_identity = None
         if gateway is not None:
             gateway.close()
 
@@ -85,3 +93,8 @@ class DatabaseService:
         if self._gateway is None:
             raise DatabaseNotConnected("请先连接 PostgreSQL/PostGIS 数据库。")
         return self._gateway
+
+    @staticmethod
+    def _identity(config: DatabaseConnectionConfig) -> str:
+        """构造可写入工程的连接身份，不包含密码。"""
+        return f"{config.host}:{config.port}/{config.database}?user={config.username}"

@@ -11,6 +11,8 @@ from pyproj import CRS
 from shapely.geometry import Point
 
 from app.application.buffer_analysis import BufferRequest
+from app.application.database_models import DatabaseConnectionConfig, DatabaseServerInfo
+from app.application.database_service import DatabaseService
 from app.application.errors import InvalidBufferParameters
 from app.application.gis_application import GisApplication
 from app.application.project_models import LayerReference, MapViewState
@@ -24,6 +26,57 @@ from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
 from app.infrastructure.file_io.geopandas_vector_writer import GeoPandasVectorWriter
 from app.infrastructure.project.json_project_store import JsonProjectStore
+
+
+class FakeDatabaseGateway:
+    """为工程数据库图层恢复测试提供最小 PostGIS 网关。"""
+
+    def __init__(self) -> None:
+        self.layer = VectorLayer.create(
+            name="数据库道路",
+            features=(Feature(fid=11, geometry=Point(118.0, 31.0), attributes={}),),
+            crs=CRS.from_epsg(4326),
+            database_layer_id=17,
+        )
+
+    def test_connection(self) -> DatabaseServerInfo:
+        """返回模拟连接信息。"""
+        return DatabaseServerInfo("gis", "tester", "PostgreSQL", "PostGIS")
+
+    def ensure_schema(self) -> None:
+        """测试网关不需要建表。"""
+
+    def list_layers(self) -> tuple[object, ...]:
+        """返回空目录。"""
+        return ()
+
+    def import_layer(self, layer: VectorLayer) -> object:
+        """测试网关不执行导入。"""
+        return layer
+
+    def load_layer(self, layer_id: int, target_crs: CRS | None = None) -> VectorLayer:
+        """按固定数据库 ID 返回图层。"""
+        assert layer_id == 17
+        assert target_crs is None
+        return self.layer
+
+    def close(self) -> None:
+        """释放模拟连接。"""
+
+
+def make_database_service() -> DatabaseService:
+    """创建已经连接到固定测试身份的数据库服务。"""
+    service = DatabaseService(lambda _config: FakeDatabaseGateway())
+    service.connect(
+        DatabaseConnectionConfig(
+            host="localhost",
+            port=5432,
+            database="gis",
+            username="tester",
+            password="secret",
+        )
+    )
+    return service
 
 
 def make_layer(name: str = "道路") -> VectorLayer:
@@ -158,6 +211,85 @@ def test_project_round_trip_rebuilds_raster_classified_preview(tmp_path: Path) -
 
     assert restored_layer.symbology.renderer_type is RasterRendererType.CLASSIFIED
     assert restored_layer.image_data[0, 0, :3].tolist() == [78, 121, 167]
+
+
+def test_project_round_trip_restores_raster_display_resampling(tmp_path: Path) -> None:
+    """工程应保存栅格显示重采样设置，但不改变分析栅格。"""
+    source_path = tmp_path / "display.tif"
+    with rasterio.open(
+        source_path,
+        "w",
+        driver="GTiff",
+        width=2,
+        height=2,
+        count=1,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=Affine.translation(0, 2) * Affine.scale(1, -1),
+    ) as dataset:
+        dataset.write(np.ones((1, 2, 2), dtype=np.float32))
+    project_path = tmp_path / "display.gisproj"
+
+    application = make_application()
+    opened = application.open_data(source_path)
+    application.set_raster_display_resampling(opened.layer_id, "nearest")
+    application.save_project(project_path)
+
+    restored = make_application().open_project(project_path)
+
+    assert restored.snapshot.layers[0].raster_display_resampling == "nearest"
+    assert restored.snapshot.layers[0].layer.raster_data.shape == (1, 2, 2)
+
+
+def test_project_save_can_skip_or_persist_temporary_layers(tmp_path: Path) -> None:
+    """保存工程时跳过临时层会告警，确认持久化后应能重新打开该图层。"""
+    application = make_application()
+    temporary = VectorLayer.create(
+        name="临时结果",
+        features=make_layer().features,
+        crs=CRS.from_epsg(4326),
+    )
+    application.add_layer(temporary)
+    project_path = tmp_path / "temporary.gisproj"
+
+    skipped = application.save_project(project_path, persist_temporary=False)
+    assert skipped.layer_count == 0
+    assert skipped.warnings
+    assert len(make_application().open_project(project_path).snapshot.layers) == 0
+
+    persisted = application.save_project(project_path, persist_temporary=True)
+    assert persisted.layer_count == 1
+    reopened = make_application().open_project(project_path)
+    assert len(reopened.snapshot.layers) == 1
+    assert reopened.snapshot.layers[0].layer.source_path is not None
+
+
+def test_project_round_trip_persists_database_layer_reference_without_password(
+    tmp_path: Path,
+) -> None:
+    """工程应保存数据库图层 ID 和连接身份，绝不能保存数据库密码。"""
+    project_path = tmp_path / "database.gisproj"
+    database_service = make_database_service()
+    application = GisApplication(
+        AutoDataReader(),
+        project_store=JsonProjectStore(),
+        database_service=database_service,
+    )
+    opened = application.load_database_layer(17)
+    application.save_project(project_path)
+
+    manifest_text = project_path.read_text(encoding="utf-8")
+    assert '"source_kind": "database"' in manifest_text
+    assert "secret" not in manifest_text
+
+    restored = GisApplication(
+        AutoDataReader(),
+        project_store=JsonProjectStore(),
+        database_service=make_database_service(),
+    ).open_project(project_path)
+
+    assert restored.snapshot.layers[0].layer_id == opened.layer_id
+    assert restored.snapshot.layers[0].layer.database_layer_id == 17
 
 
 def test_project_round_trip_restores_workspace_and_relative_source_path(

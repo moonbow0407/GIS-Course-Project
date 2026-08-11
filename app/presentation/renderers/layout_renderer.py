@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QGraphicsSimpleTextItem,
 )
 
+from app.application.display_models import RasterDisplayPayload, VectorDisplayPayload
 from app.application.results import WorkspaceSnapshot
 from app.domain.layout import (
     LegendElement,
@@ -94,12 +95,20 @@ def render_map_frame(
         for z_value, layer_snap in enumerate(snapshot.layers):
             if not layer_snap.visible:
                 continue
-            layer = layer_snap.layer
-            if isinstance(layer, RasterLayer):
+            if isinstance(layer_snap.display_payload, RasterDisplayPayload):
                 raster_renderer.render_layer(
                     scene, layer_snap, float(z_value),
                 )
-            elif isinstance(layer, VectorLayer):
+            elif isinstance(layer_snap.display_payload, VectorDisplayPayload):
+                vector_renderer.render_layer(
+                    scene, layer_snap, float(z_value), mupp,
+                )
+            elif isinstance(layer_snap.layer, RasterLayer):
+                # 兼容旧调用方直接构造未附带显示载荷的快照。
+                raster_renderer.render_layer(
+                    scene, layer_snap, float(z_value),
+                )
+            elif isinstance(layer_snap.layer, VectorLayer):
                 vector_renderer.render_layer(
                     scene, layer_snap, float(z_value), mupp,
                 )
@@ -252,7 +261,6 @@ def render_legend(
     返回:
         创建的全部图元。
     """
-    from app.domain.layer_style import GeometryFamily
     from app.domain.raster_layer import RasterLayer
     from app.domain.symbology import VectorRendererType
 

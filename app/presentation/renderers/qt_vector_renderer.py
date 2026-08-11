@@ -30,12 +30,14 @@ from shapely.geometry import (
 )
 from shapely.geometry.base import BaseGeometry
 
+from app.application.display_models import VectorDisplayPayload
 from app.application.results import LayerSnapshot
 from app.domain.feature import Feature
 from app.domain.labeling import LabelClass, LabelPlacement
 from app.domain.layer_style import LayerStyle
 from app.domain.vector_layer import VectorLayer
 from app.presentation.global_display_settings import selection_color
+
 
 def _simplify_polygon_exteriors_only(
     geometry: BaseGeometry,
@@ -295,6 +297,12 @@ class QtVectorRenderer:
         """
         if not isinstance(snapshot.layer, VectorLayer):
             raise TypeError("矢量渲染器只能绘制矢量图层。")
+        if snapshot.display_payload is None:
+            display_features: tuple[Feature, ...] = snapshot.layer.features
+        elif isinstance(snapshot.display_payload, VectorDisplayPayload):
+            display_features = snapshot.display_payload.features
+        else:
+            raise TypeError("矢量快照的显示载荷类型无效。")
         composition_mode = _BLEND_MODE_MAP.get(
             snapshot.blend_mode,
             QPainter.CompositionMode.CompositionMode_SourceOver,
@@ -302,7 +310,7 @@ class QtVectorRenderer:
         _needs_blend = composition_mode != QPainter.CompositionMode.CompositionMode_SourceOver
         items: list[QGraphicsItem] = []
         feature: Feature
-        for feature in snapshot.layer.features:
+        for feature in display_features:
             if feature.geometry.is_empty:
                 continue
             if snapshot.layer.symbology is None:
@@ -354,13 +362,21 @@ class QtVectorRenderer:
             item.setVisible(snapshot.visible)
             scene.addItem(item)
             items.append(item)
-        self._render_labels(scene, snapshot, z_value, map_units_per_pixel, items)
+        self._render_labels(
+            scene,
+            snapshot,
+            display_features,
+            z_value,
+            map_units_per_pixel,
+            items,
+        )
         return items
 
     def _render_labels(
         self,
         scene: QGraphicsScene,
         snapshot: LayerSnapshot,
+        display_features: tuple[Feature, ...],
         z_value: float,
         map_units_per_pixel: float,
         items: list[QGraphicsItem],
@@ -375,7 +391,7 @@ class QtVectorRenderer:
         for class_index, label_class in enumerate(labeling.classes):
             if not label_class.visible:
                 continue
-            for feature in snapshot.layer.features:
+            for feature in display_features:
                 if feature.geometry.is_empty:
                     continue
                 text: str | None = label_class.text_for(feature)

@@ -11,6 +11,7 @@ import pandas as pd
 from pyproj import CRS
 from shapely.geometry.base import BaseGeometry
 
+from app.application.crs_utils import crs_equivalent
 from app.application.errors import (
     EmptyVectorDataset,
     IncompatibleCoordinateReferenceSystem,
@@ -47,8 +48,13 @@ class GeoPandasVectorReader:
         path: Path,
         target_crs: CRS | None = None,
         layer_name: str | None = None,
+        source_crs_override: CRS | None = None,
     ) -> VectorLayer:
-        """读取矢量文件，规范化字段，并按需转换坐标参考系统。"""
+        """读取矢量文件，规范化字段，并按需转换坐标参考系统。
+
+        ``source_crs_override`` 只修正坐标的解释，不会修改几何坐标值；
+        ``target_crs`` 仅保留给需要输出到指定坐标系的底层调用方。
+        """
         resolved_path: Path = path.expanduser().resolve()
         if not resolved_path.is_file():
             raise VectorFileNotFound(f"矢量文件不存在：{resolved_path}")
@@ -89,16 +95,23 @@ class GeoPandasVectorReader:
         if dataframe.empty:
             raise EmptyVectorDataset(f"矢量数据集不包含任何记录：{resolved_path.name}")
 
-        source_crs: CRS | None = (
+        declared_crs: CRS | None = (
             CRS.from_user_input(dataframe.crs) if dataframe.crs is not None else None
         )
+        source_crs: CRS | None = source_crs_override or declared_crs
         self._validate_coordinate_bounds(dataframe, source_crs, resolved_path.name)
         if target_crs is not None:
             if source_crs is None:
                 raise IncompatibleCoordinateReferenceSystem(
                     "源数据未声明坐标参考系统，无法转换到地图显示坐标系。"
                 )
-            if source_crs != target_crs:
+            if source_crs_override is not None and not crs_equivalent(
+                declared_crs, source_crs_override
+            ):
+                # GeoPandas 的 to_crs 使用 GeoDataFrame 自身的 CRS；先覆盖
+                # 该解释，才能保证“定义 CRS”后的分析投影按新 CRS 计算。
+                dataframe = dataframe.set_crs(source_crs_override, allow_override=True)
+            if not crs_equivalent(source_crs, target_crs):
                 try:
                     # to_crs 会转换全部几何坐标，原始属性保持不变。
                     dataframe = dataframe.to_crs(target_crs)
@@ -144,6 +157,7 @@ class GeoPandasVectorReader:
             crs=source_crs,
             source_path=resolved_path,
             source_layer_name=resolved_layer_name,
+            crs_override=source_crs_override is not None,
         )
 
     @staticmethod

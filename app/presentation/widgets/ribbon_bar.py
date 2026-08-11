@@ -312,6 +312,10 @@ class RibbonBar(QWidget):
                         RibbonActionSpec("clear_selection", "清除选择", "×", "#dc2626"),
                         RibbonActionSpec("refresh_map", "刷新地图", "↻", "#0f766e"),
                     )),
+                    RibbonGroupSpec("测量", (
+                        RibbonActionSpec("measure_length", "测量长度", "↔", "#0891b2"),
+                        RibbonActionSpec("measure_area", "测量面积", "▱", "#0891b2"),
+                    )),
                 ),
             ),
             (

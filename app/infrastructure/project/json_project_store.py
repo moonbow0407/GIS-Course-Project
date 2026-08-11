@@ -23,7 +23,7 @@ class JsonProjectStore:
     """将工程快照保存为可校验、可迁移的 UTF-8 JSON 文件。"""
 
     FORMAT: str = "gis-desktop-project"
-    CURRENT_SCHEMA_VERSION: int = 1
+    CURRENT_SCHEMA_VERSION: int = 3
 
     def load(self, path: Path) -> ProjectManifest:
         """读取工程文件并校验其格式版本和字段类型。"""
@@ -110,15 +110,30 @@ class JsonProjectStore:
             self._feature_id(item, f"workspace.layers[{index}].selected_feature_ids")
             for item in raw_ids
         )
+        source_kind: str = self._string(
+            layer.get("source_kind", "file"), f"图层 {index}.source_kind"
+        )
+        source_path: str | None = self._optional_string(layer.get("source_path"))
+        database_layer_id: int | None = self._optional_integer(
+            layer.get("database_layer_id"), f"图层 {index}.database_layer_id"
+        )
+        if source_kind not in {"file", "database", "temporary"}:
+            raise ProjectReadFailed(f"图层 {index}.source_kind 不是受支持的数据源类型。")
+        if source_kind == "database" and database_layer_id is None:
+            raise ProjectReadFailed(f"图层 {index} 的数据库引用缺少 database_layer_id。")
+        if source_kind == "file" and source_path is None:
+            raise ProjectReadFailed(f"图层 {index} 的文件引用缺少 source_path。")
         return LayerReference(
             layer_id=self._string(layer.get("layer_id"), f"图层 {index}.layer_id"),
             name=self._string(layer.get("name"), f"图层 {index}.name"),
-            source_path=self._string(layer.get("source_path"), f"图层 {index}.source_path"),
+            source_path=source_path,
             source_layer_name=self._optional_string(layer.get("source_layer_name")),
             layer_kind=self._string(layer.get("layer_kind"), f"图层 {index}.layer_kind"),
             visible=self._boolean(layer.get("visible"), f"图层 {index}.visible"),
             selected_feature_ids=selected_feature_ids,
             fingerprint=self._decode_fingerprint(layer.get("fingerprint")),
+            crs_override=self._optional_string(layer.get("crs_override")),
+            display_resampling=self._optional_string(layer.get("display_resampling")),
             symbology=(
                 self._mapping(layer.get("symbology"), f"图层 {index}.symbology")
                 if layer.get("symbology") is not None
@@ -139,6 +154,11 @@ class JsonProjectStore:
             max_scale_percent=self._optional_number(
                 layer.get("max_scale_percent"),
                 f"图层 {index}.max_scale_percent",
+            ),
+            source_kind=source_kind,
+            database_layer_id=database_layer_id,
+            database_connection_identity=self._optional_string(
+                layer.get("database_connection_identity")
             ),
         )
 
@@ -271,11 +291,16 @@ class JsonProjectStore:
             "layer_id": layer.layer_id,
             "name": layer.name,
             "source_path": layer.source_path,
+            "source_kind": layer.source_kind,
+            "database_layer_id": layer.database_layer_id,
+            "database_connection_identity": layer.database_connection_identity,
             "source_layer_name": layer.source_layer_name,
             "layer_kind": layer.layer_kind,
             "visible": layer.visible,
             "selected_feature_ids": list(layer.selected_feature_ids),
             "fingerprint": fingerprint,
+            "crs_override": layer.crs_override,
+            "display_resampling": layer.display_resampling,
             "symbology": dict(layer.symbology) if layer.symbology is not None else None,
             "labeling": dict(layer.labeling) if layer.labeling is not None else None,
             "opacity": layer.opacity,
@@ -349,6 +374,13 @@ class JsonProjectStore:
         if value is None:
             return None
         return JsonProjectStore._number(value, field_name)
+
+    @staticmethod
+    def _optional_integer(value: object, field_name: str) -> int | None:
+        """读取可选整数值字段。"""
+        if value is None:
+            return None
+        return JsonProjectStore._integer(value, field_name)
 
     @staticmethod
     def _boolean(value: object, field_name: str) -> bool:
