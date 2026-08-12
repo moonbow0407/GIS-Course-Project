@@ -163,7 +163,8 @@ def _chaikin_pass(geometry: BaseGeometry) -> BaseGeometry:
 
 def _chaikin_line(line: LineString) -> LineString:
     """对单条线的坐标执行一轮 Chaikin 1/4-3/4 角切。"""
-    coords: list[tuple[float, float]] = list(line.coords)
+    # 三维几何的坐标是 (x, y, z) 三元组；平滑只处理平面位置，统一取前两维。
+    coords: list[tuple[float, float]] = [(c[0], c[1]) for c in line.coords]
     if len(coords) < 2:
         return line
     smoothed: list[tuple[float, float]] = [coords[0]]

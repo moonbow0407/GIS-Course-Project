@@ -166,6 +166,40 @@ def test_scale_hidden_layers_are_excluded_from_query_and_snapping() -> None:
     assert canvas.snap_engine.indexed_layer_ids == frozenset({visible_layer.layer_id})
 
 
+def test_snapping_engine_accepts_3d_geometry() -> None:
+    """带 Z 坐标（三维）的图层不应导致捕捉索引构建或查询崩溃。"""
+    application = QApplication.instance() or QApplication([])
+    layer = VectorLayer.create(
+        layer_id="z-layer",
+        name="三维线图层",
+        features=(
+            Feature(
+                fid=1,
+                geometry=LineString([(0, 0, 10), (1, 1, 10), (2, 0, 10)]),
+                attributes={},
+            ),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    canvas = MapCanvas()
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),),
+            active_layer_id=layer.layer_id,
+            display_crs=layer.crs,
+        )
+    )
+
+    assert application is not None
+    # 索引构建成功，3D 线的顶点可按平面坐标参与捕捉。
+    assert layer.layer_id in canvas.snap_engine.indexed_layer_ids
+    canvas.snap_engine.enabled = True
+    snap = canvas.snap_engine.find_snap(Point(1, 1), map_units_per_pixel=1.0)
+    assert snap is not None
+    # 捕捉位置回到二维平面坐标，不含 Z 分量。
+    assert (snap.map_point.x, snap.map_point.y) == (1.0, 1.0)
+
+
 def test_canvas_full_extent_uses_relative_margin_for_small_geographic_bounds() -> None:
     """小范围经纬度数据全图显示时，应按包络比例留白并充分利用视口。"""
     application: QApplication = QApplication.instance() or QApplication([])

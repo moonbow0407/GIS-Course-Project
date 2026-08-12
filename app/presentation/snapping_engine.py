@@ -169,7 +169,10 @@ class SnappingEngine:
                 _SnapCandidate("vertex", layer_id, (geometry.x, geometry.y))
             )
         elif gtype in ("LineString", "LinearRing"):
-            coords: list[tuple[float, float]] = list(geometry.coords)
+            # 三维几何的坐标是 (x, y, z) 三元组；捕捉只关心平面位置，统一取前两维。
+            coords: list[tuple[float, float]] = [
+                (c[0], c[1]) for c in geometry.coords
+            ]
             for x, y in coords:
                 candidates.append(_SnapCandidate("vertex", layer_id, (x, y)))
             # 为每条线段生成 edge 候选。
