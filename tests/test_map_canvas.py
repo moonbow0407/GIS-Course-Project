@@ -150,7 +150,7 @@ def test_update_raster_viewport_replaces_only_target_raster_item() -> None:
     old_scene_rect = QRectF(canvas.sceneRect())
     payload = RasterDisplayPayload(
         layer_id=raster.layer_id,
-        image_data=np.zeros((8, 8, 4), dtype=np.uint8),
+        image_data=np.full((8, 8, 4), 255, dtype=np.uint8),
         transform=Affine(0.25, 0, 1, 0, -0.25, 3),
         bounds=(1, 1, 3, 3),
     )
@@ -162,6 +162,77 @@ def test_update_raster_viewport_replaces_only_target_raster_item() -> None:
     assert canvas.sceneRect() == old_scene_rect
     assert canvas._last_snapshot is not None
     assert canvas._last_snapshot.layers[0].display_payload is payload
+
+
+def test_transparent_raster_viewport_does_not_replace_existing_preview() -> None:
+    """NoData 视口不能覆盖仍可用的栅格首屏预览。"""
+    application = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    raster = RasterLayer.create(
+        layer_id="raster",
+        name="栅格",
+        raster_data=np.ones((1, 4, 4), dtype=np.uint8),
+        image_data=np.full((4, 4, 4), 255, dtype=np.uint8),
+        valid_mask=np.ones((4, 4), dtype=np.bool_),
+        transform=Affine(1, 0, 0, 0, -1, 4),
+        crs=CRS.from_epsg(3857),
+        bounds=(0, 0, 4, 4),
+    )
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(LayerSnapshot(raster, True, ()),),
+            active_layer_id=raster.layer_id,
+            display_crs=raster.crs,
+        )
+    )
+    old_item = canvas._layer_items[raster.layer_id][0]
+    old_payload = canvas._last_snapshot.layers[0].display_payload
+    transparent_payload = RasterDisplayPayload(
+        layer_id=raster.layer_id,
+        image_data=np.zeros((8, 8, 4), dtype=np.uint8),
+        transform=Affine(0.25, 0, 1, 0, -0.25, 3),
+        bounds=(1, 1, 3, 3),
+    )
+
+    canvas.update_raster_viewport(transparent_payload)
+
+    assert application is not None
+    assert canvas._layer_items[raster.layer_id][0] is old_item
+    assert canvas._last_snapshot is not None
+    assert canvas._last_snapshot.layers[0].display_payload is old_payload
+
+
+def test_zoom_to_layer_forces_viewport_refresh() -> None:
+    """图层定位后应强制刷新视口，即使缩放比例没有变化。"""
+    application = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    raster = RasterLayer.create(
+        layer_id="raster",
+        name="栅格",
+        raster_data=np.ones((1, 4, 4), dtype=np.uint8),
+        image_data=np.full((4, 4, 4), 255, dtype=np.uint8),
+        valid_mask=np.ones((4, 4), dtype=np.bool_),
+        transform=Affine(1, 0, 0, 0, -1, 4),
+        crs=CRS.from_epsg(3857),
+        bounds=(0, 0, 4, 4),
+    )
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(LayerSnapshot(raster, True, ()),),
+            active_layer_id=raster.layer_id,
+            display_crs=raster.crs,
+        )
+    )
+    canvas._viewport_timer.stop()
+    canvas._last_viewport_key = (1.0,)
+
+    canvas.zoom_to_layer(raster.bounds)
+
+    assert application is not None
+    assert canvas._viewport_timer.isActive()
+    assert canvas._last_viewport_key is None
 
 
 def test_scale_hidden_layers_are_excluded_from_query_and_snapping() -> None:

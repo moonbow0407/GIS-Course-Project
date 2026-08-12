@@ -298,8 +298,14 @@ class MapCanvas(QGraphicsView):
         self.schedule_viewport_refresh(force=True)
 
     def update_raster_viewport(self, payload: RasterDisplayPayload) -> None:
-        """只替换一个栅格图层的视口图元，不重建矢量场景或改变视图。"""
+        """只替换一个栅格图层的视口图元，不重建矢量场景或改变视图。
+
+        后台窗口可能只落在栅格的 NoData 区域。此时不能以全透明图元替换
+        首屏预览，否则用户会看到图层短暂出现后消失。
+        """
         if self._last_snapshot is None:
+            return
+        if not bool(payload.image_data[..., 3].any()):
             return
         layer_index = next(
             (
@@ -1519,6 +1525,9 @@ class MapCanvas(QGraphicsView):
         self._ensure_pan_area()
         self._refresh_rendering_for_current_view()
         self._emit_view_scale()
+        # 缩放至图层后即使缩放比例恰好与全图一致，也要读取当前图层范围的
+        # 最新窗口；否则首次后台请求若落在 NoData 区域，画面会一直停留在旧预览。
+        self.schedule_viewport_refresh(force=True)
 
     def zoom_to_feature(self, bounds: Bounds) -> None:
         """将单个要素放大到视图中，保证有明显的缩放效果。
