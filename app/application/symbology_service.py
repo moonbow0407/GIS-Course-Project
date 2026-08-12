@@ -285,7 +285,10 @@ def _stretch_normalized(
         upper = float(samples.max())
     if upper <= lower:
         upper = lower + 1.0
-    return np.clip((numeric_band - lower) / (upper - lower), 0.0, 1.0)
+    normalized = np.clip((numeric_band - lower) / (upper - lower), 0.0, 1.0)
+    # 无效像元（NoData/NaN）拉伸后仍是非有限值，直接参与取整会触发告警并
+    # 产生越界索引；统一置零，其可见性由 alpha 通道按 valid_mask 决定。
+    return np.where(np.isfinite(normalized), normalized, 0.0)
 
 
 def _apply_color_ramp(

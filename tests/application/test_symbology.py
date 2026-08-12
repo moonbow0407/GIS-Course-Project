@@ -1,5 +1,7 @@
 """矢量与栅格符号系统应用服务测试。"""
 
+import warnings
+
 import numpy as np
 import pytest
 from affine import Affine
@@ -113,6 +115,35 @@ def test_single_band_raster_stretch_generates_color_ramp_and_transparent_nodata(
     assert styled.image_data[0, 0, :3].tolist() == [247, 251, 255]
     assert styled.image_data[1, 0, :3].tolist() == [8, 48, 107]
     assert styled.image_data[1, 1, 3] == 0
+
+
+def test_raster_stretch_handles_nan_pixels_without_casting_warning() -> None:
+    """含 NaN 像元的栅格拉伸不应触发取整告警或越界索引。"""
+    data = np.asarray([[[0.0, np.nan], [100.0, 999.0]]])
+    valid = np.asarray([[True, False], [True, False]], dtype=np.bool_)
+    layer = RasterLayer.create(
+        name="含NaN高程",
+        raster_data=data,
+        image_data=np.zeros((2, 2, 4), dtype=np.uint8),
+        valid_mask=valid,
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0, 0, 2, 2),
+    )
+    config = RasterSymbology(
+        renderer_type=RasterRendererType.STRETCH,
+        stretch_type=StretchType.MIN_MAX,
+        color_scheme="blue",
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        styled = apply_raster_symbology(layer, config)
+
+    # 无效像元保持透明，有效像元颜色不受影响。
+    assert styled.image_data[0, 1, 3] == 0
+    assert styled.image_data[0, 0, :3].tolist() == [247, 251, 255]
+    assert styled.image_data[1, 0, :3].tolist() == [8, 48, 107]
 
 
 def test_classified_raster_uses_discrete_colors_and_round_trips() -> None:
