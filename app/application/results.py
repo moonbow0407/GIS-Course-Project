@@ -31,6 +31,25 @@ class ReprojectionMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class ReprojectionPreparation:
+    """表示重投影已完成但尚未提交到工作区的待提交载荷。
+
+    由后台线程的 prepare 阶段生成，主线程 commit 阶段校验源图层
+    修订号与输出文件未变化后原子注册；``owns_output_file`` 表示
+    输出文件由本次操作创建，提交失败时可以安全删除。
+    """
+
+    projected_layer: SpatialLayer
+    metadata: ReprojectionMetadata | None
+    output_path: Path | None
+    source_layer_id: str
+    source_layer_revision: int
+    owns_output_file: bool
+    output_size: int = 0
+    output_mtime_ns: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class LayerSnapshot:
     """表示某一时刻供界面读取的单个图层状态。"""
 

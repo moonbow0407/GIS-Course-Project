@@ -64,6 +64,7 @@ from app.application.overlay_analysis import (
     overlay_features,
 )
 from app.application.ports import DataReader, DataWriter, ProjectStore
+from app.application.ports.windowed_raster_projector import WindowedRasterProjector
 from app.application.project_models import (
     AnalysisOutputReference,
     AnalysisRun,
@@ -89,7 +90,10 @@ from app.application.raster_calculator import (
     generate_display_image,
     validate_band_alignment,
 )
-from app.application.reprojection_service import ReprojectionService
+from app.application.reprojection_service import (
+    ReprojectionService,
+    should_stream_raster,
+)
 from app.application.results import (
     AnalysisResultPersisted,
     BufferAnalysisResult,
@@ -106,6 +110,7 @@ from app.application.results import (
     RasterClipResult,
     RasterReclassifyResult,
     ReprojectionMetadata,
+    ReprojectionPreparation,
     SelectedFeature,
     SelectionResult,
     WorkspaceSnapshot,
@@ -195,6 +200,12 @@ def _geometry_priority(geom_type: str) -> int:
     return 2  # Polygon, MultiPolygon, GeometryCollection
 
 
+def _cleanup_reprojection_output(output_path: Path) -> None:
+    """删除本次重投影创建的输出文件及 GDAL 掩膜伴生文件。"""
+    output_path.unlink(missing_ok=True)
+    Path(str(output_path) + ".msk").unlink(missing_ok=True)
+
+
 def _attribute_match(
     attr_value: object, operator: str, query_value: str
 ) -> bool:
@@ -271,6 +282,7 @@ class GisApplication:
         project_store: ProjectStore | None = None,
         database_service: DatabaseService | None = None,
         display_projection_service: DisplayProjectionService | None = None,
+        windowed_raster_projector: WindowedRasterProjector | None = None,
     ) -> None:
         """使用空间数据读取端口和可选地图文档初始化应用入口。"""
         self.data_reader = data_reader
@@ -281,6 +293,8 @@ class GisApplication:
             display_projection_service or DisplayProjectionService()
         )
         self._display_cache = DisplayCacheManager(self._display_projection_service)
+        # 分块流式栅格重投影端口：为空时大栅格退化为内存路径（兼容旧行为）。
+        self._windowed_raster_projector = windowed_raster_projector
 
         # 地图文档：作为图层、显隐、活动状态和选择集的唯一事实来源。
         self._document: MapDocument = document or MapDocument()
@@ -423,17 +437,39 @@ class GisApplication:
             and crs_equivalent(layer.crs, self._document.display_crs)
         )
 
-    def reproject_layer(
+    def prepare_reprojection(
         self,
         layer_id: str,
         target_crs: CRS,
         output_path: Path | None = None,
         raster_resampling: str | None = None,
-    ) -> OpenDataResult:
-        """创建独立重投影图层；输入图层和源文件保持不变。"""
+        progress_callback: ProgressCallback | None = None,
+    ) -> ReprojectionPreparation:
+        """执行重投影计算并写出结果文件，不修改工作区状态。
+
+        该方法只做校验、计算与文件 I/O，可在后台线程执行；提交请调用
+        ``commit_reprojection``。栅格大文件未提供输出路径时写入工程目录，
+        未保存工程则报错，避免物化位置未定义。
+
+        参数:
+            layer_id: 源图层编号。
+            target_crs: 重投影目标坐标系。
+            output_path: 输出文件路径；为空时结果作为内存图层返回，
+                大栅格则写入工程目录并随工程保存。
+            raster_resampling: 栅格重采样方法；分类栅格默认为最近邻。
+            progress_callback: 流式路径按窗口回报进度；返回 False 时取消。
+
+        返回:
+            包含结果图层、元数据、输出文件所有权和源图层修订号的载荷。
+
+        异常:
+            LayerReprojectionFailed: 校验失败、重投影失败或工程未保存。
+            WorkspaceOperationCancelled: 进度回调请求取消。
+        """
         layer: SpatialLayer = self._find_layer(layer_id)
+        resolved_output_path: Path | None = None
         if output_path is not None:
-            resolved_output_path: Path = output_path.expanduser().resolve()
+            resolved_output_path = output_path.expanduser().resolve()
             if (
                 layer.source_path is not None
                 and resolved_output_path == layer.source_path.expanduser().resolve()
@@ -451,42 +487,163 @@ class GisApplication:
             and layer.symbology.renderer_type is RasterRendererType.CLASSIFIED
         ):
             resolved_resampling = "nearest"
-        service = ReprojectionService(self._display_projection_service, self.data_writer)
+        if (
+            resolved_output_path is None
+            and isinstance(layer, RasterLayer)
+            and should_stream_raster(layer, self._windowed_raster_projector)
+        ):
+            resolved_output_path = self._resolve_reprojection_file(layer)
+        service = ReprojectionService(
+            self._display_projection_service,
+            self.data_writer,
+            data_reader=self.data_reader,
+            windowed_projector=self._windowed_raster_projector,
+        )
         projected = service.execute(
             layer,
             target_crs,
-            output_path=output_path,
+            output_path=resolved_output_path,
             raster_resampling=resolved_resampling,
+            progress_callback=progress_callback,
         )
-        if output_path is not None:
+        if (
+            resolved_output_path is not None
+            and not service.output_file_written
+        ):
+            # 内存路径的矢量与小栅格仍由写出器落盘；流式路径已写完。
             output_layer_name = (
-                projected.source_layer_name if isinstance(projected, VectorLayer) else None
+                projected.source_layer_name
+                if isinstance(projected, VectorLayer)
+                else None
             )
-            service.persist(projected, output_path, output_layer_name)
-        result: OpenDataResult = self.add_layer(projected)
-        metadata: ReprojectionMetadata | None = service.metadata
-        if metadata is not None:
-            reprojection_parameters: dict[str, object] = {
-                "source_crs": metadata.source_crs,
-                "target_crs": metadata.target_crs,
-                "operation": metadata.operation,
-                "resampling": metadata.resampling,
-                "output_shape": metadata.output_shape,
-                "output_transform": metadata.output_transform,
-                "output_bounds": metadata.output_bounds,
-                "feature_count": metadata.feature_count,
-            }
-            run = self._create_analysis_run(
-                algorithm_id="reproject",
-                input_layer_ids=(layer_id,),
-                parameters=reprojection_parameters,
-                output_layer_id=projected.layer_id,
-                output_path=output_path,
-                output_layer_name=projected.name,
+            service.persist(projected, resolved_output_path, output_layer_name)
+        output_size: int = 0
+        output_mtime_ns: int = 0
+        if resolved_output_path is not None and resolved_output_path.is_file():
+            output_stat = resolved_output_path.stat()
+            output_size = output_stat.st_size
+            output_mtime_ns = output_stat.st_mtime_ns
+        return ReprojectionPreparation(
+            projected_layer=projected,
+            metadata=service.metadata,
+            output_path=resolved_output_path,
+            source_layer_id=layer_id,
+            source_layer_revision=self._document.layer_revision(layer_id),
+            owns_output_file=resolved_output_path is not None,
+            output_size=output_size,
+            output_mtime_ns=output_mtime_ns,
+        )
+
+    def _resolve_reprojection_file(self, layer: RasterLayer) -> Path:
+        """为"临时图层"模式的流式栅格确定工程目录下的物化路径。"""
+        if self._project_path is None:
+            raise LayerReprojectionFailed(
+                "工程尚未保存，无法创建临时重投影文件。请先保存工程。"
             )
-            self._analysis_runs = self._analysis_runs + (run,)
-            self._modified = True
-        return replace(result, reprojection_metadata=metadata)
+        safe_name: str = "".join(
+            c if c not in '<>:"/\\|?*' else "_" for c in layer.name
+        ).rstrip(".")
+        return (self._project_path.parent / f"{safe_name}_reprojected_{uuid4().hex}.tif").resolve()
+
+    def commit_reprojection(
+        self,
+        preparation: ReprojectionPreparation,
+    ) -> OpenDataResult:
+        """在主线程原子提交重投影结果并记录分析历史。
+
+        参数:
+            preparation: prepare_reprojection 返回的待提交载荷。
+
+        返回:
+            包含新图层编号和最新工作区快照的结果。
+
+        异常:
+            ValueError: 源图层被移除、内容已变化或输出文件已被删除/修改。
+        """
+        current_layer_ids: tuple[str, ...] = tuple(
+            layer.layer_id for layer in self._document.layers
+        )
+        if preparation.source_layer_id not in current_layer_ids:
+            self._discard_reprojection_output(preparation)
+            raise ValueError("重投影源图层已从工作区移除，请重试。")
+        if (
+            self._document.layer_revision(preparation.source_layer_id)
+            != preparation.source_layer_revision
+        ):
+            self._discard_reprojection_output(preparation)
+            raise ValueError("重投影期间源图层内容发生变化，请重试。")
+        if preparation.owns_output_file:
+            output_path: Path | None = preparation.output_path
+            assert output_path is not None
+            if not output_path.is_file():
+                raise ValueError("重投影输出文件已被删除，请重新执行重投影。")
+            output_stat = output_path.stat()
+            if (
+                output_stat.st_size != preparation.output_size
+                or output_stat.st_mtime_ns != preparation.output_mtime_ns
+            ):
+                raise ValueError("重投影输出文件已被修改，请重新执行重投影。")
+        layer_added = False
+        try:
+            result: OpenDataResult = self.add_layer(preparation.projected_layer)
+            layer_added = True
+            metadata: ReprojectionMetadata | None = preparation.metadata
+            if metadata is not None:
+                reprojection_parameters: dict[str, object] = {
+                    "source_crs": metadata.source_crs,
+                    "target_crs": metadata.target_crs,
+                    "operation": metadata.operation,
+                    "resampling": metadata.resampling,
+                    "output_shape": metadata.output_shape,
+                    "output_transform": metadata.output_transform,
+                    "output_bounds": metadata.output_bounds,
+                    "feature_count": metadata.feature_count,
+                }
+                run = self._create_analysis_run(
+                    algorithm_id="reproject",
+                    input_layer_ids=(preparation.source_layer_id,),
+                    parameters=reprojection_parameters,
+                    output_layer_id=preparation.projected_layer.layer_id,
+                    output_path=preparation.output_path,
+                    output_layer_name=preparation.projected_layer.name,
+                )
+                self._analysis_runs = self._analysis_runs + (run,)
+                self._modified = True
+            return replace(result, reprojection_metadata=metadata)
+        except Exception:
+            # 结果文件由本次重投影新建；提交失败时不能留下孤立文件。
+            if layer_added:
+                self._document.remove_layer(preparation.projected_layer.layer_id)
+            self._discard_reprojection_output(preparation)
+            raise
+
+    def _discard_reprojection_output(
+        self,
+        preparation: ReprojectionPreparation,
+    ) -> None:
+        """提交校验或注册失败时删除本次创建的输出文件（仅当归本次操作所有）。"""
+        if preparation.owns_output_file and preparation.output_path is not None:
+            _cleanup_reprojection_output(preparation.output_path)
+
+    def reproject_layer(
+        self,
+        layer_id: str,
+        target_crs: CRS,
+        output_path: Path | None = None,
+        raster_resampling: str | None = None,
+    ) -> OpenDataResult:
+        """创建独立重投影图层；输入图层和源文件保持不变。
+
+        同步包装 prepare + commit，供既有调用方和测试使用；界面应改用
+        prepare/commit 拆分在后台线程执行。
+        """
+        preparation: ReprojectionPreparation = self.prepare_reprojection(
+            layer_id,
+            target_crs,
+            output_path,
+            raster_resampling,
+        )
+        return self.commit_reprojection(preparation)
 
     def create_empty_layer(
         self,
