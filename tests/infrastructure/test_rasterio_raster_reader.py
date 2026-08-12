@@ -89,3 +89,65 @@ def test_large_raster_uses_bounded_preview_and_defers_analysis_pixels(tmp_path: 
 
     np.testing.assert_array_equal(layer.raster_data, values)
     assert layer.analysis_data_loaded is True
+
+
+def test_read_view_reads_only_visible_window_at_viewport_resolution(tmp_path: Path) -> None:
+    """视口读取应裁剪空间范围，并将输出限制在屏幕分辨率附近。"""
+    path = tmp_path / "pyramid.tif"
+    values = np.arange(1024 * 1024, dtype=np.float32).reshape(1024, 1024)
+    transform = Affine.translation(0, 1024) * Affine.scale(1, -1)
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=1024,
+        height=1024,
+        count=1,
+        dtype="float32",
+        crs="EPSG:3857",
+        transform=transform,
+        tiled=True,
+        blockxsize=256,
+        blockysize=256,
+    ) as dataset:
+        dataset.write(values, 1)
+        dataset.build_overviews([2, 4, 8], rasterio.enums.Resampling.average)
+
+    view = RasterioRasterReader().read_view(
+        path,
+        bounds=(256, 256, 768, 768),
+        viewport_size=(128, 128),
+        band_indexes=(0,),
+    )
+
+    assert view is not None
+    assert view.data.shape == (1, 160, 160)
+    assert view.valid_mask.shape == (160, 160)
+    np.testing.assert_allclose(view.bounds, (256, 256, 768, 768))
+    assert view.source_window.width == 512
+    assert view.source_window.height == 512
+
+
+def test_read_view_returns_none_when_viewport_does_not_intersect(tmp_path: Path) -> None:
+    """视口与栅格无交集时不应执行无界读取。"""
+    path = tmp_path / "source.tif"
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=16,
+        height=16,
+        count=1,
+        dtype="uint8",
+        transform=Affine.translation(0, 16) * Affine.scale(1, -1),
+    ) as dataset:
+        dataset.write(np.ones((16, 16), dtype=np.uint8), 1)
+
+    result = RasterioRasterReader().read_view(
+        path,
+        bounds=(100, 100, 120, 120),
+        viewport_size=(200, 200),
+        band_indexes=(0,),
+    )
+
+    assert result is None

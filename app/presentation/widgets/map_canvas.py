@@ -1,8 +1,9 @@
 """基于领域图层快照的地图画布。"""
 
 import math
+from dataclasses import replace
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -34,11 +35,11 @@ from app.application.display_models import RasterDisplayPayload, VectorDisplayPa
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.raster_layer import RasterLayer
-from app.domain.vector_layer import Bounds, VectorLayer
+from app.domain.vector_layer import Bounds
 from app.presentation.global_display_settings import sketch_color, snap_color, snap_edge_color
 from app.presentation.renderers.qt_raster_renderer import QtRasterRenderer
 from app.presentation.renderers.qt_vector_renderer import QtVectorRenderer
-from app.presentation.snapping_engine import SnapResult, SnappingEngine
+from app.presentation.snapping_engine import SnappingEngine, SnapResult
 
 
 class MapCanvas(QGraphicsView):
@@ -66,6 +67,8 @@ class MapCanvas(QGraphicsView):
     topology_edited = Signal(dict)
     # 地图工具切换信号：供主窗口同步功能区按钮的持续高亮状态。
     tool_changed = Signal(str)
+    # 导航停止后的地图范围和视口像素尺寸，供后台金字塔窗口读取。
+    viewport_changed = Signal(object, object)
 
     def __init__(self, parent: QGraphicsView | None = None) -> None:
         """创建空地图场景和矢量、栅格渲染器。
@@ -120,6 +123,11 @@ class MapCanvas(QGraphicsView):
         self._snap_edge_marker: QGraphicsPathItem | None = None
         # 缓存最近一次快照，供缩放后重新渲染使用。
         self._last_snapshot: WorkspaceSnapshot | None = None
+        self._viewport_timer = QTimer(self)
+        self._viewport_timer.setSingleShot(True)
+        self._viewport_timer.setInterval(180)
+        self._viewport_timer.timeout.connect(self._emit_viewport_changed)
+        self._last_viewport_key: tuple[float | int, ...] | None = None
         # 图层图元缓存：按图层编号保存该图层全部 Qt 图元，供显示比例过滤使用。
         self._layer_items: dict[str, list[QGraphicsItem]] = {}
         # 顶点编辑状态。
@@ -287,6 +295,68 @@ class MapCanvas(QGraphicsView):
         self._apply_scale_ranges()
         # 记录本次重建时的地图单位，供缩放时判断是否需要再次重建。
         self._last_render_mupp = self._map_units_per_pixel
+        self.schedule_viewport_refresh(force=True)
+
+    def update_raster_viewport(self, payload: RasterDisplayPayload) -> None:
+        """只替换一个栅格图层的视口图元，不重建矢量场景或改变视图。"""
+        if self._last_snapshot is None:
+            return
+        layer_index = next(
+            (
+                index
+                for index, item in enumerate(self._last_snapshot.layers)
+                if item.layer_id == payload.layer_id
+                and isinstance(item.layer, RasterLayer)
+            ),
+            None,
+        )
+        if layer_index is None:
+            return
+        old_items = self._layer_items.get(payload.layer_id, [])
+        for item in old_items:
+            self._scene.removeItem(item)
+        snapshot_layer = replace(
+            self._last_snapshot.layers[layer_index],
+            display_payload=payload,
+        )
+        raster_item = self._raster_renderer.render_layer(
+            self._scene,
+            snapshot_layer,
+            float(layer_index),
+        )
+        self._layer_items[payload.layer_id] = [raster_item]
+        layers = list(self._last_snapshot.layers)
+        layers[layer_index] = snapshot_layer
+        self._last_snapshot = replace(self._last_snapshot, layers=tuple(layers))
+        self._apply_scale_ranges()
+
+    def schedule_viewport_refresh(self, *, force: bool = False) -> None:
+        """防抖请求当前视口，连续缩放和平移期间不执行文件 I/O。"""
+        if force:
+            self._last_viewport_key = None
+        if self._map_scene_rect is not None:
+            self._viewport_timer.start()
+
+    def _emit_viewport_changed(self) -> None:
+        """将可见场景矩形转换为正常 Y 轴方向的地图范围。"""
+        visible = self._visible_scene_rect()
+        if visible.width() <= 0 or visible.height() <= 0:
+            return
+        bounds: Bounds = (
+            visible.left(),
+            -visible.bottom(),
+            visible.right(),
+            -visible.top(),
+        )
+        viewport_size = (
+            max(self.viewport().width(), 1),
+            max(self.viewport().height(), 1),
+        )
+        key = tuple(round(value, 9) for value in bounds) + viewport_size
+        if key == self._last_viewport_key:
+            return
+        self._last_viewport_key = key
+        self.viewport_changed.emit(bounds, viewport_size)
 
     def capture_view_state(self) -> MapViewState:
         """捕获当前地图中心和相对于全图的缩放比例。"""
@@ -1576,6 +1646,7 @@ class MapCanvas(QGraphicsView):
                     self.set_snapshot(self._last_snapshot)
                 finally:
                     self.setUpdatesEnabled(True)
+        self.schedule_viewport_refresh()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         """把鼠标滚轮动作转换为以光标为锚点的连续地图缩放。
@@ -2110,6 +2181,8 @@ class MapCanvas(QGraphicsView):
             return
 
         super().mouseReleaseEvent(event)
+        if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
+            self.schedule_viewport_refresh()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         """Esc 退出工具模式；Backspace 撤销数字化最后顶点。
@@ -2240,6 +2313,7 @@ class MapCanvas(QGraphicsView):
         top: int = max((self.viewport().height() - overlay_height) // 2, 0)
         self._empty_overlay.setGeometry(left, top, overlay_width, overlay_height)
         self._ensure_pan_area()
+        self.schedule_viewport_refresh()
 
     def _update_map_units_per_pixel(self) -> None:
         """按当前视野更新屏幕像素对应的地图单位。"""

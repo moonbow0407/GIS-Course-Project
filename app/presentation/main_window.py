@@ -47,6 +47,7 @@ from shapely.geometry.base import BaseGeometry
 
 from app.application.crs_utils import crs_equivalent
 from app.application.database_service import DatabaseService
+from app.application.display_models import RasterDisplayPayload
 from app.application.display_projection_service import DisplayProjectionService
 from app.application.errors import ApplicationError, CoordinateReferenceSystemRequired
 from app.application.gis_application import GisApplication, _chaikin_smooth
@@ -118,6 +119,10 @@ from app.presentation.widgets.raster_analysis_worker import (
 from app.presentation.widgets.raster_calculator_dialog import RasterCalculatorDialog
 from app.presentation.widgets.raster_clip_dialog import RasterClipDialog
 from app.presentation.widgets.raster_reclassify_dialog import RasterReclassifyDialog
+from app.presentation.widgets.raster_viewport_worker import (
+    RasterViewportRequest,
+    RasterViewportWorker,
+)
 from app.presentation.widgets.ribbon_bar import RibbonBar
 from app.presentation.widgets.snapping_settings_dialog import (
     SnappingSettingsDialog,
@@ -235,6 +240,9 @@ class MainWindow(QMainWindow):
         self._raster_worker: RasterAnalysisWorker | None = None
         self._raster_progress_dialog: QProgressDialog | None = None
         self._raster_analysis_context: _RasterAnalysisContext | None = None
+        # 视口金字塔读取独立于分析/重投影任务；旧请求完成后按编号丢弃。
+        self._viewport_request_id: int = 0
+        self._viewport_workers: dict[tuple[int, str], RasterViewportWorker] = {}
         # 后台坐标系转换状态：准备完成后才在主线程原子替换地图文档。
         self._crs_worker: CrsReprojectionWorker | None = None
         self._crs_progress_dialog: QProgressDialog | None = None
@@ -396,6 +404,7 @@ class MainWindow(QMainWindow):
         self._analysis_history_panel.clear_requested.connect(self._clear_analysis_history)
         self._map_canvas.coordinate_changed.connect(self._coordinate_label.setText)
         self._map_canvas.view_scale_changed.connect(self._scale_label.setText)
+        self._map_canvas.viewport_changed.connect(self._request_raster_viewports)
         self._map_canvas.canvas_clicked.connect(self._on_canvas_clicked)
         self._map_canvas.point_queried.connect(self._on_point_queried)
         self._map_canvas.rectangle_queried.connect(self._on_rectangle_queried)
@@ -4462,6 +4471,61 @@ class MainWindow(QMainWindow):
                 self._hide_attribute_table()
         self._update_window_title()
 
+    def _request_raster_viewports(
+        self,
+        bounds: tuple[float, float, float, float],
+        viewport_size: tuple[int, int],
+    ) -> None:
+        """为可见文件栅格启动后台金字塔窗口读取，不干预其他 worker。"""
+        snapshot = self._application.snapshot()
+        self._viewport_request_id += 1
+        request_id = self._viewport_request_id
+        for layer_snapshot in snapshot.layers:
+            layer = layer_snapshot.layer
+            if (
+                not layer_snapshot.visible
+                or not isinstance(layer, RasterLayer)
+                or layer.source_path is None
+            ):
+                continue
+            request = RasterViewportRequest(
+                request_id=request_id,
+                layer=layer,
+                display_crs=snapshot.display_crs,
+                bounds=bounds,
+                viewport_size=viewport_size,
+                resampling=layer_snapshot.raster_display_resampling,
+            )
+            worker = RasterViewportWorker(request, self)
+            key = (request_id, layer.layer_id)
+            self._viewport_workers[key] = worker
+            worker.completed.connect(self._on_raster_viewport_ready)
+            worker.failed.connect(self._on_raster_viewport_failed)
+            worker.finished.connect(lambda key=key: self._viewport_workers.pop(key, None))
+            worker.start()
+
+    def _on_raster_viewport_ready(
+        self,
+        request_id: int,
+        layer_id: str,
+        payload: object,
+    ) -> None:
+        """仅接纳最新导航请求的载荷，防止慢 I/O 覆盖新视口。"""
+        if request_id != self._viewport_request_id or payload is None:
+            return
+        if isinstance(payload, RasterDisplayPayload):
+            self._map_canvas.update_raster_viewport(payload)
+
+    def _on_raster_viewport_failed(
+        self,
+        request_id: int,
+        layer_id: str,
+        message: str,
+    ) -> None:
+        """最新视口读取失败时保留旧预览并给出非阻塞状态提示。"""
+        if request_id == self._viewport_request_id:
+            self._ready_label.setText(f"栅格视口读取失败：{message}")
+
     def _refresh_analysis_history(self, snapshot: WorkspaceSnapshot | None = None) -> None:
         """将当前工程的分析历史和图层名称同步到分析记录面板。"""
         resolved_snapshot: WorkspaceSnapshot = snapshot or self._application.snapshot()
@@ -4606,6 +4670,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """关闭窗口前清空查询选择和要素选择，避免未保存修改被静默丢弃。"""
+        # 视口 worker 没有共享可变状态；关闭前等待当前磁盘读取自然结束，
+        # 不改变分析和 CRS worker 的既有互斥或取消规则。
+        for viewport_worker in tuple(self._viewport_workers.values()):
+            if viewport_worker.isRunning():
+                viewport_worker.wait(3000)
         crs_worker = self._crs_worker
         if crs_worker is not None and crs_worker.isRunning():
             crs_worker.request_cancel()
