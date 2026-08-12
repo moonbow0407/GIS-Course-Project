@@ -21,6 +21,10 @@ from shapely.geometry.base import BaseGeometry
 from app.application.errors import RasterReadFailed, RasterWindowReadFailed
 from app.domain.raster_grid import RasterGrid
 
+DEFAULT_TIFF_BLOCK_SIZE: int = 256
+DEFAULT_TIFF_COMPRESSION: str = "deflate"
+DEFAULT_BIGTIFF_POLICY: str = "IF_SAFER"
+
 
 class RasterWindowReader:
     """按窗口读取栅格分析像元，支持按目标网格重投影重采样。"""
@@ -183,6 +187,10 @@ class RasterBlockWriter:
         crs: object,
         transform: Affine,
         nodata: float | None = None,
+        *,
+        block_size: int = DEFAULT_TIFF_BLOCK_SIZE,
+        compression: str = DEFAULT_TIFF_COMPRESSION,
+        bigtiff: str = DEFAULT_BIGTIFF_POLICY,
     ) -> None:
         """创建并打开输出 GeoTIFF。
 
@@ -201,6 +209,8 @@ class RasterBlockWriter:
         self._height: int = height
         self._band_count: int = band_count
         self._closed: bool = False
+        if block_size <= 0 or block_size % 16 != 0:
+            raise ValueError("GeoTIFF 块大小必须是大于零的 16 倍数。")
         try:
             self._dataset: DatasetWriter = rasterio.open(
                 resolved_path,
@@ -213,8 +223,14 @@ class RasterBlockWriter:
                 crs=crs,
                 transform=transform,
                 nodata=nodata,
+                tiled=True,
+                blockxsize=block_size,
+                blockysize=block_size,
+                compress=compression,
+                bigtiff=bigtiff,
             )
         except Exception as error:
+            self._remove_output_files()
             raise RasterReadFailed(
                 f"输出 GeoTIFF 创建失败：{resolved_path.name}"
             ) from error
@@ -276,14 +292,46 @@ class RasterBlockWriter:
         finally:
             self._closed = True
 
-    def _abort(self) -> None:
-        """异常时关闭并删除临时文件。"""
-        self.close()
+    def build_overviews(
+        self,
+        factors: tuple[int, ...],
+        resampling: Resampling = Resampling.average,
+    ) -> None:
+        """在全部窗口写出后按需构建内部 Overview。
+
+        调用方决定是否及何时构建；本方法不会被 ``close`` 自动触发。
+        """
+        if self._closed:
+            raise RasterReadFailed("写入器已关闭，不能构建 Overview。")
+        normalized = tuple(sorted({factor for factor in factors if factor > 1}))
+        if not normalized:
+            return
         try:
-            if self._path.exists():
-                self._path.unlink()
-        except OSError:
-            pass
+            self._dataset.build_overviews(list(normalized), resampling)
+            self._dataset.update_tags(ns="rio_overview", resampling=resampling.name)
+        except Exception as error:
+            self._abort()
+            raise RasterReadFailed(f"构建 Overview 失败：{self._path.name}") from error
+
+    def _abort(self) -> None:
+        """异常时关闭并删除 TIFF 及常见 GDAL 伴生临时文件。"""
+        self.close()
+        self._remove_output_files()
+
+    def _remove_output_files(self) -> None:
+        """删除输出文件及 Rasterio/GDAL 可能创建的伴生文件。"""
+        companion_paths = (
+            self._path,
+            Path(f"{self._path}.msk"),
+            Path(f"{self._path}.ovr"),
+            Path(f"{self._path}.aux.xml"),
+        )
+        for candidate in companion_paths:
+            try:
+                if candidate.exists():
+                    candidate.unlink()
+            except OSError:
+                pass
 
     def __enter__(self) -> "RasterBlockWriter":
         """支持上下文管理。"""

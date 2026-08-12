@@ -1,5 +1,6 @@
 """基于 Rasterio 的栅格文件读取适配器。"""
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,7 @@ from rasterio.enums import Resampling
 from rasterio.io import DatasetReader
 from rasterio.transform import array_bounds
 from rasterio.vrt import WarpedVRT
+from rasterio.windows import Window, from_bounds
 
 from app.application.crs_utils import crs_equivalent
 from app.application.errors import (
@@ -21,6 +23,18 @@ from app.application.errors import (
 )
 from app.domain.raster_layer import RasterDataLoader, RasterLayer
 from app.domain.vector_layer import Bounds
+
+
+@dataclass(frozen=True, slots=True)
+class RasterViewportData:
+    """表示按地图视口从栅格金字塔读取的原始像元。"""
+
+    data: NDArray[np.generic]
+    valid_mask: NDArray[np.bool_]
+    transform: Affine
+    bounds: Bounds
+    band_indexes: tuple[int, ...]
+    source_window: Window
 
 
 class RasterioRasterReader:
@@ -34,6 +48,125 @@ class RasterioRasterReader:
 
     # 小栅格直接缓存完整数组，大栅格首读只缓存预览，避免一次性占用大量内存。
     MAX_EAGER_ANALYSIS_BYTES: int = 64 * 1024 * 1024
+
+    # 适度超采样可避免轻微缩放后立即触发更高一级 I/O。
+    VIEW_OVERSAMPLE: float = 1.25
+
+    def read_view(
+        self,
+        path: Path,
+        *,
+        bounds: Bounds,
+        viewport_size: tuple[int, int],
+        band_indexes: tuple[int, ...],
+        resampling: str = "bilinear",
+        display_crs: CRS | None = None,
+        source_crs_override: CRS | None = None,
+    ) -> RasterViewportData | None:
+        """按当前视口读取最合适的内部 Overview 或源分辨率窗口。
+
+        ``band_indexes`` 使用与领域模型一致的零基编号。GDAL 根据窗口与
+        ``out_shape`` 自动选择 Overview；没有 Overview 时也只读取目标大小。
+        """
+        if viewport_size[0] <= 0 or viewport_size[1] <= 0:
+            raise ValueError("栅格视口尺寸必须大于零。")
+        if not band_indexes:
+            raise ValueError("栅格视口读取必须至少指定一个波段。")
+        try:
+            method = Resampling[resampling]
+        except KeyError as error:
+            raise ValueError(f"不支持的栅格显示重采样方法：{resampling}") from error
+
+        resolved_path = path.expanduser().resolve()
+        if not resolved_path.is_file():
+            raise RasterFileNotFound(f"栅格文件不存在：{resolved_path}")
+        try:
+            with rasterio.open(resolved_path) as source:
+                declared_crs = CRS.from_user_input(source.crs) if source.crs else None
+                source_crs = source_crs_override or declared_crs
+                if display_crs is not None and source_crs is None:
+                    raise IncompatibleCoordinateReferenceSystem(
+                        "源栅格未声明坐标参考系统，无法读取显示视口。"
+                    )
+                if (
+                    display_crs is not None
+                    and source_crs is not None
+                    and not crs_equivalent(source_crs, display_crs)
+                ):
+                    with WarpedVRT(source, src_crs=source_crs, crs=display_crs) as projected:
+                        return self._read_view_dataset(
+                            projected, bounds, viewport_size, band_indexes, method
+                        )
+                return self._read_view_dataset(
+                    source, bounds, viewport_size, band_indexes, method
+                )
+        except (IncompatibleCoordinateReferenceSystem, RasterFileNotFound, ValueError):
+            raise
+        except Exception as error:
+            raise RasterReadFailed(f"栅格视口读取失败：{resolved_path.name}") from error
+
+    def _read_view_dataset(
+        self,
+        dataset: DatasetReader,
+        bounds: Bounds,
+        viewport_size: tuple[int, int],
+        band_indexes: tuple[int, ...],
+        resampling: Resampling,
+    ) -> RasterViewportData | None:
+        """裁剪视口到数据范围，并将结果限制在视口像素附近。"""
+        if any(index < 0 or index >= dataset.count for index in band_indexes):
+            raise ValueError("栅格视口读取波段编号超出范围。")
+        left = max(bounds[0], dataset.bounds.left)
+        bottom = max(bounds[1], dataset.bounds.bottom)
+        right = min(bounds[2], dataset.bounds.right)
+        top = min(bounds[3], dataset.bounds.top)
+        if left >= right or bottom >= top:
+            return None
+
+        window = from_bounds(left, bottom, right, top, dataset.transform)
+        window = window.round_offsets().round_lengths().intersection(
+            Window(0, 0, dataset.width, dataset.height)
+        )
+        output_width = max(
+            1,
+            min(int(round(window.width)), round(viewport_size[0] * self.VIEW_OVERSAMPLE)),
+        )
+        output_height = max(
+            1,
+            min(int(round(window.height)), round(viewport_size[1] * self.VIEW_OVERSAMPLE)),
+        )
+        indexes = tuple(index + 1 for index in band_indexes)
+        data = dataset.read(
+            indexes=indexes,
+            window=window,
+            out_shape=(len(indexes), output_height, output_width),
+            resampling=resampling,
+        )
+        masks = dataset.read_masks(
+            indexes=indexes,
+            window=window,
+            out_shape=(len(indexes), output_height, output_width),
+            resampling=Resampling.nearest,
+        )
+        transform = dataset.window_transform(window) * Affine.scale(
+            window.width / output_width,
+            window.height / output_height,
+        )
+        raw_bounds = array_bounds(output_height, output_width, transform)
+        view_bounds: Bounds = (
+            min(raw_bounds[0], raw_bounds[2]),
+            min(raw_bounds[1], raw_bounds[3]),
+            max(raw_bounds[0], raw_bounds[2]),
+            max(raw_bounds[1], raw_bounds[3]),
+        )
+        return RasterViewportData(
+            data=data,
+            valid_mask=self._display_valid_mask(data, masks),
+            transform=transform,
+            bounds=view_bounds,
+            band_indexes=band_indexes,
+            source_window=window,
+        )
 
     def read(
         self,

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QGraphicsPathItem
 from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
+from app.application.display_models import RasterDisplayPayload
 from app.application.project_models import MapViewState
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.feature import Feature
@@ -122,6 +123,45 @@ def test_canvas_extent_ignores_hidden_layers() -> None:
     assert canvas._map_scene_rect is not None
     assert canvas._map_scene_rect.width() == pytest.approx(21.0)
     assert canvas._map_scene_rect.height() == pytest.approx(21.0)
+
+
+def test_update_raster_viewport_replaces_only_target_raster_item() -> None:
+    """金字塔载荷应原位替换栅格图元，不改变视图范围。"""
+    application = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    raster = RasterLayer.create(
+        layer_id="raster",
+        name="栅格",
+        raster_data=np.ones((1, 4, 4), dtype=np.uint8),
+        image_data=np.full((4, 4, 4), 255, dtype=np.uint8),
+        valid_mask=np.ones((4, 4), dtype=np.bool_),
+        transform=Affine(1, 0, 0, 0, -1, 4),
+        crs=CRS.from_epsg(3857),
+        bounds=(0, 0, 4, 4),
+    )
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(LayerSnapshot(raster, True, ()),),
+            active_layer_id=raster.layer_id,
+            display_crs=raster.crs,
+        )
+    )
+    old_item = canvas._layer_items[raster.layer_id][0]
+    old_scene_rect = QRectF(canvas.sceneRect())
+    payload = RasterDisplayPayload(
+        layer_id=raster.layer_id,
+        image_data=np.zeros((8, 8, 4), dtype=np.uint8),
+        transform=Affine(0.25, 0, 1, 0, -0.25, 3),
+        bounds=(1, 1, 3, 3),
+    )
+
+    canvas.update_raster_viewport(payload)
+
+    assert application is not None
+    assert canvas._layer_items[raster.layer_id][0] is not old_item
+    assert canvas.sceneRect() == old_scene_rect
+    assert canvas._last_snapshot is not None
+    assert canvas._last_snapshot.layers[0].display_payload is payload
 
 
 def test_scale_hidden_layers_are_excluded_from_query_and_snapping() -> None:
