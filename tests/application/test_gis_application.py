@@ -6,7 +6,7 @@ import pytest
 from pyproj import CRS
 from shapely.geometry import Point, box
 
-from app.application.errors import NoActiveLayer, VectorReadFailed
+from app.application.errors import LayerNotFound, NoActiveLayer, VectorReadFailed
 from app.application.gis_application import GisApplication
 from app.application.ports import DataWriter, VectorReader
 from app.application.results import OpenVectorResult, SelectionResult, WorkspaceSnapshot
@@ -120,6 +120,31 @@ def test_layer_commands_return_synchronized_snapshot() -> None:
     assert moved_snapshot.layers[0].visible is False
     assert removed_snapshot.active_layer_id == "rivers"
     assert [layer.layer_id for layer in removed_snapshot.layers] == ["rivers"]
+
+
+def test_rename_layer_updates_snapshot_and_marks_modified() -> None:
+    """重命名应更新快照中的图层名称并标记工程已修改。"""
+    application: GisApplication = GisApplication(
+        data_reader=InMemoryVectorReader(make_layer("roads"))
+    )
+    application.open_vector(Path("roads.geojson"))
+
+    renamed_snapshot: WorkspaceSnapshot = application.rename_layer("roads", "主干道")
+
+    assert renamed_snapshot.layers[0].name == "主干道"
+    assert renamed_snapshot.layers[0].layer_id == "roads"
+    assert application.is_modified is True
+
+
+def test_rename_layer_rejects_missing_layer() -> None:
+    """重命名不存在的图层应抛出 LayerNotFound。"""
+    application: GisApplication = GisApplication(
+        data_reader=InMemoryVectorReader(make_layer("roads"))
+    )
+    application.open_vector(Path("roads.geojson"))
+
+    with pytest.raises(LayerNotFound, match="图层不存在"):
+        application.rename_layer("missing", "新名称")
 
 
 def test_point_selection_returns_nearest_feature_within_tolerance() -> None:

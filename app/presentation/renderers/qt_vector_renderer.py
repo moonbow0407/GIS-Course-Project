@@ -50,7 +50,7 @@ def _simplify_polygon_exteriors_only(
     在特定缩放级别下形成不美观的裂隙。仅简化外环可避免此问题。
     """
     if geometry.geom_type == "Polygon":
-        poly: Polygon = geometry  # type: ignore[assignment]
+        poly: Polygon = geometry
         # 对整个 polygon 做拓扑保持简化后再提取外环，
         # 避免独立简化外环导致相邻面要素之间出现缝隙。
         simplified_poly: Polygon = poly.simplify(tolerance, preserve_topology=True)
@@ -59,10 +59,10 @@ def _simplify_polygon_exteriors_only(
         return Polygon(simplified_poly.exterior, list(poly.interiors))
     if geometry.geom_type == "MultiPolygon":
         simplified_polys: list[Polygon] = []
-        for sub_poly in geometry.geoms:  # type: ignore[union-attr]
+        for sub_poly in geometry.geoms:
             simplified_sub = _simplify_polygon_exteriors_only(sub_poly, tolerance)
             if not simplified_sub.is_empty:
-                simplified_polys.append(simplified_sub)  # type: ignore[arg-type]
+                simplified_polys.append(simplified_sub)
         if not simplified_polys:
             return geometry
         return MultiPolygon(simplified_polys)

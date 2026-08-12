@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressDialog,
+    QPushButton,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -211,10 +212,7 @@ class MainWindow(QMainWindow):
             lambda eid: self._layout_toolbar.set_delete_enabled(eid is not None)
         )
         self._layout_view.undo_state_changed.connect(
-            lambda can_undo, can_redo: (
-                self._layout_toolbar.set_undo_enabled(can_undo),
-                self._layout_toolbar.set_redo_enabled(can_redo),
-            )
+            self._on_layout_undo_state_changed
         )
         self._layout_toolbar.hide()  # 初始隐藏，进入布局视图时才显示
         # 视图栈：在数据视图和布局视图之间切换。
@@ -393,6 +391,7 @@ class MainWindow(QMainWindow):
         self._layer_panel.layer_activated.connect(self._activate_layer)
         self._layer_panel.layer_visibility_changed.connect(self._change_visibility)
         self._layer_panel.layer_removed.connect(self._remove_layer)
+        self._layer_panel.layer_rename_requested.connect(self._rename_layer)
         self._layer_panel.layer_folder_requested.connect(self._open_layer_folder)
         self._layer_panel.layer_attribute_requested.connect(self._show_attribute_table)
         self._layer_panel.layer_properties_requested.connect(self._show_layer_properties)
@@ -1198,6 +1197,49 @@ class MainWindow(QMainWindow):
                 was_active,
             ),
             redo_action=partial(self._application.remove_layer, layer_id),
+        )
+        self._schedule_workspace_refresh()
+
+    def _rename_layer(self, layer_id: str) -> None:
+        """重命名指定图层；只改显示名称，不修改源数据文件。
+
+        参数:
+            layer_id: 需要重命名的图层编号。
+        """
+        snapshot: WorkspaceSnapshot = self._application.snapshot()
+        layer_snapshot: LayerSnapshot | None = next(
+            (layer for layer in snapshot.layers if layer.layer_id == layer_id),
+            None,
+        )
+        if layer_snapshot is None:
+            self.statusBar().showMessage("图层已不在当前工作区中。", 3500)
+            return
+        rename_dialog: QInputDialog = QInputDialog(self)
+        rename_dialog.setWindowTitle("重命名图层")
+        rename_dialog.setLabelText("新名称：")
+        rename_dialog.setInputMode(QInputDialog.InputMode.TextInput)
+        rename_dialog.setTextValue(layer_snapshot.name)
+        name_edit: QLineEdit | None = rename_dialog.findChild(QLineEdit)
+        if name_edit is not None:
+            name_edit.selectAll()
+        if rename_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_name: str = rename_dialog.textValue().strip()
+        if not new_name:
+            self.statusBar().showMessage("图层名称不能为空。", 3500)
+            return
+        old_name: str = layer_snapshot.name
+        if new_name == old_name:
+            return
+        try:
+            self._application.rename_layer(layer_id, new_name)
+        except (ApplicationError, ValueError) as error:
+            self.statusBar().showMessage(f"重命名失败：{error}", 5000)
+            return
+        self._push_undo(
+            f"重命名图层  {old_name} → {new_name}",
+            undo_action=partial(self._application.rename_layer, layer_id, old_name),
+            redo_action=partial(self._application.rename_layer, layer_id, new_name),
         )
         self._schedule_workspace_refresh()
 
@@ -2945,14 +2987,6 @@ class MainWindow(QMainWindow):
                     if f.fid not in fids:
                         remaining.append(f)
                 break
-        merged_feature = Feature(
-            fid=max(
-                (f.fid for f in remaining), key=lambda x: int(x) if isinstance(x, (int, str)) and str(x).isdigit() else 0,  # type: ignore[arg-type]
-                default=-1,
-            ) + 1,
-            geometry=merged_geom,
-            attributes=merged_attrs,
-        )
         # 使用更稳健的 FID 生成。
         max_fid: int = 0
         for f in remaining:
@@ -3867,7 +3901,7 @@ class MainWindow(QMainWindow):
         worker.request_cancel()
         progress = self._raster_progress_dialog
         if progress is not None:
-            cancel_button = progress.cancelButton()
+            cancel_button = progress.findChild(QPushButton)
             if cancel_button is not None:
                 cancel_button.setEnabled(False)
             progress.setLabelText("正在取消栅格分析，请稍候…")
@@ -4177,6 +4211,11 @@ class MainWindow(QMainWindow):
         self._view_stack.setCurrentWidget(self._map_canvas)
         self._ribbon.set_action_checked("toggle_layout_view", False)
 
+    def _on_layout_undo_state_changed(self, can_undo: bool, can_redo: bool) -> None:
+        """根据布局视图的撤销栈状态刷新工具栏按钮。"""
+        self._layout_toolbar.set_undo_enabled(can_undo)
+        self._layout_toolbar.set_redo_enabled(can_redo)
+
     def _restore_layout(
         self, layout_state: "Mapping[str, object] | None"
     ) -> None:
@@ -4293,13 +4332,17 @@ class MainWindow(QMainWindow):
             # 使用打印机实际 DPI 将所有尺寸从毫米换算到设备像素
             dpi_x: float = float(printer.logicalDpiX())
             dpi_y: float = float(printer.logicalDpiY())
-            mm_to_px_x: Callable[[float], float] = lambda m: m / 25.4 * dpi_x
-            mm_to_px_y: Callable[[float], float] = lambda m: m / 25.4 * dpi_y
+
+            def mm_to_px_x(millimeters: float) -> float:
+                """将毫米换算为水平设备像素。"""
+                return millimeters / 25.4 * dpi_x
+
+            def mm_to_px_y(millimeters: float) -> float:
+                """将毫米换算为垂直设备像素。"""
+                return millimeters / 25.4 * dpi_y
 
             margin_mm: float = 5.0
             page_rect = printer.pageRect(QPrinter.Unit.DevicePixel)
-            target_x: float = page_rect.x() + mm_to_px_x(margin_mm)
-            target_y: float = page_rect.y() + mm_to_px_y(margin_mm)
             target_w: float = page_rect.width() - 2.0 * mm_to_px_x(margin_mm)
             target_h: float = page_rect.height() - 2.0 * mm_to_px_y(margin_mm)
 

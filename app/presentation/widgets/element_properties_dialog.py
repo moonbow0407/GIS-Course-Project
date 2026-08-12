@@ -1,5 +1,7 @@
 """元素属性编辑对话框 —— 根据布局元素类型动态显示可编辑字段。"""
 
+from typing import cast
+
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -55,7 +57,7 @@ class _ColorButton(QPushButton):
 
     def _pick_color(self) -> None:
         color = QColorDialog.getColor(
-            initial=self._color, parent=self.parent()
+            initial=self._color, parent=self.parentWidget()
         )
         if color.isValid():
             self._color = color.name()
@@ -287,7 +289,9 @@ class ElementPropertiesDialog(QDialog):
                 collected[key] = widget.color()
         # num_segments 需要转为 int
         if "num_segments" in collected:
-            collected["num_segments"] = int(collected["num_segments"])
+            collected["num_segments"] = int(
+                cast(str | int | float, collected["num_segments"])
+            )
         self._changes = collected
         self.accept()
 

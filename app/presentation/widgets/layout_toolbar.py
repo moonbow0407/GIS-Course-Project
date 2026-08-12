@@ -1,6 +1,6 @@
 """布局视图浮动工具栏 —— 添加制图元素、撤销重做和导出操作。"""
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, SignalInstance
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -237,7 +237,7 @@ class LayoutToolbar(QFrame):
         self._add_buttons.append(btn)
         return btn
 
-    def _on_add_clicked(self, btn: QPushButton, signal: Signal) -> None:
+    def _on_add_clicked(self, btn: QPushButton, signal: SignalInstance) -> None:
         """处理添加按钮点击：互斥切换 + 允许取消选中。"""
         if btn.isChecked():
             # 刚被选中 → 取消其他按钮，保持当前选中

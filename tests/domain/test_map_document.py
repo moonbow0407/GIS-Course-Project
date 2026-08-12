@@ -1,11 +1,17 @@
 """地图文档领域模型测试。"""
 
+from pathlib import Path
+
+import numpy as np
 import pytest
+from affine import Affine
 from pyproj import CRS
 from shapely.geometry import Point
 
 from app.domain.feature import Feature
 from app.domain.map_document import MapDocument
+from app.domain.raster_layer import RasterLayer
+from app.domain.spatial_layer import SpatialLayer
 from app.domain.vector_layer import VectorLayer
 
 
@@ -186,3 +192,89 @@ def test_display_state_changes_do_not_increment_revision() -> None:
     document.move_layer("roads", 0)
 
     assert document.layer_revision("roads") == 1
+
+
+# ── 图层重命名 ─────────────────────────────────────────
+
+
+def test_rename_layer_updates_name_and_preserves_workspace_state() -> None:
+    """重命名应只改显示名称，保留顺序、源路径、活动状态、显隐和选择。"""
+    document: MapDocument = MapDocument()
+    roads: VectorLayer = make_layer("roads")
+    roads = VectorLayer.create(
+        layer_id=roads.layer_id,
+        name=roads.name,
+        features=roads.features,
+        crs=roads.crs,
+        source_path=Path("D:/data/roads.shp"),
+    )
+    document.add_layer(roads)
+    document.add_layer(make_layer("rivers"))
+    document.set_active_layer("roads")
+    document.set_selection("roads", (1,))
+
+    document.rename_layer("roads", "主干道")
+
+    renamed: VectorLayer = document.layers[0]
+    assert renamed.name == "主干道"
+    assert renamed.source_path == Path("D:/data/roads.shp")
+    assert renamed.layer_id == "roads"
+    assert tuple(layer.layer_id for layer in document.layers) == ("roads", "rivers")
+    assert document.active_layer_id == "roads"
+    assert document.is_visible("roads") is True
+    assert document.selected_feature_ids("roads") == (1,)
+
+
+def test_rename_layer_does_not_increment_revision() -> None:
+    """重命名是纯元数据变更，不应使显示缓存失效。"""
+    document: MapDocument = MapDocument()
+    document.add_layer(make_layer("roads"))
+
+    document.rename_layer("roads", "新名称")
+
+    assert document.layer_revision("roads") == 1
+
+
+def test_rename_layer_rejects_blank_name() -> None:
+    """空白名称应被拒绝，避免产生无意义图层名。"""
+    document: MapDocument = MapDocument()
+    document.add_layer(make_layer("roads"))
+
+    with pytest.raises(ValueError, match="不能为空"):
+        document.rename_layer("roads", "   ")
+
+
+def test_rename_layer_rejects_missing_layer() -> None:
+    """不存在的图层不应被重命名。"""
+    document: MapDocument = MapDocument()
+
+    with pytest.raises(KeyError, match="图层不存在"):
+        document.rename_layer("missing", "新名称")
+
+
+def test_rename_lazy_raster_layer_does_not_load_analysis_data() -> None:
+    """重命名延迟栅格应直接替换身份，不触发完整像元加载。"""
+    def fail_loader() -> tuple[np.ndarray, np.ndarray]:
+        raise AssertionError("重命名不应触发延迟加载")
+
+    raster: RasterLayer = RasterLayer.create_lazy(
+        name="旧栅格名",
+        image_data=np.full((2, 2, 4), 255, dtype=np.uint8),
+        transform=Affine.identity(),
+        display_transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0.0, 0.0, 2.0, 2.0),
+        raster_shape=(2, 2),
+        band_count=1,
+        analysis_loader=fail_loader,
+    )
+    document: MapDocument = MapDocument()
+    document.add_layer(raster)
+
+    document.rename_layer(raster.layer_id, "新栅格名")
+
+    renamed: SpatialLayer = document.layers[0]
+    assert renamed.name == "新栅格名"
+    assert isinstance(renamed, RasterLayer)
+    assert renamed.analysis_data_loaded is False
+    assert document.layer_revision(raster.layer_id) == 1

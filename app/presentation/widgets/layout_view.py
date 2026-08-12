@@ -7,6 +7,7 @@ LayoutView 是一个独立的 QGraphicsView，与 MapCanvas 平级。
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
@@ -331,7 +332,7 @@ class LayoutView(QGraphicsView):
         self._add_element(frame)
         self._push_undo(
             "添加地图框",
-            undo_action=lambda eid=frame.element_id: self.remove_element(eid),
+            undo_action=partial(self.remove_element, frame.element_id),
             redo_action=lambda: self._add_element(frame),
         )
         return frame.element_id
@@ -372,8 +373,8 @@ class LayoutView(QGraphicsView):
         self._add_element(element)
         self._push_undo(
             "添加比例尺",
-            undo_action=lambda eid=element.element_id: self.remove_element(eid),
-            redo_action=lambda el=element: self._add_element(el),
+            undo_action=partial(self.remove_element, element.element_id),
+            redo_action=partial(self._add_element, element),
         )
         return element.element_id
 
@@ -419,8 +420,8 @@ class LayoutView(QGraphicsView):
         self._add_element(element)
         self._push_undo(
             "添加图例",
-            undo_action=lambda eid=element.element_id: self.remove_element(eid),
-            redo_action=lambda el=element: self._add_element(el),
+            undo_action=partial(self.remove_element, element.element_id),
+            redo_action=partial(self._add_element, element),
         )
         return element.element_id
 
@@ -457,8 +458,8 @@ class LayoutView(QGraphicsView):
         self._add_element(element)
         self._push_undo(
             "添加指北针",
-            undo_action=lambda eid=element.element_id: self.remove_element(eid),
-            redo_action=lambda el=element: self._add_element(el),
+            undo_action=partial(self.remove_element, element.element_id),
+            redo_action=partial(self._add_element, element),
         )
         return element.element_id
 
@@ -496,8 +497,8 @@ class LayoutView(QGraphicsView):
         self._add_element(element)
         self._push_undo(
             "添加文本",
-            undo_action=lambda eid=element.element_id: self.remove_element(eid),
-            redo_action=lambda el=element: self._add_element(el),
+            undo_action=partial(self.remove_element, element.element_id),
+            redo_action=partial(self._add_element, element),
         )
         return element.element_id
 
@@ -540,8 +541,8 @@ class LayoutView(QGraphicsView):
             self._select_element(element_id)
         self._push_undo(
             "修改元素属性",
-            undo_action=lambda e=elem, ov=old_values: self._restore_props(e, ov),
-            redo_action=lambda e=elem, nv=changes: self._restore_props(e, nv),
+            undo_action=partial(self._restore_props, elem, old_values),
+            redo_action=partial(self._restore_props, elem, changes),
         )
 
     def _restore_props(
@@ -553,6 +554,14 @@ class LayoutView(QGraphicsView):
         self._render_element(element)
         if self._selected_element_id == element.element_id:
             self._select_element(element.element_id)
+
+    def _restore_map_center(
+        self, element: MapFrameElement, center_x: float, center_y: float
+    ) -> None:
+        """恢复地图框中心坐标并重绘（用于撤销/重做）。"""
+        element.map_center_x = center_x
+        element.map_center_y = center_y
+        self._render_element(element)
 
     # ------------------------------------------------------------------
     # 内部：元素管理
@@ -614,9 +623,9 @@ class LayoutView(QGraphicsView):
         if self._snapshot is not None and self._snapshot.layers:
             pixmap = render_map_frame(frame, self._snapshot, dpi)
         else:
-            pw = max(1, round(_mm_to_px(frame.width_mm, dpi)))
-            ph = max(1, round(_mm_to_px(frame.height_mm, dpi)))
-            pixmap = QPixmap(pw, ph)
+            pix_w = max(1, round(_mm_to_px(frame.width_mm, dpi)))
+            pix_h = max(1, round(_mm_to_px(frame.height_mm, dpi)))
+            pixmap = QPixmap(pix_w, pix_h)
             pixmap.fill(QColor(frame.background_color))
 
         # 在场景中的像素位置
@@ -1045,7 +1054,7 @@ class LayoutView(QGraphicsView):
             event.accept()
             return
         if self._dragging_element_id is not None:
-            scene_pos: QPointF = self.mapToScene(event.pos())
+            scene_pos = self.mapToScene(event.pos())
             if self._drag_start_pos is None:
                 return
             elem = self._find_element(self._dragging_element_id)
@@ -1071,15 +1080,11 @@ class LayoutView(QGraphicsView):
                 if (old_cx, old_cy) != (new_cx, new_cy):
                     self._push_undo(
                         "平移地图",
-                        undo_action=lambda e=elem, cx=old_cx, cy=old_cy: (
-                            setattr(e, "map_center_x", cx),
-                            setattr(e, "map_center_y", cy),
-                            self._render_element(e),
+                        undo_action=partial(
+                            self._restore_map_center, elem, old_cx, old_cy
                         ),
-                        redo_action=lambda e=elem, cx=new_cx, cy=new_cy: (
-                            setattr(e, "map_center_x", cx),
-                            setattr(e, "map_center_y", cy),
-                            self._render_element(e),
+                        redo_action=partial(
+                            self._restore_map_center, elem, new_cx, new_cy
                         ),
                     )
             self._drag_start_pos = None
@@ -1105,8 +1110,8 @@ class LayoutView(QGraphicsView):
             if (old_x, old_y) != (new_x, new_y) and elem is not None:
                 self._push_undo(
                     "移动元素",
-                    undo_action=lambda e= elem, ox=old_x, oy=old_y: self._move_element_to(e, ox, oy),
-                    redo_action=lambda e= elem, nx=new_x, ny=new_y: self._move_element_to(e, nx, ny),
+                    undo_action=partial(self._move_element_to, elem, old_x, old_y),
+                    redo_action=partial(self._move_element_to, elem, new_x, new_y),
                 )
             self._dragging_element_id = None
             self._drag_start_pos = None
@@ -1262,8 +1267,8 @@ class LayoutView(QGraphicsView):
         self.remove_element(eid)
         self._push_undo(
             f"删除{elem_type_name}",
-            undo_action=lambda es=elem_snapshot: self._add_element(es),
-            redo_action=lambda eid2=eid: self.remove_element(eid2),
+            undo_action=partial(self._add_element, elem_snapshot),
+            redo_action=partial(self.remove_element, eid),
         )
 
     def _move_element_to(self, element, x_mm: float, y_mm: float) -> None:
@@ -1334,9 +1339,9 @@ class LayoutView(QGraphicsView):
                 return e
         return None
 
-    def _find_element(self, element_id: str):
-        """按 ID 查找布局元素。"""
-        if self._document is None:
+    def _find_element(self, element_id: str | None) -> LayoutElement | None:
+        """按 ID 查找布局元素；空 ID 时返回 None。"""
+        if self._document is None or element_id is None:
             return None
         for elem in self._document.elements:
             if elem.element_id == element_id:
@@ -1376,7 +1381,9 @@ class LayoutView(QGraphicsView):
             items_list[0].setPos(px, py)
         # 边框
         if len(items_list) > 1:
-            items_list[1].setRect(QRectF(px, py, pw, ph))
+            border_item = items_list[1]
+            if isinstance(border_item, QGraphicsRectItem):
+                border_item.setRect(QRectF(px, py, pw, ph))
         # 边界矩形
         bounds_rect.setRect(QRectF(px, py, pw, ph))
 
@@ -1514,8 +1521,8 @@ class LayoutView(QGraphicsView):
             if old_rect != new_rect:
                 self._push_undo(
                     "调整元素大小",
-                    undo_action=lambda e=elem, r=old_rect: self._set_rect(e, r),
-                    redo_action=lambda e=elem, r=new_rect: self._set_rect(e, r),
+                    undo_action=partial(self._set_rect, elem, old_rect),
+                    redo_action=partial(self._set_rect, elem, new_rect),
                 )
         self._resizing_handle_index = None
         self._resize_start_pos = None

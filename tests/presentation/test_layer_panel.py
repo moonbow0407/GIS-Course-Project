@@ -160,6 +160,7 @@ def test_layer_context_menu_can_request_zoom_to_layer(monkeypatch) -> None:
 
     def select_zoom_action(menu: QMenu, *args) -> object:
         assert [action.text() for action in menu.actions()] == [
+            "重命名…",
             "缩放至图层",
             "图层属性",
             "符号系统",
@@ -167,7 +168,7 @@ def test_layer_context_menu_can_request_zoom_to_layer(monkeypatch) -> None:
             "打开文件夹",
             "删除图层",
         ]
-        return menu.actions()[0]
+        return next(action for action in menu.actions() if action.text() == "缩放至图层")
 
     monkeypatch.setattr(panel, "_execute_context_menu", select_zoom_action)
     panel._on_context_menu_requested(tree.visualItemRect(item).center())
@@ -209,6 +210,42 @@ def test_layer_context_menu_can_request_layer_properties(monkeypatch) -> None:
     panel._on_context_menu_requested(tree.visualItemRect(item).center())
 
     assert requested_layer_ids == ["properties-target"]
+    panel.close()
+
+
+def test_layer_context_menu_can_request_rename(monkeypatch) -> None:
+    """右键选择"重命名…"时应发出携带图层编号的重命名信号。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer: VectorLayer = VectorLayer.create(
+        layer_id="rename-target",
+        name="重命名目标",
+        features=(Feature(fid=1, geometry=Point(10, 20), attributes={}),),
+        crs=CRS.from_epsg(4326),
+    )
+    panel: LayerPanel = LayerPanel()
+    panel.apply_snapshot(
+        WorkspaceSnapshot(
+            layers=(LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),),
+            active_layer_id=layer.layer_id,
+            display_crs=layer.crs,
+        )
+    )
+    tree: QTreeWidget | None = panel.findChild(QTreeWidget, "layerTree")
+    assert tree is not None
+    panel.resize(300, 400)
+    panel.show()
+    application.processEvents()
+    item = tree.topLevelItem(0)
+    requested_layer_ids: list[str] = []
+    panel.layer_rename_requested.connect(requested_layer_ids.append)
+
+    def select_rename_action(menu: QMenu, *args) -> object:
+        return next(action for action in menu.actions() if action.text() == "重命名…")
+
+    monkeypatch.setattr(panel, "_execute_context_menu", select_rename_action)
+    panel._on_context_menu_requested(tree.visualItemRect(item).center())
+
+    assert requested_layer_ids == ["rename-target"]
     panel.close()
 
 

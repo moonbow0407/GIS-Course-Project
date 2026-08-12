@@ -9,10 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from shapely import STRtree
-from shapely.geometry import LineString, Point
+from shapely.geometry import Point
 from shapely.geometry.base import BaseGeometry
 
-from app.application.results import LayerSnapshot, WorkspaceSnapshot
+from app.application.results import WorkspaceSnapshot
 from app.domain.vector_layer import VectorLayer
 
 

@@ -5,6 +5,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any, cast
 from uuid import uuid4
 
 # ---------------------------------------------------------------------------
@@ -283,7 +284,10 @@ def layout_to_dict(document: LayoutDocument) -> dict[str, object]:
 
 def layout_from_dict(payload: dict[str, object]) -> LayoutDocument:
     """从工程字典恢复布局文档。"""
+    # 工程 JSON 载荷经过运行时校验；对象和数组先做类型收窄再读取。
     page_data = payload.get("page", {})
+    if not isinstance(page_data, dict):
+        page_data = {}
     orientation_str = page_data.get("orientation", "portrait")
     try:
         orientation = PageOrientation(orientation_str)
@@ -298,6 +302,8 @@ def layout_from_dict(payload: dict[str, object]) -> LayoutDocument:
         margin_mm=float(page_data.get("margin_mm", 10.0)),
     )
     raw_elements = payload.get("elements", [])
+    if not isinstance(raw_elements, list):
+        raw_elements = []
     elements: list[LayoutElement] = []
     for item in raw_elements:
         if isinstance(item, dict):
@@ -364,22 +370,28 @@ def _element_to_dict(element: LayoutElement) -> dict[str, object]:
 def _element_from_dict(data: dict[str, object]) -> LayoutElement | None:
     """从字典恢复单个布局元素。"""
     type_name = data.get("type", "")
-    common = {
+    # 载荷来自工程 JSON，数值字段先收窄为可转换类型再交给构造器；
+    # 各元素构造器字段为 str/float 混合，公共字段用 Any 展开。
+    common: dict[str, Any] = {
         "element_id": str(data.get("element_id", _new_element_id())),
-        "x_mm": float(data.get("x_mm", 10.0)),
-        "y_mm": float(data.get("y_mm", 10.0)),
-        "width_mm": float(data.get("width_mm", 80.0)),
-        "height_mm": float(data.get("height_mm", 60.0)),
-        "rotation": float(data.get("rotation", 0.0)),
+        "x_mm": float(cast(str | int | float, data.get("x_mm", 10.0))),
+        "y_mm": float(cast(str | int | float, data.get("y_mm", 10.0))),
+        "width_mm": float(cast(str | int | float, data.get("width_mm", 80.0))),
+        "height_mm": float(cast(str | int | float, data.get("height_mm", 60.0))),
+        "rotation": float(cast(str | int | float, data.get("rotation", 0.0))),
     }
     if type_name == "MapFrameElement":
         return MapFrameElement(
             **common,
-            map_center_x=float(data.get("map_center_x", 0.0)),
-            map_center_y=float(data.get("map_center_y", 0.0)),
-            map_units_per_pixel=float(data.get("map_units_per_pixel", 1.0)),
+            map_center_x=float(cast(str | int | float, data.get("map_center_x", 0.0))),
+            map_center_y=float(cast(str | int | float, data.get("map_center_y", 0.0))),
+            map_units_per_pixel=float(
+                cast(str | int | float, data.get("map_units_per_pixel", 1.0))
+            ),
             border_color=str(data.get("border_color", "#333333")),
-            border_width_mm=float(data.get("border_width_mm", 0.5)),
+            border_width_mm=float(
+                cast(str | int | float, data.get("border_width_mm", 0.5))
+            ),
             background_color=str(data.get("background_color", "#ffffff")),
         )
     if type_name == "ScaleBarElement":
@@ -388,8 +400,10 @@ def _element_from_dict(data: dict[str, object]) -> LayoutElement | None:
             linked_frame_id=str(data.get("linked_frame_id", "")),
             style=str(data.get("style", "alternating")),
             unit=str(data.get("unit", "km")),
-            num_segments=int(data.get("num_segments", 4)),
-            label_font_size_mm=float(data.get("label_font_size_mm", 2.5)),
+            num_segments=int(cast(str | int | float, data.get("num_segments", 4))),
+            label_font_size_mm=float(
+                cast(str | int | float, data.get("label_font_size_mm", 2.5))
+            ),
             color=str(data.get("color", "#000000")),
         )
     if type_name == "LegendElement":
@@ -397,9 +411,13 @@ def _element_from_dict(data: dict[str, object]) -> LayoutElement | None:
             **common,
             linked_frame_id=str(data.get("linked_frame_id", "")),
             title=str(data.get("title", "图例")),
-            title_font_size_mm=float(data.get("title_font_size_mm", 3.0)),
-            item_font_size_mm=float(data.get("item_font_size_mm", 2.5)),
-            column_count=int(data.get("column_count", 1)),
+            title_font_size_mm=float(
+                cast(str | int | float, data.get("title_font_size_mm", 3.0))
+            ),
+            item_font_size_mm=float(
+                cast(str | int | float, data.get("item_font_size_mm", 2.5))
+            ),
+            column_count=int(cast(str | int | float, data.get("column_count", 1))),
         )
     if type_name == "NorthArrowElement":
         return NorthArrowElement(
@@ -411,7 +429,7 @@ def _element_from_dict(data: dict[str, object]) -> LayoutElement | None:
         return TextElement(
             **common,
             text=str(data.get("text", "文本")),
-            font_size_mm=float(data.get("font_size_mm", 3.0)),
+            font_size_mm=float(cast(str | int | float, data.get("font_size_mm", 3.0))),
             color=str(data.get("color", "#000000")),
             bold=bool(data.get("bold", False)),
             italic=bool(data.get("italic", False)),

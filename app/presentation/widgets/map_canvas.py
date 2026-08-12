@@ -1122,11 +1122,6 @@ class MapCanvas(QGraphicsView):
             result[self._edit_fid] = new_self
         # 关联要素。
         for other_fid, coords in self._linked_features.items():
-            gt: str = ""
-            # 从原几何推断类型（通过快照查找）。
-            for fid_list in [self._linked_features]:
-                gt = "Polygon"  # 默认面
-                break
             if len(coords) < 3:
                 continue
             closed: list[tuple[float, float]] = list(coords)
@@ -1958,14 +1953,14 @@ class MapCanvas(QGraphicsView):
             current_pt: Point = self._screen_to_map_point(
                 event.position().toPoint()
             )
-            dx: float = current_pt.x - self._move_start_map.x
-            dy: float = current_pt.y - self._move_start_map.y
+            move_dx: float = current_pt.x - self._move_start_map.x
+            move_dy: float = current_pt.y - self._move_start_map.y
             # 忽略极小拖拽。
-            if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+            if abs(move_dx) < 1e-9 and abs(move_dy) < 1e-9:
                 event.accept()
                 return
             translated: BaseGeometry = affinity.translate(
-                self._move_original_geometry, dx, dy
+                self._move_original_geometry, move_dx, move_dy
             )
             self._move_geometry = translated
             if self._move_preview_item is not None:
@@ -2086,9 +2081,9 @@ class MapCanvas(QGraphicsView):
 
         # 中键平移：计算位移并通过滚动条移动视图。
         if self._pan_mode == "middle" and self._last_middle_pos is not None:
-            current_pos: QPoint = event.position().toPoint()
-            delta: QPoint = self._last_middle_pos - current_pos
-            self._last_middle_pos = current_pos
+            pan_pos: QPoint = event.position().toPoint()
+            delta: QPoint = self._last_middle_pos - pan_pos
+            self._last_middle_pos = pan_pos
             self.horizontalScrollBar().setValue(
                 self.horizontalScrollBar().value() + delta.x()
             )

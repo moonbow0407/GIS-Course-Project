@@ -18,6 +18,7 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtWidgets import (
+    QGraphicsEllipseItem,
     QGraphicsItem,
     QGraphicsPathItem,
     QGraphicsRectItem,
@@ -462,7 +463,7 @@ def _draw_point_patch(
     r: float = patch_size * 0.35
     cx: float = px + patch_size / 2
     cy: float = py + row_h / 2
-    circle: QGraphicsRectItem = scene.addEllipse(
+    circle: QGraphicsEllipseItem = scene.addEllipse(
         QRectF(cx - r, cy - r, r * 2, r * 2),
         QPen(stroke, max(0.8, style.line_width * 0.6)),
         QBrush(fill),
@@ -623,7 +624,7 @@ def render_north_arrow(
 
         # 中心圆
         circle_r: float = size * 0.08
-        circle: QGraphicsRectItem = scene.addEllipse(
+        circle: QGraphicsEllipseItem = scene.addEllipse(
             QRectF(cx - circle_r, cy - circle_r, circle_r * 2, circle_r * 2),
             QPen(Qt.PenStyle.NoPen),
             QBrush(compass_color),

@@ -74,6 +74,7 @@ def test_context_menu_contains_open_folder_and_emits_layer_id(monkeypatch) -> No
     panel._on_context_menu_requested(rect.topLeft() + QPoint(5, 5))
 
     assert menu_texts == [
+        "重命名…",
         "缩放至图层",
         "图层属性",
         "符号系统",

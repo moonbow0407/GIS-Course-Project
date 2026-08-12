@@ -5,6 +5,7 @@ from pyproj import CRS
 from app.domain.feature import FeatureId
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
+from app.domain.vector_layer import VectorLayer
 
 
 class MapDocument:
@@ -127,6 +128,40 @@ class MapDocument:
         current_index: int = self._layer_index(layer_id)
         layer: SpatialLayer = self._layers.pop(current_index)
         self._layers.insert(target_index, layer)
+
+    def rename_layer(self, layer_id: str, new_name: str) -> None:
+        """重命名图层显示名称，不改变源数据文件、顺序和工作区状态。
+
+        名称只影响图层面板和导出显示，不参与绘制内容，因此不递增
+        图层修订号，避免大栅格显示缓存被无效重建。源文件与图层解耦，
+        与 ArcGIS Pro 内容列表重命名行为一致，不改写 source_path。
+        """
+        if not new_name.strip():
+            raise ValueError("图层名称不能为空。")
+        current_index: int = self._layer_index(layer_id)
+        current_layer: SpatialLayer = self._layers[current_index]
+        if isinstance(current_layer, RasterLayer):
+            renamed_layer: SpatialLayer = current_layer.with_identity(
+                layer_id=layer_id,
+                name=new_name,
+                source_path=current_layer.source_path,
+                symbology=current_layer.symbology,
+            )
+        else:
+            renamed_layer = VectorLayer.create(
+                layer_id=layer_id,
+                name=new_name,
+                features=current_layer.features,
+                crs=current_layer.crs,
+                source_path=current_layer.source_path,
+                source_layer_name=current_layer.source_layer_name,
+                database_layer_id=current_layer.database_layer_id,
+                symbology=current_layer.symbology,
+                labeling=current_layer.labeling,
+                geometry_family=current_layer.geometry_family,
+                crs_override=current_layer.crs_override,
+            )
+        self._layers[current_index] = renamed_layer
 
     def replace_layer(self, layer: SpatialLayer) -> None:
         """以相同稳定编号替换图层内容，并保留顺序和工作区状态。"""

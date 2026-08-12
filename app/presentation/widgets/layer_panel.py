@@ -101,6 +101,8 @@ class LayerPanel(QWidget):
     layer_attribute_requested = Signal(str)
     # 图层属性信号：请求显示指定图层的数据源、坐标系和关联信息。
     layer_properties_requested = Signal(str)
+    # 图层重命名信号：请求修改指定图层的显示名称。
+    layer_rename_requested = Signal(str)
     # 图层删除信号：请求从地图文档移除指定图层。
     layer_removed = Signal(str)
     # 图层文件夹请求信号：请求打开指定图层数据文件所在文件夹。
@@ -288,6 +290,7 @@ class LayerPanel(QWidget):
         if item.parent() is not None:
             item = item.parent()
         menu: QMenu = QMenu(self)
+        rename_action = menu.addAction("重命名…")
         zoom_action = menu.addAction("缩放至图层")
         properties_action = menu.addAction("图层属性")
         symbology_action = menu.addAction("符号系统")
@@ -334,7 +337,9 @@ class LayerPanel(QWidget):
             ] = "raster_clip"
         selected_action: object | None = self._execute_context_menu(menu, position)
         layer_id: str = str(item.data(0, Qt.ItemDataRole.UserRole))
-        if selected_action is zoom_action:
+        if selected_action is rename_action:
+            self.layer_rename_requested.emit(layer_id)
+        elif selected_action is zoom_action:
             self.layer_zoom_requested.emit(layer_id)
         elif selected_action is properties_action:
             self.layer_properties_requested.emit(layer_id)

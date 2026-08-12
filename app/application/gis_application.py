@@ -760,6 +760,21 @@ class GisApplication:
         self._modified = True
         return self.snapshot()
 
+    def rename_layer(self, layer_id: str, new_name: str) -> WorkspaceSnapshot:
+        """重命名图层显示名称并返回最新快照。
+
+        只修改图层显示名称，不改动源数据文件路径或图层内容，
+        与 ArcGIS Pro 内容列表重命名行为一致。
+        """
+        try:
+            self._document.rename_layer(layer_id, new_name)
+        except KeyError as error:
+            raise LayerNotFound(f"图层不存在：{layer_id}") from error
+        except ValueError as error:
+            raise ValueError(f"图层名称无效：{error}") from error
+        self._modified = True
+        return self.snapshot()
+
     def set_layer_visibility(self, layer_id: str, visible: bool) -> WorkspaceSnapshot:
         """设置指定图层显隐状态并返回最新快照。"""
         try:
