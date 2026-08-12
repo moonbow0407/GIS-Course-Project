@@ -66,6 +66,7 @@ from app.application.results import (
     DisplayCrsPreparation,
     LayerSnapshot,
     OpenDataResult,
+    ReprojectionPreparation,
     SelectedFeature,
     WorkspaceSnapshot,
 )
@@ -87,6 +88,7 @@ from app.infrastructure.projection.pyproj_coordinate_transformer import (
 from app.infrastructure.projection.rasterio_raster_projector import (
     RasterioRasterProjector,
 )
+from app.infrastructure.projection.windowed_raster_projector import WindowedRasterProjector
 from app.presentation.widgets.analysis_history_panel import AnalysisHistoryPanel
 from app.presentation.widgets.attribute_query_dialog import (
     AttributeQueryDialog,
@@ -107,6 +109,7 @@ from app.presentation.widgets.geometry_edit_toolbar import GeometryEditToolbar
 from app.presentation.widgets.labeling_dialog import LabelingDialog
 from app.presentation.widgets.layer_panel import LayerPanel
 from app.presentation.widgets.layer_properties_dialog import LayerPropertiesDialog
+from app.presentation.widgets.layer_reprojection_worker import LayerReprojectionWorker
 from app.presentation.widgets.layout_toolbar import LayoutToolbar
 from app.presentation.widgets.layout_view import LayoutView
 from app.presentation.widgets.map_canvas import MapCanvas
@@ -176,6 +179,7 @@ class MainWindow(QMainWindow):
             project_store=JsonProjectStore(),
             database_service=DatabaseService(PostgisDatabaseGateway),
             display_projection_service=display_projection_service,
+            windowed_raster_projector=WindowedRasterProjector(),
         )
         # 顶部功能区：集中呈现文档规划的全部现有及预留功能入口。
         self._ribbon: RibbonBar = RibbonBar()
@@ -240,6 +244,9 @@ class MainWindow(QMainWindow):
         self._raster_worker: RasterAnalysisWorker | None = None
         self._raster_progress_dialog: QProgressDialog | None = None
         self._raster_analysis_context: _RasterAnalysisContext | None = None
+        # 图层重投影只在后台准备文件，完成后由主线程提交工作区状态。
+        self._reprojection_worker: LayerReprojectionWorker | None = None
+        self._reprojection_progress_dialog: QProgressDialog | None = None
         # 视口金字塔读取独立于分析/重投影任务；旧请求完成后按编号丢弃。
         self._viewport_request_id: int = 0
         self._viewport_workers: dict[tuple[int, str], RasterViewportWorker] = {}
@@ -1342,28 +1349,125 @@ class MainWindow(QMainWindow):
             output_path = Path(output_text)
             if not output_path.suffix:
                 output_path = output_path.with_suffix(suffix)
-        try:
-            result = self._application.reproject_layer(
+        self._start_layer_reprojection(layer_id, target_crs, output_path)
+
+    def _start_layer_reprojection(
+        self,
+        layer_id: str,
+        target_crs: CRS,
+        output_path: Path | None,
+    ) -> bool:
+        """在后台准备图层重投影，并显示可取消的窗口进度。"""
+        if self._reprojection_worker is not None and self._reprojection_worker.isRunning():
+            self.statusBar().showMessage("已有图层重投影正在运行，请等待当前任务完成。", 4000)
+            return False
+        if self._crs_worker is not None and self._crs_worker.isRunning():
+            self.statusBar().showMessage("已有坐标系转换正在运行，请等待当前任务完成。", 4000)
+            return False
+        if self._raster_worker is not None and self._raster_worker.isRunning():
+            self.statusBar().showMessage("已有栅格分析正在运行，请等待当前任务完成。", 4000)
+            return False
+
+        worker = LayerReprojectionWorker(
+            lambda progress: self._application.prepare_reprojection(
                 layer_id,
                 target_crs,
                 output_path,
-            )
-            self._refresh_workspace()
-            metadata = result.reprojection_metadata
-            detail: str = ""
-            if metadata is not None:
-                detail = f"；转换操作：{metadata.operation}"
-                if metadata.output_shape is not None:
-                    detail += (
-                        f"；输出网格：{metadata.output_shape[1]} × "
-                        f"{metadata.output_shape[0]}"
-                    )
-            self.statusBar().showMessage(
-                f"已创建重投影图层：{result.snapshot.layers[-1].name}{detail}",
-                5000,
-            )
-        except ApplicationError as error:
+                progress_callback=progress,
+            ),
+            parent=self,
+        )
+        progress = QProgressDialog("正在准备图层重投影…", "取消", 0, 0, self)
+        progress.setWindowTitle("重投影图层")
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self._reprojection_worker = worker
+        self._reprojection_progress_dialog = progress
+        progress.canceled.connect(lambda: self._cancel_layer_reprojection(worker))
+        worker.progress_changed.connect(self._on_layer_reprojection_progress)
+        worker.completed.connect(self._on_layer_reprojection_completed)
+        worker.failed.connect(self._on_layer_reprojection_failed)
+        worker.finished.connect(lambda: self._on_layer_reprojection_finished(worker))
+        self._ready_label.setText("图层重投影进行中…")
+        progress.show()
+        worker.start()
+        return True
+
+    def _cancel_layer_reprojection(self, worker: LayerReprojectionWorker) -> None:
+        """请求在当前窗口处理结束后取消图层重投影。"""
+        if worker is not self._reprojection_worker or not worker.isRunning():
+            return
+        worker.request_cancel()
+        progress = self._reprojection_progress_dialog
+        if progress is not None:
+            progress.setCancelButton(None)
+            progress.setLabelText("正在取消重投影，请稍候…")
+
+    def _on_layer_reprojection_progress(self, done: int, total: int) -> None:
+        """更新流式重投影窗口进度。"""
+        progress = self._reprojection_progress_dialog
+        if progress is None:
+            return
+        if total > 0:
+            progress.setRange(0, total)
+            progress.setValue(min(done, total))
+            progress.setLabelText(f"正在重投影：已处理 {min(done, total)} / {total} 个窗口")
+
+    def _close_layer_reprojection_progress(self) -> None:
+        """关闭图层重投影进度框。"""
+        if self._reprojection_progress_dialog is not None:
+            self._reprojection_progress_dialog.close()
+
+    def _on_layer_reprojection_completed(self, result: object) -> None:
+        """在主线程提交已准备的重投影图层。"""
+        if not isinstance(result, ReprojectionPreparation):
+            self._close_layer_reprojection_progress()
+            return
+        try:
+            opened = self._application.commit_reprojection(result)
+        except (ApplicationError, ValueError) as error:
+            self._close_layer_reprojection_progress()
             QMessageBox.warning(self, "重投影失败", str(error))
+            return
+        self._close_layer_reprojection_progress()
+        self._refresh_workspace()
+        metadata = opened.reprojection_metadata
+        detail = ""
+        if metadata is not None:
+            detail = f"；转换操作：{metadata.operation}"
+            if metadata.output_shape is not None:
+                detail += f"；输出网格：{metadata.output_shape[1]} × {metadata.output_shape[0]}"
+        self.statusBar().showMessage(
+            f"已创建重投影图层：{opened.snapshot.layers[-1].name}{detail}", 5000
+        )
+
+    def _on_layer_reprojection_failed(self, message: str) -> None:
+        """处理图层重投影失败或取消。"""
+        worker = self._reprojection_worker
+        cancelled = message.startswith("已取消") or (
+            worker is not None and worker.cancel_requested
+        )
+        self._close_layer_reprojection_progress()
+        if cancelled:
+            self._ready_label.setText("图层重投影已取消")
+            self.statusBar().showMessage("图层重投影已取消。", 4000)
+        else:
+            self._ready_label.setText("图层重投影失败")
+            QMessageBox.warning(self, "重投影失败", message)
+
+    def _on_layer_reprojection_finished(self, worker: LayerReprojectionWorker) -> None:
+        """释放已经完成的图层重投影 worker。"""
+        if worker is not self._reprojection_worker:
+            worker.deleteLater()
+            return
+        progress = self._reprojection_progress_dialog
+        worker.deleteLater()
+        if progress is not None:
+            progress.deleteLater()
+        self._reprojection_worker = None
+        self._reprojection_progress_dialog = None
 
     def _restore_deleted_layer(
         self,
@@ -3528,6 +3632,9 @@ class MainWindow(QMainWindow):
 
     def _start_crs_reprojection(self, target_crs: CRS) -> bool:
         """在线程中准备图层转换，并显示可取消的进度框。"""
+        if self._reprojection_worker is not None and self._reprojection_worker.isRunning():
+            self.statusBar().showMessage("已有图层重投影正在运行，请等待当前任务完成。", 4000)
+            return False
         if self._crs_worker is not None and self._crs_worker.isRunning():
             self.statusBar().showMessage("已有坐标系转换正在运行，请等待当前任务完成。", 4000)
             return False
@@ -3711,6 +3818,9 @@ class MainWindow(QMainWindow):
         success_message: Callable[[RasterLayer], str],
     ) -> bool:
         """在后台启动一次栅格分析，并显示可取消的窗口进度。"""
+        if self._reprojection_worker is not None and self._reprojection_worker.isRunning():
+            self.statusBar().showMessage("已有图层重投影正在运行，请等待当前任务完成。", 4000)
+            return False
         if self._raster_worker is not None and self._raster_worker.isRunning():
             self.statusBar().showMessage("已有栅格分析正在运行，请等待当前任务完成。", 4000)
             return False
@@ -4675,6 +4785,10 @@ class MainWindow(QMainWindow):
         for viewport_worker in tuple(self._viewport_workers.values()):
             if viewport_worker.isRunning():
                 viewport_worker.wait(3000)
+        reprojection_worker = self._reprojection_worker
+        if reprojection_worker is not None and reprojection_worker.isRunning():
+            reprojection_worker.request_cancel()
+            reprojection_worker.wait(5000)
         crs_worker = self._crs_worker
         if crs_worker is not None and crs_worker.isRunning():
             crs_worker.request_cancel()

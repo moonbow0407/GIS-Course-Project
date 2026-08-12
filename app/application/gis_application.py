@@ -202,8 +202,13 @@ def _geometry_priority(geom_type: str) -> int:
 
 def _cleanup_reprojection_output(output_path: Path) -> None:
     """删除本次重投影创建的输出文件及 GDAL 掩膜伴生文件。"""
-    output_path.unlink(missing_ok=True)
-    Path(str(output_path) + ".msk").unlink(missing_ok=True)
+    for candidate in (
+        output_path,
+        Path(str(output_path) + ".msk"),
+        Path(str(output_path) + ".ovr"),
+        Path(str(output_path) + ".aux.xml"),
+    ):
+        candidate.unlink(missing_ok=True)
 
 
 def _attribute_match(

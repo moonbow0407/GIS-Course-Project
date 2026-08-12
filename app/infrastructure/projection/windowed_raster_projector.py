@@ -25,7 +25,11 @@ from rasterio.vrt import WarpedVRT
 from app.application.errors import LayerReprojectionFailed, WorkspaceOperationCancelled
 from app.application.ports.windowed_raster_projector import ProjectionProgressCallback
 from app.domain.raster_grid import RasterGrid
-from app.infrastructure.file_io.raster_window_io import DEFAULT_BLOCK_SIZE, iter_windows
+from app.infrastructure.file_io.raster_window_io import (
+    DEFAULT_BLOCK_SIZE,
+    RasterBlockWriter,
+    iter_windows,
+)
 
 
 class WindowedRasterProjector:
@@ -114,7 +118,7 @@ class WindowedRasterProjector:
         temp_path: Path = output_path.with_name(
             f".{output_path.stem}.{uuid4().hex}.tif"
         )
-        writer: _TempGeoTiffWriter = _TempGeoTiffWriter(
+        writer = RasterBlockWriter(
             temp_path,
             dst_width,
             dst_height,
@@ -159,6 +163,12 @@ class WindowedRasterProjector:
                         and not progress_callback(index, total)
                     ):
                         raise WorkspaceOperationCancelled("已取消重投影。")
+            overview_factors = self._overview_factors(dst_width, dst_height)
+            if overview_factors:
+                overview_resampling = (
+                    Resampling.nearest if method is Resampling.nearest else Resampling.average
+                )
+                writer.build_overviews(overview_factors, overview_resampling)
             writer.close()
             self._validate_output(
                 temp_path, dst_width, dst_height, source.count, target_crs
@@ -169,6 +179,16 @@ class WindowedRasterProjector:
             writer.abort()
             raise
         return target_grid
+
+    @staticmethod
+    def _overview_factors(width: int, height: int) -> tuple[int, ...]:
+        """生成让最小 Overview 仍至少含一个像元的二倍层级。"""
+        factors: list[int] = []
+        factor = 2
+        while width // factor >= 1 and height // factor >= 1:
+            factors.append(factor)
+            factor *= 2
+        return tuple(factors)
 
     @staticmethod
     def _target_grid(
@@ -255,92 +275,6 @@ class WindowedRasterProjector:
         temp_path.replace(output_path)
         if mask_path.exists():
             mask_path.replace(_mask_path(output_path))
-
-
-class _TempGeoTiffWriter:
-    """临时 GeoTIFF 写入器：按窗口写像元和有效掩膜，支持取消清理。
-
-    输出使用 BigTIFF 按需切换（``IF_SAFER``），避免大文件超出经典
-    TIFF 的 4 GiB 上限；掩膜写为 GDAL 伴生 ``.msk`` 文件，由投影器
-    统一管理其生命周期。
-    """
-
-    def __init__(
-        self,
-        path: Path,
-        width: int,
-        height: int,
-        band_count: int,
-        dtype: str,
-        crs: CRS,
-        transform: object,
-        nodata: float | int | None,
-    ) -> None:
-        """创建并打开输出 GeoTIFF 的写入句柄。"""
-        self._path: Path = path
-        self._closed: bool = False
-        try:
-            self._dataset = rasterio.open(
-                path,
-                "w",
-                driver="GTiff",
-                width=width,
-                height=height,
-                count=band_count,
-                dtype=dtype,
-                crs=crs,
-                transform=transform,
-                nodata=nodata,
-                BIGTIFF="IF_SAFER",
-            )
-        except Exception as error:
-            raise LayerReprojectionFailed(
-                f"输出 GeoTIFF 创建失败：{path.name}"
-            ) from error
-
-    def write_window(
-        self,
-        data: NDArray[np.generic],
-        valid_mask: NDArray[np.bool_],
-        window: object,
-    ) -> None:
-        """写入一个窗口的像元和有效掩膜。"""
-        if self._closed:
-            raise LayerReprojectionFailed("写入器已关闭，不能继续写入。")
-        try:
-            bands: NDArray[np.generic] = (
-                data[np.newaxis, ...] if data.ndim == 2 else data
-            )
-            self._dataset.write(
-                bands.astype(self._dataset.dtypes[0]), window=window
-            )
-            self._dataset.write_mask(
-                np.where(valid_mask, 255, 0).astype(np.uint8), window=window
-            )
-        except Exception as error:
-            self.abort()
-            raise LayerReprojectionFailed(
-                f"写入窗口失败：{self._path.name}"
-            ) from error
-
-    def close(self) -> None:
-        """关闭写入句柄并标记为已关闭。"""
-        if self._closed:
-            return
-        try:
-            self._dataset.close()
-        finally:
-            self._closed = True
-
-    def abort(self) -> None:
-        """关闭并删除临时文件与掩膜伴生文件（幂等）。"""
-        self.close()
-        for path in (self._path, _mask_path(self._path)):
-            try:
-                if path.exists():
-                    path.unlink()
-            except OSError:
-                pass
 
 
 def _mask_path(tiff_path: Path) -> Path:

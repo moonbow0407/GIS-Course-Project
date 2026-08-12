@@ -90,6 +90,10 @@ def test_streamed_result_matches_full_array_projection_for_nearest(
     assert out_crs.equals(CRS.from_epsg(4326))
     np.testing.assert_array_equal(out_data[out_valid], full.data[0][out_valid])
     np.testing.assert_array_equal(out_valid, full.valid_mask)
+    with rasterio.open(output) as dataset:
+        assert dataset.profile["tiled"] is True
+        assert dataset.profile["compress"] == "deflate"
+        assert dataset.overviews(1)
 
 
 def test_streamed_result_matches_full_array_projection_for_bilinear(

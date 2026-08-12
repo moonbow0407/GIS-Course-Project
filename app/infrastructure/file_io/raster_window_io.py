@@ -318,6 +318,10 @@ class RasterBlockWriter:
         self.close()
         self._remove_output_files()
 
+    def abort(self) -> None:
+        """取消外部流式任务时关闭写入器并清理全部输出文件。"""
+        self._abort()
+
     def _remove_output_files(self) -> None:
         """删除输出文件及 Rasterio/GDAL 可能创建的伴生文件。"""
         companion_paths = (
