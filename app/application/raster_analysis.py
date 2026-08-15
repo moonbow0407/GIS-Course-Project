@@ -433,6 +433,20 @@ def _cast_output(
 # ---------------------------------------------------------------------------
 
 
+def default_raster_nodata(dtype: str) -> float | None:
+    """为未声明 NoData 的分析结果选择可写入的默认无效值。
+
+    无符号整型没有安全哨兵（0 或 255 都可能是有效值），返回空并依赖掩膜。
+    """
+    name = dtype.lower()
+    if name.startswith("float"):
+        return -9999.0
+    limits = _DTYPE_NODATA_LIMITS.get(name)
+    if limits is None or name.startswith("uint"):
+        return None
+    return limits[0]
+
+
 def resolve_z_factor(elevation_unit: str, z_factor: float | None) -> float:
     """根据高程单位计算 Z 因子。
 

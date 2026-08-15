@@ -63,10 +63,8 @@ class WindowedRasterProjector:
         except KeyError as error:
             raise LayerReprojectionFailed(f"不支持的重采样方法：{resampling}") from error
         resolved_output: Path = output_path.expanduser().resolve()
-        if resolved_output.exists():
-            raise LayerReprojectionFailed(
-                f"重投影输出已存在：{resolved_output.name}。请使用新文件。"
-            )
+        if resolved_output == resolved_source:
+            raise LayerReprojectionFailed("重投影输出不能覆盖输入数据源。")
         try:
             source: DatasetReader = rasterio.open(resolved_source)
         except Exception as error:
@@ -272,9 +270,12 @@ class WindowedRasterProjector:
     def _commit_output(temp_path: Path, output_path: Path) -> None:
         """校验通过后把临时文件原子替换为目标文件，并同步掩膜伴生文件。"""
         mask_path: Path = _mask_path(temp_path)
+        destination_mask: Path = _mask_path(output_path)
         temp_path.replace(output_path)
         if mask_path.exists():
-            mask_path.replace(_mask_path(output_path))
+            mask_path.replace(destination_mask)
+        elif destination_mask.exists():
+            destination_mask.unlink()
 
 
 def _mask_path(tiff_path: Path) -> Path:

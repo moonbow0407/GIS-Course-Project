@@ -219,17 +219,34 @@ def test_cancel_after_last_window_before_replace_leaves_no_output(
     assert not list(output_dir.iterdir())
 
 
-def test_output_exists_is_rejected(tmp_path: Path) -> None:
-    """输出文件已存在时应直接报错，避免静默覆盖。"""
+def test_output_exists_is_overwritten(tmp_path: Path) -> None:
+    """输出文件已存在时应覆盖为新的重投影结果。"""
     values, _valid = _source_values()
     source = tmp_path / "source.tif"
     output = tmp_path / "projected.tif"
     _write_source(source, values)
     output.write_bytes(b"occupied")
 
-    with pytest.raises(LayerReprojectionFailed, match="已存在"):
+    WindowedRasterProjector().project_to_file(
+        source, CRS.from_epsg(4326), output
+    )
+
+    assert output.is_file()
+    assert output.read_bytes() != b"occupied"
+    with rasterio.open(output) as dataset:
+        assert dataset.width == _WIDTH
+        assert dataset.height == _HEIGHT
+
+
+def test_output_cannot_overwrite_source(tmp_path: Path) -> None:
+    """重投影输出不能覆盖源栅格文件。"""
+    values, _valid = _source_values()
+    source = tmp_path / "source.tif"
+    _write_source(source, values)
+
+    with pytest.raises(LayerReprojectionFailed, match="输入数据源"):
         WindowedRasterProjector().project_to_file(
-            source, CRS.from_epsg(4326), output
+            source, CRS.from_epsg(4326), source
         )
 
 

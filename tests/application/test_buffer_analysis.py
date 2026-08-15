@@ -155,6 +155,23 @@ def make_geometry_request(
     )
 
 
+def test_buffer_analysis_overwrites_existing_output_file(tmp_path: Path) -> None:
+    """保存对话框确认覆盖后，缓冲区应写出到已存在的结果文件。"""
+    writer: RecordingDataWriter = RecordingDataWriter()
+    application: GisApplication = GisApplication(
+        InMemoryDataReader(make_layer()),
+        data_writer=writer,
+    )
+    application.open_data(Path("points.geojson"))
+    occupied = tmp_path / "buffers.geojson"
+    occupied.write_text("{}", encoding="utf-8")
+
+    result = application.buffer_analysis(make_request(occupied))
+
+    assert result.output_path == occupied.resolve()
+    assert writer.path == occupied.resolve()
+
+
 def test_buffer_analysis_writes_and_activates_new_result_layer(tmp_path: Path) -> None:
     """缓冲区结果应写出、保留属性，并作为新的活动图层加入工作区。"""
     writer: RecordingDataWriter = RecordingDataWriter()

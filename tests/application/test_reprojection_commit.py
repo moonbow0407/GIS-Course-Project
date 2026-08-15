@@ -91,6 +91,24 @@ def test_commit_adds_layer_and_records_analysis_run(
     assert result.reprojection_metadata is not None
 
 
+def test_prepare_reprojection_overwrites_existing_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """保存对话框确认覆盖后，重投影应替换已存在的输出文件。"""
+    application = make_application(monkeypatch)
+    layer_id, output = _open_lazy_source(application, tmp_path)
+    output.write_bytes(b"occupied")
+
+    preparation = application.prepare_reprojection(
+        layer_id, CRS.from_epsg(4326), output
+    )
+
+    assert preparation.output_path == output.resolve()
+    assert output.is_file()
+    assert output.read_bytes() != b"occupied"
+
+
 def test_commit_rejects_removed_source_and_cleans_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

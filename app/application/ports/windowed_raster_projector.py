@@ -35,7 +35,7 @@ class WindowedRasterProjector(Protocol):
         参数:
             source_path: 源栅格文件路径。
             target_crs: 重投影目标坐标系。
-            output_path: 输出文件路径（不能与源文件相同且不能已存在）。
+            output_path: 输出文件路径；不能与源文件相同，已存在时覆盖。
             source_crs_override: 工程内覆盖的源坐标系；为空时使用文件声明。
             resampling: 重采样方法名称（nearest/bilinear/cubic 等）。
             progress_callback: 每完成一个窗口回调；返回 False 时取消。

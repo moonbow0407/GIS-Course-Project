@@ -40,6 +40,7 @@ from app.application.raster_analysis import (
     compute_aspect,
     compute_hillshade,
     compute_slope,
+    default_raster_nodata,
     reclassify_array,
     resolve_z_factor,
 )
@@ -409,6 +410,9 @@ class RasterAnalysisService:
         output_dtype = "float32"
         if raster_layer.analysis_data_loaded:
             output_dtype = str(raster_layer.raster_data.dtype)
+        output_nodata = raster_layer.nodata
+        if output_nodata is None:
+            output_nodata = default_raster_nodata(output_dtype)
         return self._run_analysis(
             inputs=tuple(
                 (role, raster_layer, band_index)
@@ -420,7 +424,7 @@ class RasterAnalysisService:
             output_layer_name=request.output_layer_name,
             output_path=request.output_path,
             output_dtype=output_dtype,
-            output_nodata=raster_layer.nodata,
+            output_nodata=output_nodata,
             halo=0,
             output_band_count=raster_layer.band_count,
         )
@@ -456,6 +460,14 @@ class RasterAnalysisService:
 
         resolved_output_path = output_path.expanduser().resolve()
         self._validate_output_path(resolved_output_path)
+        for _role, layer, _band in inputs:
+            if (
+                layer.source_path is not None
+                and layer.source_path.expanduser().resolve() == resolved_output_path
+            ):
+                raise InvalidRasterAnalysisParameters(
+                    "分析结果输出不能覆盖输入栅格源文件。"
+                )
         temporary_path = resolved_output_path.with_name(
             f".{resolved_output_path.stem}.{uuid4().hex}{resolved_output_path.suffix}"
         )
@@ -519,7 +531,13 @@ class RasterAnalysisService:
             writer.close()
 
         try:
+            temporary_mask = Path(str(temporary_path) + ".msk")
+            destination_mask = Path(str(resolved_output_path) + ".msk")
             temporary_path.replace(resolved_output_path)
+            if temporary_mask.exists():
+                temporary_mask.replace(destination_mask)
+            elif destination_mask.exists():
+                destination_mask.unlink()
         except Exception as error:
             temporary_path.unlink(missing_ok=True)
             raise RasterAnalysisFailed(
@@ -572,9 +590,9 @@ class RasterAnalysisService:
             raise InvalidRasterAnalysisParameters(
                 f"输出目录不存在：{resolved.parent}"
             )
-        if resolved.exists():
+        if resolved.exists() and not resolved.is_file():
             raise InvalidRasterAnalysisParameters(
-                f"输出文件已存在：{resolved.name}，请使用新的结果文件。"
+                f"输出路径不是文件：{resolved.name}"
             )
 
     def _load_result(

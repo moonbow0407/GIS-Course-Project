@@ -271,9 +271,13 @@ class RasterBlockWriter:
             else:
                 raise ValueError("有效掩膜必须是二维或三维")
 
-            self._dataset.write(
-                bands.astype(self._dataset.dtypes[0]), window=window
-            )
+            # 无效像元同时写入 NoData 值和 GDAL 掩膜。只写掩膜、保留原值时，
+            # 部分读取路径会把区外当成有效，裁剪结果看起来与原图一样。
+            work = np.array(bands, dtype=self._dataset.dtypes[0], copy=True)
+            nodata = self._dataset.nodata
+            if nodata is not None:
+                work[:, ~output_mask] = nodata
+            self._dataset.write(work, window=window)
             self._dataset.write_mask(
                 np.where(output_mask, 255, 0).astype(np.uint8), window=window
             )
