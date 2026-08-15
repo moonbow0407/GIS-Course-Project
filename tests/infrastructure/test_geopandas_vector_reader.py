@@ -23,6 +23,28 @@ def write_geojson(path: Path, content: dict[str, object]) -> None:
     path.write_text(serialized_content, encoding="utf-8")
 
 
+def test_read_many_features_preserves_index_geometry_and_attributes(tmp_path: Path) -> None:
+    """大批量要素转换不得丢失编号、几何和属性。"""
+    features = [
+        {
+            "type": "Feature",
+            "id": index,
+            "properties": {"名称": f"点{index}", "等级": index % 5},
+            "geometry": {"type": "Point", "coordinates": [118.0 + index * 0.01, 32.0]},
+        }
+        for index in range(250)
+    ]
+    path = tmp_path / "points.geojson"
+    write_geojson(path, {"type": "FeatureCollection", "features": features})
+
+    layer = GeoPandasVectorReader().read(path)
+
+    assert len(layer.features) == 250
+    assert layer.features[0].attributes == {"名称": "点0", "等级": 0}
+    assert layer.features[249].fid == 249
+    assert layer.features[249].geometry.x == pytest.approx(120.49)
+
+
 def test_read_point_geojson_preserves_geometry_attributes_and_crs(tmp_path: Path) -> None:
     """读取点 GeoJSON 时应保留几何、属性和坐标参考系统。"""
     path: Path = tmp_path / "schools.geojson"

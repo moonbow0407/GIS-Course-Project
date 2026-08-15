@@ -126,27 +126,7 @@ class GeoPandasVectorReader:
                     resolved_path.name,
                 )
 
-        features: list[Feature] = []
-        # GeoPandas 行对象缺少可稳定使用的精确静态类型，仅在适配器边缘使用 Any。
-        row: Any
-        index: Any
-        for index, row in dataframe.iterrows():
-            # GeoPandas geometry 访问器的静态类型不完整，在此处收窄为 Shapely 几何。
-            geometry_value: Any = row.geometry
-            if geometry_value is None:
-                continue
-            geometry: BaseGeometry = geometry_value
-            if geometry.is_empty:
-                continue
-            raw_attributes: dict[str, Any] = row.drop(labels=[dataframe.geometry.name]).to_dict()
-            attributes: dict[str, AttributeValue] = {
-                str(field_name): self._normalize_attribute(value)
-                for field_name, value in raw_attributes.items()
-            }
-            feature_id: FeatureId = self._normalize_feature_id(index)
-            features.append(
-                Feature(fid=feature_id, geometry=geometry, attributes=attributes)
-            )
+        features = self._features_from_dataframe(dataframe)
 
         if not features:
             raise NoUsableGeometry(f"矢量数据集不包含可用几何：{resolved_path.name}")
@@ -159,6 +139,44 @@ class GeoPandasVectorReader:
             source_layer_name=resolved_layer_name,
             crs_override=source_crs_override is not None,
         )
+
+    @classmethod
+    def _features_from_dataframe(cls, dataframe: gpd.GeoDataFrame) -> list[Feature]:
+        """按列批量转换要素，避免 iterrows 在全国级矢量上逐行装箱。"""
+        geometry_column = dataframe.geometry.name
+        attribute_columns = [
+            column for column in dataframe.columns if column != geometry_column
+        ]
+        geometries = dataframe.geometry.to_numpy()
+        records: list[dict[str, Any]]
+        if attribute_columns:
+            records = dataframe.loc[:, attribute_columns].to_dict("records")
+        else:
+            records = [{} for _ in range(len(dataframe))]
+        features: list[Feature] = []
+        index: Any
+        geometry_value: Any
+        raw_attributes: dict[str, Any]
+        for index, geometry_value, raw_attributes in zip(
+            dataframe.index, geometries, records, strict=True
+        ):
+            if geometry_value is None:
+                continue
+            geometry: BaseGeometry = geometry_value
+            if geometry.is_empty:
+                continue
+            attributes: dict[str, AttributeValue] = {
+                str(field_name): cls._normalize_attribute(value)
+                for field_name, value in raw_attributes.items()
+            }
+            features.append(
+                Feature(
+                    fid=cls._normalize_feature_id(index),
+                    geometry=geometry,
+                    attributes=attributes,
+                )
+            )
+        return features
 
     @staticmethod
     def _validate_coordinate_bounds(

@@ -1,9 +1,9 @@
 """撤销/重做完善后的按钮接线、栈覆盖与边界防御测试。"""
 
 import os
+import time
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -11,7 +11,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pyproj import CRS
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox
 from shapely.geometry import Point
 
 from app.application.gis_application import GisApplication
@@ -257,19 +257,27 @@ def test_open_data_undo_redo_supports_cycles_with_new_layer_ids(monkeypatch) -> 
     window: MainWindow = _make_window(document)
     counter: list[int] = [0]
 
-    def open_data(path: Path, layer_name: str | None = None) -> SimpleNamespace:
+    def prepare_open_data(
+        path: Path,
+        layer_name: str | None = None,
+        source_crs_override: CRS | None = None,
+    ) -> VectorLayer:
         counter[0] += 1
-        layer: VectorLayer = _make_layer(f"loaded-{counter[0]}", "加载图层")
-        document.add_layer(layer)
-        return SimpleNamespace(layer_id=layer.layer_id, warning=None)
+        return _make_layer(f"loaded-{counter[0]}", "加载图层")
 
     monkeypatch.setattr(
-        QFileDialog,
-        "getOpenFileNames",
-        lambda *args, **kwargs: ([str(Path("roads.geojson"))], "空间数据"),
+        window,
+        "_select_spatial_data_files",
+        lambda: [str(Path("roads.geojson"))],
     )
-    monkeypatch.setattr(window._application, "open_data", open_data)
+    monkeypatch.setattr(window._application, "prepare_open_data", prepare_open_data)
     window._open_data()
+    application = QApplication.instance()
+    assert application is not None
+    deadline = time.monotonic() + 3.0
+    while window._open_data_progress_dialog is not None and time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(0.005)
 
     assert len(document.layers) == 1
     first_id: str = document.layers[0].layer_id

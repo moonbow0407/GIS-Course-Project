@@ -28,6 +28,15 @@ class AutoDataReader:
         self._kml_reader: KmlVectorReader = KmlVectorReader()
         self._raster_reader: RasterioRasterReader = RasterioRasterReader()
 
+    def prepare_raster_display(self, path: Path) -> None:
+        """栅格在正式读取前按需构建显示金字塔；矢量文件直接跳过。
+
+        没有 Overview 时，首屏预览必须解码整幅大 TIFF，界面会长时间无响应。
+        先构建或复用金字塔，后续预览只读降采样层。
+        """
+        if path.suffix.lower() in self.RASTER_SUFFIXES:
+            self._raster_reader.prepare_display(path)
+
     def read(
         self,
         path: Path,

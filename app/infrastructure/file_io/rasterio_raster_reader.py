@@ -23,6 +23,7 @@ from app.application.errors import (
 )
 from app.domain.raster_layer import RasterDataLoader, RasterLayer
 from app.domain.vector_layer import Bounds
+from app.infrastructure.file_io.raster_overview_service import RasterOverviewService
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +53,10 @@ class RasterioRasterReader:
     # 适度超采样可避免轻微缩放后立即触发更高一级 I/O。
     VIEW_OVERSAMPLE: float = 1.25
 
+    def __init__(self, overview_service: RasterOverviewService | None = None) -> None:
+        """配置用于显示读取的安全 Overview 缓存解析器。"""
+        self._overview_service = overview_service or RasterOverviewService()
+
     def read_view(
         self,
         path: Path,
@@ -80,8 +85,9 @@ class RasterioRasterReader:
         resolved_path = path.expanduser().resolve()
         if not resolved_path.is_file():
             raise RasterFileNotFound(f"栅格文件不存在：{resolved_path}")
+        display_path = self._overview_service.display_path(resolved_path)
         try:
-            with rasterio.open(resolved_path) as source:
+            with rasterio.open(display_path) as source:
                 declared_crs = CRS.from_user_input(source.crs) if source.crs else None
                 source_crs = source_crs_override or declared_crs
                 if display_crs is not None and source_crs is None:
@@ -168,6 +174,16 @@ class RasterioRasterReader:
             source_window=window,
         )
 
+    def prepare_display(self, path: Path) -> None:
+        """按需构建显示金字塔，让首屏预览走 Overview 而不是全图解码。"""
+        resolved_path = path.expanduser().resolve()
+        if not resolved_path.is_file():
+            raise RasterFileNotFound(f"栅格文件不存在：{resolved_path}")
+        suffix = resolved_path.suffix.lower()
+        if suffix not in self.SUPPORTED_SUFFIXES:
+            raise UnsupportedRasterFormat(f"暂不支持该栅格文件格式：{suffix or '无扩展名'}")
+        self._overview_service.optimize(resolved_path)
+
     def read(
         self,
         path: Path,
@@ -197,8 +213,9 @@ class RasterioRasterReader:
         if suffix not in self.SUPPORTED_SUFFIXES:
             raise UnsupportedRasterFormat(f"暂不支持该栅格文件格式：{suffix or '无扩展名'}")
 
+        display_path = self._overview_service.display_path(resolved_path)
         try:
-            with rasterio.open(resolved_path) as source:
+            with rasterio.open(display_path) as source:
                 declared_crs: CRS | None = (
                     CRS.from_user_input(source.crs) if source.crs is not None else None
                 )
@@ -271,7 +288,14 @@ class RasterioRasterReader:
             max(raw_bounds[1], raw_bounds[3]),
         )
         analysis_loader: RasterDataLoader | None = None
-        if self._analysis_byte_size(dataset) > self.MAX_EAGER_ANALYSIS_BYTES:
+        preview_is_downsampled = (preview_height, preview_width) != (
+            dataset.height,
+            dataset.width,
+        )
+        if (
+            self._analysis_byte_size(dataset) > self.MAX_EAGER_ANALYSIS_BYTES
+            or preview_is_downsampled
+        ):
             def load_analysis_data() -> tuple[NDArray[np.generic], NDArray[np.bool_]]:
                 return self._read_analysis_data(path, crs, source_crs_override)
 
@@ -412,7 +436,8 @@ class RasterioRasterReader:
     ) -> NDArray[np.bool_]:
         """按显示预览规则生成有效掩膜，供后续低分辨率符号重建复用。"""
         valid: NDArray[np.bool_] = np.all(masks > 0, axis=0)
-        # 部分遥感产品未声明 nodata，但会用所有显示波段均为零表示覆盖区外背景。
-        valid &= np.any(values != 0, axis=0)
         valid &= np.all(np.isfinite(values), axis=0)
+        # 多波段遥感影像常用全零表示覆盖区外；单波段 0 可能是真实坡度/高程。
+        if values.shape[0] >= 3:
+            valid &= np.any(values != 0, axis=0)
         return valid
