@@ -330,3 +330,42 @@ def test_classified_raster_panel_shows_discrete_levels() -> None:
     assert panel._classes.rowCount() == 4
     assert panel._classes.item(0, 1).text() == "1"
     assert application is not None
+
+
+def test_raster_panel_requests_graduated_classes_when_switching_renderer() -> None:
+    """切换到分级着色时应请求按色带和分级方法生成区间类别。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    data = np.linspace(0.0, 100.0, 25, dtype=np.float32).reshape(1, 5, 5)
+    layer = RasterLayer.create(
+        layer_id="dem",
+        name="高程",
+        raster_data=data,
+        image_data=np.zeros((5, 5, 4), dtype=np.uint8),
+        valid_mask=np.ones((5, 5), dtype=np.bool_),
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0, 0, 5, 5),
+        symbology=RasterSymbology(
+            renderer_type=RasterRendererType.STRETCH,
+            color_scheme="terrain",
+        ),
+    )
+    panel = SymbologyPanel()
+    panel.set_layer(LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()))
+    requests: list[tuple[str, str, str, int]] = []
+    panel.raster_classified_requested.connect(
+        lambda layer_id, scheme, method, count: requests.append(
+            (layer_id, scheme, method, count)
+        )
+    )
+
+    graduated_index = panel._renderer.findData(SymbologyPanel._RASTER_GRADUATED)
+    panel._renderer.setCurrentIndex(graduated_index)
+    application.processEvents()
+
+    assert requests
+    assert requests[-1][0] == "dem"
+    assert requests[-1][1] == "terrain"
+    assert requests[-1][2] == "equal_interval"
+    assert requests[-1][3] >= 3
+    assert application is not None

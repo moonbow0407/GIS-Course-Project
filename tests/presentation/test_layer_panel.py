@@ -20,7 +20,7 @@ from app.application.symbology_service import (
 )
 from app.domain.feature import Feature
 from app.domain.raster_layer import RasterLayer
-from app.domain.symbology import RasterRendererType
+from app.domain.symbology import RasterRendererType, RasterSymbology, StretchType
 from app.domain.vector_layer import VectorLayer
 from app.presentation.widgets.layer_panel import LayerPanel
 
@@ -59,6 +59,42 @@ def test_raster_classified_legend_shows_each_value_and_color() -> None:
     assert parent.childCount() == 4
     assert [parent.child(index).text(0) for index in range(1, 4)] == ["1", "2", "3"]
     assert all(not parent.child(index).icon(0).isNull() for index in range(1, 4))
+    panel.close()
+    assert application is not None
+
+
+def test_raster_stretch_legend_shows_scheme_and_value_range() -> None:
+    """拉伸栅格图例应显示色带中文名和有效值范围。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    raster = RasterLayer.create(
+        layer_id="dem-stretch",
+        name="dem",
+        raster_data=np.array([[[85.0, 200.0], [400.0, 5210.0]]], dtype=np.float32),
+        image_data=np.full((2, 2, 4), 255, dtype=np.uint8),
+        valid_mask=np.ones((2, 2), dtype=bool),
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0.0, 0.0, 2.0, 2.0),
+        symbology=RasterSymbology(
+            renderer_type=RasterRendererType.STRETCH,
+            stretch_type=StretchType.MIN_MAX,
+            color_scheme="terrain",
+        ),
+    )
+    panel: LayerPanel = LayerPanel()
+    panel.apply_snapshot(
+        WorkspaceSnapshot(
+            layers=(LayerSnapshot(layer=raster, visible=True, selected_feature_ids=()),),
+            active_layer_id=raster.layer_id,
+            display_crs=raster.crs,
+        )
+    )
+    tree: QTreeWidget | None = panel.findChild(QTreeWidget, "layerTree")
+    assert tree is not None
+    parent = tree.topLevelItem(0)
+    assert parent is not None
+    legend_texts = [parent.child(index).text(0) for index in range(parent.childCount())]
+    assert any("地形" in text and "85" in text and "5210" in text for text in legend_texts)
     panel.close()
     assert application is not None
 

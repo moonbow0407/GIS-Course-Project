@@ -106,6 +106,7 @@ class RasterSymbology:
     classes: tuple["RasterClass", ...] = ()
     other_color: str = "#BDBDBD"
     other_visible: bool = True
+    classification_method: str = "unique"
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,7 +169,31 @@ COLOR_RAMPS: dict[str, tuple[str, ...]] = {
     "blue": ("#F7FBFF", "#6BAED6", "#08306B"),
     "viridis": ("#440154", "#21918C", "#FDE725"),
     "terrain": ("#2E8B57", "#E5D96F", "#9A6A3A", "#FFFFFF"),
+    "slope": ("#2E7D32", "#C0CA33", "#FDD835", "#F57C00", "#C62828"),
+    "aspect": (
+        "#E53935",
+        "#FB8C00",
+        "#FDD835",
+        "#43A047",
+        "#00ACC1",
+        "#1E88E5",
+        "#5E35B1",
+        "#E53935",
+    ),
     "blue_white_red": ("#2166AC", "#F7F7F7", "#B2182B"),
+}
+
+SCHEME_LABELS: dict[str, str] = {
+    "standard": "标准分类",
+    "soft": "柔和分类",
+    "contrast": "高对比分类",
+    "gray": "灰度",
+    "blue": "蓝色渐变",
+    "viridis": "Viridis",
+    "terrain": "地形",
+    "slope": "坡度",
+    "aspect": "坡向",
+    "blue_white_red": "蓝—白—红",
 }
 
 
@@ -268,6 +293,7 @@ def raster_symbology_from_dict(payload: dict[str, object]) -> RasterSymbology:
         classes=classes,
         other_color=str(payload.get("other_color", "#BDBDBD")),
         other_visible=bool(payload.get("other_visible", True)),
+        classification_method=str(payload.get("classification_method", "unique")),
     )
 
 

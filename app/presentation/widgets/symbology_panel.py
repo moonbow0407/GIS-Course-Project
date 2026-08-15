@@ -40,6 +40,7 @@ from app.domain.raster_layer import RasterLayer
 from app.domain.symbology import (
     CATEGORICAL_SCHEMES,
     COLOR_RAMPS,
+    SCHEME_LABELS,
     GraduatedClass,
     RasterRendererType,
     RasterSymbology,
@@ -58,6 +59,9 @@ class SymbologyPanel(QWidget):
     symbology_changed = Signal(str, object)
     unique_requested = Signal(str, str, str)
     graduated_requested = Signal(str, str, str, str, int)
+    raster_classified_requested = Signal(str, str, str, int)
+
+    _RASTER_GRADUATED: str = "classified_graduated"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """创建初始为空的符号系统面板。"""
@@ -354,24 +358,51 @@ class SymbologyPanel(QWidget):
     def _load_raster(self, layer: RasterLayer) -> None:
         """加载栅格模式、分类值、波段和拉伸参数。"""
         symbology: RasterSymbology = layer.symbology  # type: ignore[assignment]
+        is_range_classified = self._is_raster_range_classified(symbology)
         with QSignalBlocker(self._renderer):
             self._renderer.clear()
             if layer.band_count >= 3:
                 self._renderer.addItem("RGB合成", RasterRendererType.RGB.value)
             self._renderer.addItem("单波段拉伸", RasterRendererType.STRETCH.value)
-            if symbology.renderer_type is RasterRendererType.CLASSIFIED:
+            self._renderer.addItem("分级着色", self._RASTER_GRADUATED)
+            if (
+                symbology.renderer_type is RasterRendererType.CLASSIFIED
+                and not is_range_classified
+            ):
                 self._renderer.addItem("分类值", RasterRendererType.CLASSIFIED.value)
-            self._set_combo_data(self._renderer, symbology.renderer_type.value)
+            if symbology.renderer_type is RasterRendererType.CLASSIFIED:
+                renderer_data = (
+                    self._RASTER_GRADUATED
+                    if is_range_classified
+                    else RasterRendererType.CLASSIFIED.value
+                )
+            else:
+                renderer_data = symbology.renderer_type.value
+            self._set_combo_data(self._renderer, renderer_data)
         with QSignalBlocker(self._scheme):
             self._scheme.clear()
             scheme_names = (
-                CATEGORICAL_SCHEMES
+                COLOR_RAMPS
+                if symbology.renderer_type is RasterRendererType.STRETCH
+                or is_range_classified
+                else CATEGORICAL_SCHEMES
                 if symbology.renderer_type is RasterRendererType.CLASSIFIED
                 else COLOR_RAMPS
             )
             for name in scheme_names:
                 self._add_scheme_item(name)
             self._set_combo_data(self._scheme, symbology.color_scheme)
+        if is_range_classified:
+            method = symbology.classification_method
+            if method not in {"equal_interval", "quantile"}:
+                method = "equal_interval"
+            self._set_combo_data(self._method, method)
+            self._class_count.setValue(
+                min(
+                    max(len(symbology.classes), self._class_count.minimum()),
+                    self._class_count.maximum(),
+                )
+            )
         for spin, value in zip(
             (self._red_band, self._green_band, self._blue_band),
             symbology.rgb_bands,
@@ -407,7 +438,25 @@ class SymbologyPanel(QWidget):
                     self._scheme.clear()
                     for name in scheme_names:
                         self._add_scheme_item(name)
+                    default_scheme = (
+                        "terrain" if renderer_data == self._RASTER_GRADUATED else None
+                    )
+                    if default_scheme is not None:
+                        self._set_combo_data(self._scheme, default_scheme)
             self._update_control_visibility()
+            if renderer_data == self._RASTER_GRADUATED:
+                raster_scheme = str(self._scheme.currentData() or "terrain")
+                raster_method = str(self._method.currentData() or "equal_interval")
+                class_count = self._class_count.value()
+                self._emit_or_defer(
+                    lambda: self.raster_classified_requested.emit(
+                        snapshot.layer_id,
+                        raster_scheme,
+                        raster_method,
+                        class_count,
+                    )
+                )
+                return
             self._emit_raster()
             return
         self._update_control_visibility()
@@ -856,9 +905,10 @@ class SymbologyPanel(QWidget):
         is_raster = snapshot is not None and isinstance(snapshot.layer, RasterLayer)
         is_rgb = is_raster and renderer_data == RasterRendererType.RGB.value
         is_stretch = is_raster and renderer_data == RasterRendererType.STRETCH.value
+        is_raster_graduated = is_raster and renderer_data == self._RASTER_GRADUATED
         is_classified_raster = (
             is_raster and renderer_data == RasterRendererType.CLASSIFIED.value
-        )
+        ) or is_raster_graduated
         self._settings_card.setVisible(snapshot is not None)
         self._form.setRowVisible(self._field, is_unique or is_graduated)
         self._form.setRowVisible(
@@ -869,8 +919,8 @@ class SymbologyPanel(QWidget):
             self._simple_color_button,
             is_vector and not is_unique and not is_graduated,
         )
-        self._form.setRowVisible(self._method, is_graduated)
-        self._form.setRowVisible(self._class_count, is_graduated)
+        self._form.setRowVisible(self._method, is_graduated or is_raster_graduated)
+        self._form.setRowVisible(self._class_count, is_graduated or is_raster_graduated)
         self._classes_card.setVisible(
             is_unique or is_graduated or is_classified_raster
         )
@@ -896,16 +946,16 @@ class SymbologyPanel(QWidget):
     @staticmethod
     def _scheme_label(name: str) -> str:
         """把内部配色编号转换为中文显示名称。"""
-        return {
-            "standard": "标准分类",
-            "soft": "柔和分类",
-            "contrast": "高对比分类",
-            "gray": "灰度",
-            "blue": "蓝色渐变",
-            "viridis": "Viridis",
-            "terrain": "地形",
-            "blue_white_red": "蓝—白—红",
-        }[name]
+        return SCHEME_LABELS[name]
+
+    @staticmethod
+    def _is_raster_range_classified(symbology: RasterSymbology) -> bool:
+        """区间分类（分级着色）用 upper 表达连续值分段。"""
+        if symbology.renderer_type is not RasterRendererType.CLASSIFIED:
+            return False
+        if symbology.classification_method in {"equal_interval", "quantile"}:
+            return True
+        return any(category.upper is not None for category in symbology.classes)
 
     def _add_scheme_item(self, name: str) -> None:
         """添加带离散色块或连续渐变预览的配色方案。"""

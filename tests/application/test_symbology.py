@@ -14,7 +14,10 @@ from app.application.symbology_service import (
     create_dem_result_symbology,
     create_graduated_symbology,
     create_raster_classified_symbology,
+    create_raster_graduated_symbology,
     create_unique_value_symbology,
+    infer_default_raster_symbology,
+    raster_stretch_legend_text,
 )
 from app.domain.feature import Feature
 from app.domain.map_document import MapDocument
@@ -90,6 +93,154 @@ def test_graduated_class_count_cannot_exceed_numeric_sample_count() -> None:
 
     with pytest.raises(ValueError, match="不能超过可用于分级的数值样本数（当前为 7）"):
         create_graduated_symbology(layer, "value", "gray", "equal_interval", 8)
+
+
+def _raster_layer(
+    name: str,
+    data: np.ndarray,
+    *,
+    valid: np.ndarray | None = None,
+    symbology: RasterSymbology | None = None,
+) -> RasterLayer:
+    """构造测试用单波段或多波段栅格。"""
+    if data.ndim == 2:
+        data = data[np.newaxis, ...]
+    height, width = data.shape[1], data.shape[2]
+    if valid is None:
+        valid = np.ones((height, width), dtype=np.bool_)
+    return RasterLayer.create(
+        name=name,
+        raster_data=data,
+        image_data=np.zeros((height, width, 4), dtype=np.uint8),
+        valid_mask=valid,
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0, 0, float(width), float(height)),
+        symbology=symbology,
+    )
+
+
+def test_infer_default_uses_rgb_for_multiband_raster() -> None:
+    """三波段及以上栅格默认使用 RGB 合成。"""
+    layer = _raster_layer(
+        "影像",
+        np.stack(
+            [
+                np.array([[10, 20], [30, 40]], dtype=np.uint8),
+                np.array([[11, 21], [31, 41]], dtype=np.uint8),
+                np.array([[12, 22], [32, 42]], dtype=np.uint8),
+            ]
+        ),
+    )
+
+    symbology = infer_default_raster_symbology(layer)
+
+    assert symbology.renderer_type is RasterRendererType.RGB
+
+
+def test_infer_default_classifies_low_cardinality_integer_raster() -> None:
+    """少量离散整数值应默认使用分类色。"""
+    layer = _raster_layer(
+        "土地利用",
+        np.array([[1, 2], [2, 3]], dtype=np.int16),
+    )
+
+    symbology = infer_default_raster_symbology(layer)
+
+    assert symbology.renderer_type is RasterRendererType.CLASSIFIED
+    assert {category.value for category in symbology.classes} == {1.0, 2.0, 3.0}
+
+
+def test_infer_default_uses_terrain_stretch_for_continuous_elevation() -> None:
+    """连续高程单波段应默认用地形色带拉伸，而不是灰度。"""
+    layer = _raster_layer(
+        "dem",
+        np.array([[85.0, 400.0], [1200.0, 2500.0]], dtype=np.float32),
+    )
+
+    symbology = infer_default_raster_symbology(layer)
+
+    assert symbology.renderer_type is RasterRendererType.STRETCH
+    assert symbology.color_scheme == "terrain"
+
+
+def test_infer_default_uses_slope_ramp_for_degree_like_raster() -> None:
+    """值域落在坡度度数范围的连续栅格应使用坡度色带。"""
+    layer = _raster_layer(
+        "slope",
+        np.array([[2.0, 15.0], [30.0, 55.0]], dtype=np.float32),
+    )
+
+    symbology = infer_default_raster_symbology(layer)
+
+    assert symbology.renderer_type is RasterRendererType.STRETCH
+    assert symbology.color_scheme == "slope"
+
+
+def test_create_raster_graduated_symbology_builds_range_classes() -> None:
+    """连续栅格应按等间隔生成带区间标签的分类符号。"""
+    layer = _raster_layer(
+        "高程",
+        np.linspace(0.0, 100.0, 20, dtype=np.float32).reshape(1, 4, 5),
+    )
+
+    symbology = create_raster_graduated_symbology(
+        layer, "terrain", "equal_interval", 5
+    )
+
+    assert symbology.renderer_type is RasterRendererType.CLASSIFIED
+    assert symbology.classification_method == "equal_interval"
+    assert len(symbology.classes) == 5
+    assert symbology.classes[0].upper is not None
+    assert symbology.classes[0].value == pytest.approx(0.0)
+    assert symbology.classes[-1].upper == pytest.approx(100.0)
+    assert "–" in symbology.classes[0].label
+    restored = raster_symbology_from_dict(symbology_to_dict(symbology))
+    assert restored.classification_method == "equal_interval"
+
+
+def test_create_raster_graduated_symbology_rejects_too_few_samples() -> None:
+    """分级数超过有效像元数时应给出明确错误。"""
+    layer = _raster_layer("小栅格", np.array([[1.0, 2.0]], dtype=np.float32))
+
+    with pytest.raises(ValueError, match="不能超过可用于分级的有效像元数"):
+        create_raster_graduated_symbology(layer, "terrain", "equal_interval", 5)
+
+
+def test_stretch_legend_includes_scheme_and_value_range() -> None:
+    """拉伸图例应同时给出色带名称和有效值范围。"""
+    layer = _raster_layer(
+        "dem",
+        np.array([[85.0, 200.0], [400.0, 5210.0]], dtype=np.float32),
+        symbology=RasterSymbology(
+            renderer_type=RasterRendererType.STRETCH,
+            stretch_type=StretchType.MIN_MAX,
+            color_scheme="terrain",
+        ),
+    )
+
+    text = raster_stretch_legend_text(layer)
+
+    assert "地形" in text
+    assert "85" in text
+    assert "5210" in text
+
+
+def test_add_layer_applies_default_raster_symbology() -> None:
+    """加入工作区时占位灰度拉伸应替换为按数据特征推断的符号。"""
+    layer = _raster_layer(
+        "dem",
+        np.array([[100.0, 200.0], [800.0, 1500.0]], dtype=np.float32),
+    )
+    application = GisApplication(AutoDataReader())
+
+    application.add_layer(layer)
+
+    added = application.snapshot().layers[0].layer
+    assert isinstance(added, RasterLayer)
+    assert added.symbology is not None
+    assert added.symbology.color_scheme == "terrain"
+    assert added.image_data[0, 0, 0] != added.image_data[0, 0, 1]
 
 
 def test_single_band_raster_stretch_generates_color_ramp_and_transparent_nodata() -> None:

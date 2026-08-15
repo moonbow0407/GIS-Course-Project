@@ -51,6 +51,7 @@ class DisplaySettingsDialog(QDialog):
     symbology_changed = Signal(str, object)
     unique_requested = Signal(str, str, str)
     graduated_requested = Signal(str, str, str, str, int)
+    raster_classified_requested = Signal(str, str, str, int)
     global_display_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -228,6 +229,9 @@ class DisplaySettingsDialog(QDialog):
         self._symbology_panel.symbology_changed.connect(self.symbology_changed.emit)
         self._symbology_panel.unique_requested.connect(self.unique_requested.emit)
         self._symbology_panel.graduated_requested.connect(self.graduated_requested.emit)
+        self._symbology_panel.raster_classified_requested.connect(
+            self.raster_classified_requested.emit
+        )
 
     def set_layers(
         self,

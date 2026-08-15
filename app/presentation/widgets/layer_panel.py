@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
+from app.application.symbology_service import raster_stretch_legend_text
 from app.domain.layer_style import GeometryFamily, LayerStyle
 from app.domain.raster_layer import RasterLayer
 from app.domain.symbology import (
@@ -479,14 +480,14 @@ class LayerPanel(QWidget):
                     )
                 return
             else:
-                label = (
-                    f"{raster_symbology.color_scheme} · "
-                    f"波段 {raster_symbology.stretch_band + 1}"
-                )
                 ramp_colors = COLOR_RAMPS.get(raster_symbology.color_scheme, ("#000000", "#FFFFFF"))
                 if raster_symbology.inverted:
                     ramp_colors = tuple(reversed(ramp_colors))
-                self._add_raster_legend_item(parent, f"拉伸 · {label}", ramp_colors)
+                self._add_raster_legend_item(
+                    parent,
+                    raster_stretch_legend_text(layer),
+                    ramp_colors,
+                )
             return
         vector_symbology = layer.symbology
         if vector_symbology is None:

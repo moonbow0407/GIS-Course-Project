@@ -12,6 +12,7 @@ from app.domain.raster_layer import RasterLayer
 from app.domain.symbology import (
     CATEGORICAL_SCHEMES,
     COLOR_RAMPS,
+    SCHEME_LABELS,
     GraduatedClass,
     RasterClass,
     RasterRendererType,
@@ -169,6 +170,152 @@ def create_dem_result_symbology(mode: str) -> RasterSymbology:
     raise ValueError(f"不支持的 DEM 分析类型：{mode}")
 
 
+_MAX_DEFAULT_UNIQUE_VALUES: int = 20
+
+
+def raster_display_samples(
+    layer: RasterLayer,
+    band_index: int = 0,
+) -> NDArray[np.float64]:
+    """从显示预览或已加载分析数组采集有效像元，避免为符号推断加载整幅栅格。"""
+    values: NDArray[np.float64] | None = None
+    valid: NDArray[np.bool_] | None = None
+    if layer.display_values is not None and layer.display_valid_mask is not None:
+        indexes = layer.display_band_indexes or tuple(
+            range(int(layer.display_values.shape[0]))
+        )
+        position = indexes.index(band_index) if band_index in indexes else 0
+        values = np.asarray(layer.display_values[position], dtype=np.float64)
+        valid = np.asarray(layer.display_valid_mask, dtype=bool)
+    elif layer.analysis_data_loaded:
+        safe_band = min(max(band_index, 0), layer.band_count - 1)
+        values = np.asarray(layer.raster_data[safe_band], dtype=np.float64)
+        valid = np.asarray(layer.valid_mask, dtype=bool)
+    if values is None or valid is None:
+        return np.empty(0, dtype=np.float64)
+    return values[valid & np.isfinite(values)]
+
+
+def is_placeholder_raster_symbology(symbology: RasterSymbology) -> bool:
+    """判断是否为图层构造时生成的占位符号（默认灰度拉伸或默认 RGB）。"""
+    if symbology.renderer_type is RasterRendererType.RGB:
+        return symbology.rgb_bands == (0, 1, 2) and not symbology.classes
+    if symbology.renderer_type is RasterRendererType.STRETCH:
+        return (
+            symbology.color_scheme == "gray"
+            and symbology.stretch_type is StretchType.PERCENT_CLIP
+            and symbology.stretch_band == 0
+            and not symbology.inverted
+            and not symbology.classes
+        )
+    return False
+
+
+def infer_default_raster_symbology(layer: RasterLayer) -> RasterSymbology:
+    """按波段数和值分布选择打开栅格时的默认显示符号。"""
+    if layer.band_count >= 3:
+        return RasterSymbology(renderer_type=RasterRendererType.RGB)
+    samples = raster_display_samples(layer)
+    if samples.size == 0:
+        return RasterSymbology(
+            renderer_type=RasterRendererType.STRETCH,
+            color_scheme="terrain",
+        )
+    unique_values = np.unique(samples)
+    value_span = float(unique_values.max() - unique_values.min()) if unique_values.size else 0.0
+    if (
+        unique_values.size <= _MAX_DEFAULT_UNIQUE_VALUES
+        and np.allclose(unique_values, np.round(unique_values))
+        and (
+            value_span <= 50.0
+            or unique_values.size >= value_span + 1.0
+        )
+    ):
+        return create_raster_classified_symbology(
+            tuple(float(value) for value in unique_values)
+        )
+    minimum = float(samples.min())
+    maximum = float(samples.max())
+    if 0.0 <= minimum and maximum <= 90.0 and maximum > 15.0:
+        color_scheme = "slope"
+    elif 0.0 <= minimum and maximum <= 255.0 and maximum - minimum >= 200.0:
+        return RasterSymbology(
+            renderer_type=RasterRendererType.STRETCH,
+            stretch_type=StretchType.MIN_MAX,
+            color_scheme="gray",
+        )
+    elif 0.0 <= minimum and maximum <= 360.0 and maximum > 180.0:
+        color_scheme = "aspect"
+    else:
+        color_scheme = "terrain"
+    return RasterSymbology(
+        renderer_type=RasterRendererType.STRETCH,
+        stretch_type=StretchType.PERCENT_CLIP,
+        color_scheme=color_scheme,
+    )
+
+
+def create_raster_graduated_symbology(
+    layer: RasterLayer,
+    color_scheme: str,
+    classification_method: str,
+    class_count: int,
+) -> RasterSymbology:
+    """按等间隔或分位数为连续栅格生成区间分类符号。"""
+    if class_count < 3:
+        raise ValueError("分级数量至少为 3 级。")
+    if color_scheme not in COLOR_RAMPS:
+        raise ValueError(f"不支持的栅格色带：{color_scheme}")
+    samples = raster_display_samples(layer, layer.symbology.stretch_band if layer.symbology else 0)
+    if samples.size == 0:
+        raise ValueError("没有可用于分级的有效像元。")
+    if class_count > int(samples.size):
+        raise ValueError(
+            f"分级数量不能超过可用于分级的有效像元数（当前为 {int(samples.size)}）。"
+        )
+    if classification_method == "quantile":
+        breaks = np.quantile(samples, np.linspace(0.0, 1.0, class_count + 1))
+    elif classification_method == "equal_interval":
+        breaks = np.linspace(float(samples.min()), float(samples.max()), class_count + 1)
+    else:
+        raise ValueError("不支持的分级方法。")
+    for index in range(1, len(breaks)):
+        if breaks[index] <= breaks[index - 1]:
+            breaks[index] = breaks[index - 1] + 1e-9
+    colors = sample_color_ramp(color_scheme, class_count)
+    classes = tuple(
+        RasterClass(
+            value=float(breaks[index]),
+            label=f"{breaks[index]:.6g} – {breaks[index + 1]:.6g}",
+            color=colors[index],
+            upper=float(breaks[index + 1]),
+        )
+        for index in range(class_count)
+    )
+    return RasterSymbology(
+        renderer_type=RasterRendererType.CLASSIFIED,
+        color_scheme=color_scheme,
+        classes=classes,
+        other_visible=False,
+        classification_method=classification_method,
+    )
+
+
+def raster_stretch_legend_text(layer: RasterLayer) -> str:
+    """生成拉伸栅格在图层树中的图例摘要。"""
+    symbology = layer.symbology
+    if symbology is None:
+        return "拉伸"
+    scheme_label = SCHEME_LABELS.get(symbology.color_scheme, symbology.color_scheme)
+    samples = raster_display_samples(layer, symbology.stretch_band)
+    if samples.size == 0:
+        return f"拉伸 · {scheme_label}"
+    return (
+        f"拉伸 · {scheme_label} · "
+        f"{float(samples.min()):.6g}–{float(samples.max()):.6g}"
+    )
+
+
 def create_raster_classified_symbology(
     values: tuple[float, ...],
     color_scheme: str = "standard",
@@ -193,6 +340,7 @@ def create_raster_classified_symbology(
         classes=classes,
         other_color="#BDBDBD",
         other_visible=True,
+        classification_method="unique",
     )
 
 
