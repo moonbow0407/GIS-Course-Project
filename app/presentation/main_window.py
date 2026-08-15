@@ -291,6 +291,12 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence.StandardKey.Undo, self, self._undo)
         # Ctrl+Shift+Z 重做最近一次撤销。
         QShortcut(QKeySequence.StandardKey.Redo, self, self._redo)
+        # Ctrl+S 保存当前工程；未命名工程会先弹出另存对话框
+        # （ApplicationShortcut 确保即使在属性表等子控件焦点下也生效）。
+        save_shortcut: QShortcut = QShortcut(
+            QKeySequence.StandardKey.Save, self, self._save_project_action
+        )
+        save_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         # Delete 删除选中要素（ApplicationShortcut 确保即使在属性表焦点下也生效）。
         delete_shortcut: QShortcut = QShortcut(
             QKeySequence(Qt.Key.Key_Delete), self, self._delete_selected_features
