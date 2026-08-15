@@ -5,8 +5,14 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from app.presentation.main_window import MainWindow
-from app.presentation.widgets.startup_dialog import (
+# 必须抢在任何 GIS 库导入之前隔离 PROJ 数据目录：本机 PostGIS 写入的机器级
+# PROJ_LIB 指向旧版 proj.db，会让 rasterio/pyproj 内置 PROJ 的 EPSG 查询失败。
+from app.infrastructure.proj_environment import configure_proj_environment
+
+configure_proj_environment()
+
+from app.presentation.main_window import MainWindow  # noqa: E402
+from app.presentation.widgets.startup_dialog import (  # noqa: E402
     StartupDialog,
     save_recent_project,
 )
