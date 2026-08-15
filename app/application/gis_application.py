@@ -24,7 +24,7 @@ from app.application.buffer_analysis import (
     reproject_vector_layer,
     resolve_buffer_analysis_crs,
 )
-from app.application.crs_utils import crs_equivalent
+from app.application.crs_utils import crs_coordinate_domain_error, crs_equivalent
 from app.application.database_models import (
     DatabaseConnectionConfig,
     DatabaseLayerInfo,
@@ -42,6 +42,7 @@ from app.application.errors import (
     DatabaseNotConfigured,
     DataWriteFailed,
     EmptyOverlayResult,
+    IncompatibleCoordinateReferenceSystem,
     InvalidBufferParameters,
     InvalidOverlayParameters,
     InvalidRasterCalculatorParameters,
@@ -502,6 +503,9 @@ class GisApplication:
     def define_layer_crs(self, layer_id: str, crs: CRS) -> WorkspaceSnapshot:
         """定义或修正图层 CRS，只保存工程内解释，不改写源数据坐标。"""
         layer: SpatialLayer = self._find_layer(layer_id)
+        domain_error = crs_coordinate_domain_error(crs, layer.bounds, layer.name)
+        if domain_error is not None:
+            raise IncompatibleCoordinateReferenceSystem(domain_error)
         corrected_layer: SpatialLayer = self._with_crs_override(layer, True, crs)
         self._document.replace_layer(corrected_layer)
         if self._document.display_crs is None:

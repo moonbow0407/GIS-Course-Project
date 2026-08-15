@@ -817,7 +817,7 @@ class MainWindow(QMainWindow):
         ).exec()
 
     def _select_spatial_data_files(self) -> list[str]:
-        """选择空间文件；必须使用系统原生对话框。"""
+        """选择空间文件；使用 Spec 定义的专用窗口，不调用 Shell 预览。"""
         return select_spatial_data_files(self)
 
     def _open_data(self) -> None:

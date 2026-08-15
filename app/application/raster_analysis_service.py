@@ -25,7 +25,7 @@ from rasterio.enums import Resampling
 from rasterio.windows import Window, from_bounds
 from rasterio.windows import bounds as window_bounds
 
-from app.application.crs_utils import crs_equivalent
+from app.application.crs_utils import crs_coordinate_domain_error, crs_equivalent
 from app.application.errors import (
     EmptyRasterResult,
     InvalidRasterAnalysisParameters,
@@ -352,6 +352,21 @@ class RasterAnalysisService:
             raise UnsupportedRasterAnalysisInput(
                 "栅格与掩膜 CRS 不一致；请先手动重投影后再裁剪。"
             )
+        raster_crs = raster_layer.crs
+        mask_crs = mask_layer.crs
+        if raster_crs is None or mask_crs is None:
+            raise UnsupportedRasterAnalysisInput(
+                "栅格与掩膜都必须具有坐标参考系统。"
+            )
+        for candidate_crs, candidate in (
+            (raster_crs, raster_layer),
+            (mask_crs, mask_layer),
+        ):
+            domain_error = crs_coordinate_domain_error(
+                candidate_crs, candidate.bounds, candidate.name
+            )
+            if domain_error is not None:
+                raise InvalidRasterAnalysisParameters(domain_error)
 
         from shapely.geometry.base import BaseGeometry
 
@@ -427,6 +442,7 @@ class RasterAnalysisService:
             output_nodata=output_nodata,
             halo=0,
             output_band_count=raster_layer.band_count,
+            require_valid_pixels=True,
         )
 
     # ── 统一执行引擎 ─────────────────────────────────────────
@@ -446,6 +462,7 @@ class RasterAnalysisService:
         classified_values: tuple[float, ...] | None = None,
         classified_labels: Mapping[float, str] | None = None,
         result_symbology: RasterSymbology | None = None,
+        require_valid_pixels: bool = False,
     ) -> RasterLayer:
         """按目标网格分块执行分析并写出结果。"""
         for _role, layer, band_index in inputs:
@@ -503,6 +520,7 @@ class RasterAnalysisService:
                 for role, _layer, band in inputs
             }
 
+            valid_pixels = 0
             for index, (read_win, write_win) in enumerate(windows):
                 arrays: dict[str, NDArray[np.generic]] = {}
                 masks: dict[str, NDArray[np.bool_]] = {}
@@ -514,11 +532,23 @@ class RasterAnalysisService:
                     read_win.col_off, read_win.row_off
                 )
                 result, result_valid = kernel(arrays, masks, win_transform)
+                if require_valid_pixels:
+                    valid_pixels += _window_valid_count(
+                        result_valid, read_win, write_win, halo
+                    )
                 _write_window_center(
                     writer, result, result_valid, read_win, write_win, halo
                 )
                 if not self._report_progress(index + 1, total):
                     raise RasterAnalysisFailed("已取消栅格分析。")
+            if require_valid_pixels and valid_pixels == 0:
+                raise EmptyRasterResult(
+                    "掩膜裁剪后没有有效像元。请检查掩膜与栅格是否真正重叠，"
+                    "以及像元是否过大导致没有中心点落入掩膜。"
+                )
+        except EmptyRasterResult:
+            writer._abort()
+            raise
         except RasterAnalysisFailed:
             writer._abort()
             raise
@@ -713,6 +743,26 @@ class _InputSource:
             out_shape=(int(read_win.height), int(read_win.width)),
             boundless=True,
         )
+
+
+def _window_valid_count(
+    result_valid: NDArray[np.bool_],
+    read_win: Window,
+    write_win: Window,
+    halo: int,
+) -> int:
+    """统计写入窗口中心区域的有效像元数，避免 halo 把邻域计进去。"""
+    center_valid = result_valid
+    if halo > 0:
+        col_offset = int(write_win.col_off - read_win.col_off)
+        row_offset = int(write_win.row_off - read_win.row_off)
+        row_slice = slice(row_offset, row_offset + write_win.height)
+        col_slice = slice(col_offset, col_offset + write_win.width)
+        if result_valid.ndim == 3:
+            center_valid = result_valid[:, row_slice, col_slice]
+        else:
+            center_valid = result_valid[row_slice, col_slice]
+    return int(np.count_nonzero(center_valid))
 
 
 def _write_window_center(

@@ -313,6 +313,20 @@ def test_open_data_progress_dialog_receives_determinate_updates(monkeypatch) -> 
     window.close()
 
 
+def test_open_data_uses_dedicated_spatial_dialog_facade(monkeypatch) -> None:
+    """打开空间数据必须经由专用对话框入口选择文件。"""
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "app.presentation.main_window.select_spatial_data_files",
+        lambda parent: calls.append(parent) or ["a.tif", "b.shp"],
+    )
+    assert window._select_spatial_data_files() == ["a.tif", "b.shp"]
+    assert calls == [window]
+    window.close()
+
+
 def test_first_unsuitable_layer_can_choose_independent_display_crs(monkeypatch) -> None:
     """首图层确认应在提交前设置地图 CRS，后续图层不得再次改变画布。"""
     QApplication.instance() or QApplication([])

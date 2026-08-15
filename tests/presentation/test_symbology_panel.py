@@ -27,6 +27,7 @@ from app.domain.symbology import (
     VectorSymbology,
 )
 from app.domain.vector_layer import VectorLayer
+from app.presentation.widgets.color_wheel_picker import ColorWheelPicker
 from app.presentation.widgets.symbology_panel import SymbologyPanel
 from main import load_style
 
@@ -305,6 +306,48 @@ def test_raster_panel_uses_preview_and_hides_irrelevant_class_card() -> None:
     assert panel._scheme.currentData() == "terrain"
     assert not panel._scheme.itemIcon(panel._scheme.currentIndex()).isNull()
     assert application is not None
+
+
+def test_raster_panel_edits_nodata_visibility_and_color(monkeypatch) -> None:
+    """栅格面板应回填并发送用户修改的 NoData 显示配置。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = RasterLayer.create(
+        layer_id="nodata-raster",
+        name="含空值高程",
+        raster_data=np.asarray([[[1.0, -9999.0]]]),
+        image_data=np.zeros((1, 2, 4), dtype=np.uint8),
+        valid_mask=np.asarray([[True, False]], dtype=np.bool_),
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0, 0, 2, 1),
+        symbology=RasterSymbology(
+            renderer_type=RasterRendererType.STRETCH,
+            color_scheme="terrain",
+            nodata_color="#334155",
+            nodata_visible=False,
+        ),
+    )
+    panel = SymbologyPanel()
+    panel.set_layer(LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()))
+    emitted: list[RasterSymbology] = []
+    panel.symbology_changed.connect(
+        lambda _layer_id, symbology: emitted.append(symbology)
+    )
+    monkeypatch.setattr(
+        ColorWheelPicker,
+        "get_color",
+        lambda *_args, **_kwargs: QColor("#e11d48"),
+    )
+
+    assert panel._nodata_visible.isChecked() is False
+    assert panel._nodata_color_button.isHidden() is False
+    panel._nodata_visible.setChecked(True)
+    panel._nodata_color_button.click()
+    application.processEvents()
+
+    assert emitted
+    assert emitted[-1].nodata_visible is True
+    assert emitted[-1].nodata_color == "#e11d48"
 
 
 def test_classified_raster_panel_shows_discrete_levels() -> None:

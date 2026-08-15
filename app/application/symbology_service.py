@@ -193,7 +193,11 @@ def raster_display_samples(
         valid = np.asarray(layer.valid_mask, dtype=bool)
     if values is None or valid is None:
         return np.empty(0, dtype=np.float64)
-    return values[valid & np.isfinite(values)]
+    sample_mask = valid & np.isfinite(values)
+    # 降采样后的 GDAL 掩膜在 NoData 边界处可能仍报告有效，统计时按声明值再次兜底。
+    if layer.nodata is not None:
+        sample_mask &= values != layer.nodata
+    return values[sample_mask]
 
 
 def is_placeholder_raster_symbology(symbology: RasterSymbology) -> bool:
@@ -206,6 +210,8 @@ def is_placeholder_raster_symbology(symbology: RasterSymbology) -> bool:
             and symbology.stretch_type is StretchType.PERCENT_CLIP
             and symbology.stretch_band == 0
             and not symbology.inverted
+            and symbology.nodata_color == "#000000"
+            and not symbology.nodata_visible
             and not symbology.classes
         )
     return False
@@ -266,7 +272,8 @@ def create_raster_graduated_symbology(
         raise ValueError("分级数量至少为 3 级。")
     if color_scheme not in COLOR_RAMPS:
         raise ValueError(f"不支持的栅格色带：{color_scheme}")
-    samples = raster_display_samples(layer, layer.symbology.stretch_band if layer.symbology else 0)
+    current = layer.symbology
+    samples = raster_display_samples(layer, current.stretch_band if current else 0)
     if samples.size == 0:
         raise ValueError("没有可用于分级的有效像元。")
     if class_count > int(samples.size):
@@ -298,6 +305,8 @@ def create_raster_graduated_symbology(
         classes=classes,
         other_visible=False,
         classification_method=classification_method,
+        nodata_color=current.nodata_color if current else "#000000",
+        nodata_visible=current.nodata_visible if current else False,
     )
 
 
@@ -385,8 +394,9 @@ def apply_raster_symbology(layer: RasterLayer, symbology: RasterSymbology) -> Ra
             for index in render_band_indexes
         ]
         rgb = np.stack(stretched, axis=2)
+        rgb[~source_valid_mask] = _hex_to_rgb(symbology.nodata_color)
         stretch_alpha: NDArray[np.uint8] = np.where(
-            source_valid_mask, 255, 0
+            source_valid_mask | symbology.nodata_visible, 255, 0
         ).astype(np.uint8)
         image_data = np.ascontiguousarray(
             np.dstack((rgb, stretch_alpha)).astype(np.uint8)
@@ -400,7 +410,10 @@ def apply_raster_symbology(layer: RasterLayer, symbology: RasterSymbology) -> Ra
         if symbology.inverted:
             normalized = 1.0 - normalized
         rgb = _apply_color_ramp(normalized, COLOR_RAMPS[symbology.color_scheme])
-        alpha: NDArray[np.uint8] = np.where(source_valid_mask, 255, 0).astype(np.uint8)
+        rgb[~source_valid_mask] = _hex_to_rgb(symbology.nodata_color)
+        alpha: NDArray[np.uint8] = np.where(
+            source_valid_mask | symbology.nodata_visible, 255, 0
+        ).astype(np.uint8)
         image_data = np.ascontiguousarray(np.dstack((rgb, alpha)).astype(np.uint8))
     else:
         image_data = render_raster_classified(
@@ -428,6 +441,9 @@ def render_raster_classified(
     other_rgb = np.asarray(_hex_to_rgb(symbology.other_color), dtype=np.uint8)
     rgb = np.broadcast_to(other_rgb, (*shape, 3)).copy()
     visible = np.asarray(valid_mask, dtype=bool).copy()
+    rgb[~valid_mask] = _hex_to_rgb(symbology.nodata_color)
+    if symbology.nodata_visible:
+        visible[~valid_mask] = True
     matched = np.zeros(shape, dtype=bool)
     for category in symbology.classes:
         category_mask = (

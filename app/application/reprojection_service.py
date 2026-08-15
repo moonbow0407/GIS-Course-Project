@@ -9,6 +9,7 @@ import numpy as np
 from pyproj import CRS
 from rasterio.transform import array_bounds
 
+from app.application.crs_utils import crs_coordinate_domain_error
 from app.application.display_projection_service import DisplayProjectionService
 from app.application.errors import LayerReprojectionFailed, WorkspaceOperationCancelled
 from app.application.ports import DataReader, DataWriter
@@ -126,6 +127,9 @@ class ReprojectionService:
         """
         if layer.crs is None:
             raise LayerReprojectionFailed(f"图层“{layer.name}”没有 CRS。")
+        domain_error = crs_coordinate_domain_error(layer.crs, layer.bounds, layer.name)
+        if domain_error is not None:
+            raise LayerReprojectionFailed(domain_error)
         resolved_path: Path | None = (
             output_path.expanduser().resolve() if output_path is not None else None
         )

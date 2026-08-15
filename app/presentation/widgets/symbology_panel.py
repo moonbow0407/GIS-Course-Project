@@ -97,6 +97,9 @@ class SymbologyPanel(QWidget):
         self._lower_percent: QDoubleSpinBox = QDoubleSpinBox()
         self._upper_percent: QDoubleSpinBox = QDoubleSpinBox()
         self._invert: QCheckBox = QCheckBox("反转色带")
+        self._nodata_visible: QCheckBox = QCheckBox("显示 NoData")
+        self._nodata_color_button: QPushButton = QPushButton("选择颜色…")
+        self._current_nodata_color: str = "#000000"
         self._classes: QTableWidget = QTableWidget(0, 3)
         self._form: QFormLayout = QFormLayout()
         self._create_ui()
@@ -152,6 +155,8 @@ class SymbologyPanel(QWidget):
         self._classes_card.setObjectName("symbologyClassesCard")
         self._renderer.setObjectName("symbologyRenderer")
         self._simple_color_button.setObjectName("symbologySimpleColorButton")
+        self._nodata_visible.setObjectName("symbologyNodataVisible")
+        self._nodata_color_button.setObjectName("symbologyNodataColorButton")
         self._scheme.setIconSize(QSize(86, 16))
         self._field.setObjectName("symbologyField")
         self._scheme.setObjectName("symbologyScheme")
@@ -162,6 +167,7 @@ class SymbologyPanel(QWidget):
         self._method.addItem("等间隔", "equal_interval")
         self._method.addItem("分位数", "quantile")
         self._set_simple_color_button(QColor("#2F7DE1"))
+        self._set_nodata_color_button(QColor("#000000"))
         for spin in (self._red_band, self._green_band, self._blue_band, self._stretch_band):
             spin.setMinimum(1)
             spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -214,6 +220,8 @@ class SymbologyPanel(QWidget):
         self._form.addRow("下限", self._lower_percent)
         self._form.addRow("上限", self._upper_percent)
         self._form.addRow("", self._invert)
+        self._form.addRow("", self._nodata_visible)
+        self._form.addRow("NoData 颜色", self._nodata_color_button)
         header_card = QFrame()
         header_card.setObjectName("symbologyHeaderCard")
         header_layout = QVBoxLayout(header_card)
@@ -287,6 +295,8 @@ class SymbologyPanel(QWidget):
             spin.valueChanged.connect(self._emit_raster)
         self._stretch_type.currentIndexChanged.connect(self._emit_raster)
         self._invert.toggled.connect(self._emit_raster)
+        self._nodata_visible.toggled.connect(self._emit_raster)
+        self._nodata_color_button.clicked.connect(self._on_nodata_color_clicked)
         self._lower_percent.valueChanged.connect(self._schedule_raster)
         self._upper_percent.valueChanged.connect(self._schedule_raster)
         self._classes.itemChanged.connect(self._on_class_item_changed)
@@ -416,6 +426,9 @@ class SymbologyPanel(QWidget):
         self._lower_percent.setValue(symbology.lower_percent)
         self._upper_percent.setValue(symbology.upper_percent)
         self._invert.setChecked(symbology.inverted)
+        with QSignalBlocker(self._nodata_visible):
+            self._nodata_visible.setChecked(symbology.nodata_visible)
+        self._set_nodata_color_button(QColor(symbology.nodata_color))
         if symbology.renderer_type is RasterRendererType.CLASSIFIED:
             self._fill_raster_classes(symbology)
         else:
@@ -529,6 +542,11 @@ class SymbologyPanel(QWidget):
         self._current_simple_color = color.name()
         self._setup_color_button(self._simple_color_button, color)
 
+    def _set_nodata_color_button(self, color: QColor) -> None:
+        """更新 NoData 颜色按钮，并保留当前颜色值。"""
+        self._current_nodata_color = color.name()
+        self._setup_color_button(self._nodata_color_button, color)
+
     def _setup_color_button(self, button: QPushButton, color: QColor) -> None:
         """统一设置颜色按钮的外观：色块图标 + 边框 + hover 高亮。
 
@@ -565,6 +583,16 @@ class SymbologyPanel(QWidget):
             return
         self._set_simple_color_button(color)
         self._emit_simple()
+
+    def _on_nodata_color_clicked(self) -> None:
+        """选择栅格 NoData 渲染颜色并应用。"""
+        color: QColor | None = ColorWheelPicker.get_color(
+            QColor(self._current_nodata_color), self
+        )
+        if color is None:
+            return
+        self._set_nodata_color_button(color)
+        self._emit_raster()
 
     def _emit_simple(self) -> None:
         """应用当前单一颜色并保留符号尺寸。"""
@@ -607,6 +635,8 @@ class SymbologyPanel(QWidget):
                 current,
                 color_scheme=scheme,
                 classes=classes,
+                nodata_color=self._current_nodata_color,
+                nodata_visible=self._nodata_visible.isChecked(),
             )
             self._emit_or_defer(
                 lambda: self.symbology_changed.emit(layer.layer_id, config)
@@ -629,6 +659,8 @@ class SymbologyPanel(QWidget):
             upper_percent=upper,
             color_scheme=str(self._scheme.currentData()),
             inverted=self._invert.isChecked(),
+            nodata_color=self._current_nodata_color,
+            nodata_visible=self._nodata_visible.isChecked(),
         )
         self._emit_or_defer(
             lambda: self.symbology_changed.emit(layer.layer_id, config)
@@ -935,6 +967,8 @@ class SymbologyPanel(QWidget):
         self._form.setRowVisible(self._lower_percent, percent_visible)
         self._form.setRowVisible(self._upper_percent, percent_visible)
         self._form.setRowVisible(self._invert, is_stretch)
+        self._form.setRowVisible(self._nodata_visible, is_raster)
+        self._form.setRowVisible(self._nodata_color_button, is_raster)
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value: str) -> None:

@@ -64,5 +64,8 @@ verification_*.png
 *.gisproj
 .claude/
 .zcode/
+# 本地文档默认忽略，已确认的规范按文件显式纳入版本控制。
 docs/
-tests/
+!docs/
+docs/*
+!docs/spatial-file-dialog-spec.md

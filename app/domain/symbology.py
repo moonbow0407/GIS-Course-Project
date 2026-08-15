@@ -103,6 +103,8 @@ class RasterSymbology:
     upper_percent: float = 98.0
     color_scheme: str = "gray"
     inverted: bool = False
+    nodata_color: str = "#000000"
+    nodata_visible: bool = False
     classes: tuple["RasterClass", ...] = ()
     other_color: str = "#BDBDBD"
     other_visible: bool = True
@@ -290,6 +292,8 @@ def raster_symbology_from_dict(payload: dict[str, object]) -> RasterSymbology:
         upper_percent=float(cast(str | int | float, payload.get("upper_percent", 98.0))),
         color_scheme=str(payload.get("color_scheme", "gray")),
         inverted=bool(payload.get("inverted", False)),
+        nodata_color=str(payload.get("nodata_color", "#000000")),
+        nodata_visible=bool(payload.get("nodata_visible", False)),
         classes=classes,
         other_color=str(payload.get("other_color", "#BDBDBD")),
         other_visible=bool(payload.get("other_visible", True)),

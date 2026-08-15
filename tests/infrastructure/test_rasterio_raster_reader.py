@@ -44,6 +44,16 @@ def test_preview_alpha_is_transparent_for_nodata_pixels(tmp_path: Path) -> None:
     assert layer.image_data[0, 1, 3] == 255
 
 
+def test_display_mask_rejects_nodata_even_when_resampled_mask_reports_valid() -> None:
+    """降采样掩膜误报有效时仍应按声明的 NoData 排除哨兵像元。"""
+    values = np.array([[[100, 32767]]], dtype=np.int16)
+    masks = np.full(values.shape, 255, dtype=np.uint8)
+
+    valid = RasterioRasterReader._display_valid_mask(values, masks, 32767)
+
+    np.testing.assert_array_equal(valid, np.array([[True, False]]))
+
+
 def test_read_preserves_all_analysis_bands_dtype_nodata_and_mask(tmp_path: Path) -> None:
     """读取栅格时应在显示缓存之外保留全部真实分析数据。"""
     path: Path = tmp_path / "source.tif"

@@ -9,7 +9,11 @@ from affine import Affine
 from pyproj import CRS
 
 from app.application.display_projection_service import DisplayProjectionService
-from app.application.errors import WorkspaceOperationCancelled
+from app.application.errors import (
+    IncompatibleCoordinateReferenceSystem,
+    LayerReprojectionFailed,
+    WorkspaceOperationCancelled,
+)
 from app.application.gis_application import GisApplication
 from app.application.reprojection_service import (
     ReprojectionService,
@@ -79,6 +83,36 @@ def make_application(monkeypatch: pytest.MonkeyPatch) -> GisApplication:
         ),
         windowed_raster_projector=WindowedRasterProjector(),
     )
+
+
+def test_define_layer_crs_rejects_wgs84_label_on_metre_raster(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """把米制栅格解释成经纬度必须失败，避免后续裁剪得到空白图。"""
+    source_path = _write_dem_source(tmp_path)
+    application = make_application(monkeypatch)
+    opened = application.open_data(source_path)
+
+    with pytest.raises(IncompatibleCoordinateReferenceSystem, match="经纬度"):
+        application.define_layer_crs(opened.layer_id, CRS.from_epsg(4326))
+
+
+def test_reproject_rejects_mislabelled_geographic_metre_raster(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """已误标为 WGS84 的米制栅格再重投影到 4326 时不能做恒等拷贝。"""
+    values = np.ones((_HEIGHT, _WIDTH), dtype=np.int16)
+    source_path = tmp_path / "mislabelled.tif"
+    _write_source(source_path, values, crs="EPSG:4326")
+    application = make_application(monkeypatch)
+    opened = application.open_data(source_path)
+
+    with pytest.raises(LayerReprojectionFailed, match="经纬度"):
+        application.prepare_reprojection(
+            opened.layer_id, CRS.from_epsg(4326), tmp_path / "out.tif"
+        )
 
 
 def test_lazy_raster_reprojection_streams_to_file_and_stays_lazy(

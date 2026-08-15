@@ -167,7 +167,7 @@ class RasterioRasterReader:
         )
         return RasterViewportData(
             data=data,
-            valid_mask=self._display_valid_mask(data, masks),
+            valid_mask=self._display_valid_mask(data, masks, dataset.nodata),
             transform=transform,
             bounds=view_bounds,
             band_indexes=band_indexes,
@@ -270,8 +270,12 @@ class RasterioRasterReader:
             out_shape=(len(indexes), preview_height, preview_width),
             resampling=Resampling.nearest,
         )
-        rgba: NDArray[np.uint8] = self._to_rgba(display_values, display_masks)
-        display_valid_mask = self._display_valid_mask(display_values, display_masks)
+        rgba: NDArray[np.uint8] = self._to_rgba(
+            display_values, display_masks, dataset.nodata
+        )
+        display_valid_mask = self._display_valid_mask(
+            display_values, display_masks, dataset.nodata
+        )
         display_band_indexes: tuple[int, ...] = tuple(index - 1 for index in indexes)
         transform: Affine = dataset.transform
         display_transform: Affine = transform * Affine.scale(
@@ -374,6 +378,8 @@ class RasterioRasterReader:
         raster_data: NDArray[np.generic] = dataset.read()
         band_masks: NDArray[np.uint8] = dataset.read_masks()
         valid_mask: NDArray[np.bool_] = np.all(band_masks > 0, axis=0)
+        if dataset.nodata is not None:
+            valid_mask &= np.all(raster_data != dataset.nodata, axis=0)
         return raster_data, valid_mask
 
     @classmethod
@@ -400,10 +406,14 @@ class RasterioRasterReader:
 
     @staticmethod
     def _to_rgba(
-        values: NDArray[np.generic], masks: NDArray[np.uint8]
+        values: NDArray[np.generic],
+        masks: NDArray[np.uint8],
+        nodata: float | int | None = None,
     ) -> NDArray[np.uint8]:
         """对预览有效像元做百分位拉伸，并生成透明无效区的 RGBA 数组。"""
-        valid: NDArray[np.bool_] = RasterioRasterReader._display_valid_mask(values, masks)
+        valid: NDArray[np.bool_] = RasterioRasterReader._display_valid_mask(
+            values, masks, nodata
+        )
         stretched_bands: list[NDArray[np.uint8]] = []
         band_index: int
         for band_index in range(values.shape[0]):
@@ -432,11 +442,15 @@ class RasterioRasterReader:
 
     @staticmethod
     def _display_valid_mask(
-        values: NDArray[np.generic], masks: NDArray[np.uint8]
+        values: NDArray[np.generic],
+        masks: NDArray[np.uint8],
+        nodata: float | int | None = None,
     ) -> NDArray[np.bool_]:
         """按显示预览规则生成有效掩膜，供后续低分辨率符号重建复用。"""
         valid: NDArray[np.bool_] = np.all(masks > 0, axis=0)
         valid &= np.all(np.isfinite(values), axis=0)
+        if nodata is not None:
+            valid &= np.all(values != nodata, axis=0)
         # 多波段遥感影像常用全零表示覆盖区外；单波段 0 可能是真实坡度/高程。
         if values.shape[0] >= 3:
             valid &= np.any(values != 0, axis=0)

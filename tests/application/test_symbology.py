@@ -100,6 +100,7 @@ def _raster_layer(
     data: np.ndarray,
     *,
     valid: np.ndarray | None = None,
+    nodata: float | int | None = None,
     symbology: RasterSymbology | None = None,
 ) -> RasterLayer:
     """构造测试用单波段或多波段栅格。"""
@@ -116,6 +117,7 @@ def _raster_layer(
         transform=Affine.identity(),
         crs=CRS.from_epsg(4326),
         bounds=(0, 0, float(width), float(height)),
+        nodata=nodata,
         symbology=symbology,
     )
 
@@ -207,6 +209,35 @@ def test_create_raster_graduated_symbology_rejects_too_few_samples() -> None:
         create_raster_graduated_symbology(layer, "terrain", "equal_interval", 5)
 
 
+def test_raster_graduated_excludes_nodata_and_preserves_nodata_style() -> None:
+    """分级统计应排除 NoData，并继承用户设置的 NoData 显示样式。"""
+    current = RasterSymbology(
+        renderer_type=RasterRendererType.STRETCH,
+        color_scheme="terrain",
+        nodata_color="#111827",
+        nodata_visible=True,
+    )
+    layer = _raster_layer(
+        "高程",
+        np.array([[100.0, 200.0], [300.0, 32767.0]], dtype=np.float32),
+        # 模拟降采样边界处 GDAL 掩膜把 NoData 误报为有效的情况。
+        valid=np.ones((2, 2), dtype=np.bool_),
+        nodata=32767.0,
+        symbology=current,
+    )
+
+    graduated = create_raster_graduated_symbology(
+        layer,
+        "blue",
+        "equal_interval",
+        3,
+    )
+
+    assert graduated.classes[-1].upper == 300.0
+    assert graduated.nodata_color == "#111827"
+    assert graduated.nodata_visible is True
+
+
 def test_stretch_legend_includes_scheme_and_value_range() -> None:
     """拉伸图例应同时给出色带名称和有效值范围。"""
     layer = _raster_layer(
@@ -267,6 +298,44 @@ def test_single_band_raster_stretch_generates_color_ramp_and_transparent_nodata(
     assert styled.image_data[0, 0, :3].tolist() == [247, 251, 255]
     assert styled.image_data[1, 0, :3].tolist() == [8, 48, 107]
     assert styled.image_data[1, 1, 3] == 0
+
+
+def test_raster_renderers_support_custom_visible_nodata_color() -> None:
+    """RGB、拉伸和分类渲染均应按符号配置显示 NoData 颜色。"""
+    valid = np.asarray([[True, False]], dtype=np.bool_)
+    configs = (
+        RasterSymbology(
+            renderer_type=RasterRendererType.RGB,
+            nodata_color="#123456",
+            nodata_visible=True,
+        ),
+        RasterSymbology(
+            renderer_type=RasterRendererType.STRETCH,
+            stretch_type=StretchType.MIN_MAX,
+            color_scheme="blue",
+            nodata_color="#123456",
+            nodata_visible=True,
+        ),
+        RasterSymbology(
+            renderer_type=RasterRendererType.CLASSIFIED,
+            classes=(RasterClass(1.0, "一级", "#FF0000"),),
+            nodata_color="#123456",
+            nodata_visible=True,
+        ),
+    )
+
+    for config in configs:
+        data = (
+            np.asarray([[[1.0, 99.0]], [[2.0, 99.0]], [[3.0, 99.0]]])
+            if config.renderer_type is RasterRendererType.RGB
+            else np.asarray([[[1.0, 99.0]]])
+        )
+        layer = _raster_layer("NoData", data, valid=valid)
+
+        styled = apply_raster_symbology(layer, config)
+
+        assert styled.image_data[0, 1].tolist() == [18, 52, 86, 255]
+        assert raster_symbology_from_dict(symbology_to_dict(config)) == config
 
 
 def test_raster_stretch_handles_nan_pixels_without_casting_warning() -> None:
