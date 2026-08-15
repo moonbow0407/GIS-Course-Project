@@ -155,6 +155,8 @@ def test_reproject_layer_adds_new_layer_and_preserves_source_layer(tmp_path: Pat
     projected = application.snapshot().layers[1].layer
     assert projected.crs == CRS.from_epsg(3857)
     assert projected.source_path is None
+    assert projected.name == "point_reprojected"
+    assert application.snapshot().layers[0].name == "point"
     assert original.crs == CRS.from_epsg(4326)
     assert original.features[0].geometry.x == pytest.approx(1.0)
     assert result.reprojection_metadata is not None

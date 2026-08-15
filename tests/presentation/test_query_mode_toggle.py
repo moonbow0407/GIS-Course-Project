@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from pyproj import CRS
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QLabel
 from shapely.geometry import Polygon
 
 from app.application.gis_application import GisApplication
@@ -63,6 +63,19 @@ def test_query_ribbon_buttons_support_persistent_checked_state() -> None:
         ribbon.set_action_checked(action_id, False)
         assert not button.isChecked()
 
+    assert qt_application is not None
+
+
+def test_ribbon_starts_with_tabs_without_title_row() -> None:
+    """功能区顶部应直接显示标签页，不再展示平台标题和右上角“关于”。"""
+    qt_application: QApplication = QApplication.instance() or QApplication([])
+    ribbon = RibbonBar()
+    layout = ribbon.layout()
+
+    assert layout is not None
+    assert layout.itemAt(0).widget() is ribbon._tabs
+    assert ribbon.findChild(QLabel, "applicationBrand") is None
+    assert ribbon.findChild(QLabel, "ribbonAbout") is None
     assert qt_application is not None
 
 

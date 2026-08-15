@@ -337,18 +337,12 @@ QWidget#ribbonBar {
     border-bottom: 1px solid #d9e1ea;
 }
 
-QLabel#applicationBrand,
 QLabel#panelTitle {
     color: #1e2f45;
     font-family: "Microsoft YaHei UI", "Segoe UI";
     font-size: 15px;
     font-weight: 600;
     padding: 1px 0 4px 0;
-}
-
-QLabel#ribbonAbout {
-    color: #64748b;
-    padding-right: 4px;
 }
 
 QTabBar#ribbonTabs {

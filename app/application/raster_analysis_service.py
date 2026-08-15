@@ -13,7 +13,6 @@
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -49,12 +48,14 @@ from app.application.raster_calculator import (
     compute_raster_expression,
 )
 from app.application.symbology_service import (
+    apply_raster_symbology,
+    create_dem_result_symbology,
     create_raster_classified_symbology,
-    render_raster_classified,
 )
 from app.domain.raster_grid import RasterGrid, grid_from_layer
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
+from app.domain.symbology import RasterSymbology
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.file_io.raster_window_io import (
     DEFAULT_BLOCK_SIZE,
@@ -320,6 +321,7 @@ class RasterAnalysisService:
             output_dtype=output_dtype,
             output_nodata=output_nodata,
             halo=_DEM_HALO,
+            result_symbology=create_dem_result_symbology(request.mode),
         )
 
     # ── 矢量掩膜裁剪 ─────────────────────────────────────────
@@ -439,6 +441,7 @@ class RasterAnalysisService:
         output_band_count: int = 1,
         classified_values: tuple[float, ...] | None = None,
         classified_labels: Mapping[float, str] | None = None,
+        result_symbology: RasterSymbology | None = None,
     ) -> RasterLayer:
         """按目标网格分块执行分析并写出结果。"""
         for _role, layer, band_index in inputs:
@@ -529,6 +532,7 @@ class RasterAnalysisService:
                 output_layer_name,
                 classified_values=classified_values,
                 classified_labels=classified_labels,
+                result_symbology=result_symbology,
             )
         except Exception:
             # 输出是本次调用新建的；若结果层无法加载，不留下不可识别的文件。
@@ -579,36 +583,20 @@ class RasterAnalysisService:
         layer_name: str,
         classified_values: tuple[float, ...] | None = None,
         classified_labels: Mapping[float, str] | None = None,
+        result_symbology: RasterSymbology | None = None,
     ) -> RasterLayer:
-        """重新加载结果，并按需要为分类栅格生成离散显示预览。"""
+        """重新加载结果，并按专题符号重建显示预览。"""
         result_layer = self._reader.read(path)
         if not isinstance(result_layer, RasterLayer):
             raise RasterAnalysisFailed("分析结果未读取为栅格图层")
+        symbology = result_symbology
         if classified_values is not None:
             symbology = create_raster_classified_symbology(
                 classified_values,
                 labels=classified_labels,
             )
-            preview_shape: tuple[int, int] = (
-                int(result_layer.image_data.shape[0]),
-                int(result_layer.image_data.shape[1]),
-            )
-            with RasterWindowReader(path) as reader:
-                preview_values, preview_valid = reader.read_band_window(
-                    1,
-                    Window(0, 0, reader.width, reader.height),
-                    resampling=Resampling.nearest,
-                    out_shape=preview_shape,
-                )
-            result_layer = replace(
-                result_layer,
-                image_data=render_raster_classified(
-                    preview_values,
-                    preview_valid,
-                    symbology,
-                ),
-                symbology=symbology,
-            )
+        if symbology is not None:
+            result_layer = apply_raster_symbology(result_layer, symbology)
         return result_layer.with_identity(
             layer_id=result_layer.layer_id,
             name=layer_name or result_layer.name,

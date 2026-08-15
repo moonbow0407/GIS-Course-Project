@@ -82,21 +82,11 @@ class RibbonBar(QWidget):
         self._create_ui()
 
     def _create_ui(self) -> None:
-        """创建功能区标题行、标签栏和各功能页面。
+        """创建功能区标签栏和各功能页面。
 
         状态变化:
             将项目文档定义的全部功能分组装配到当前控件布局中。
         """
-        brand: QLabel = QLabel("GIS 桌面通用平台")
-        brand.setObjectName("applicationBrand")
-        title_row: QHBoxLayout = QHBoxLayout()
-        title_row.setContentsMargins(18, 5, 14, 0)
-        title_row.addWidget(brand)
-        title_row.addStretch()
-        about_label: QLabel = QLabel("关于")
-        about_label.setObjectName("ribbonAbout")
-        title_row.addWidget(about_label)
-
         self._tabs.setObjectName("ribbonTabs")
         self._tabs.setExpanding(False)
         self._tabs.setDrawBase(False)
@@ -112,7 +102,6 @@ class RibbonBar(QWidget):
         layout: QVBoxLayout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addLayout(title_row)
         layout.addWidget(self._tabs)
         layout.addWidget(self._pages)
         self._tabs.setCurrentIndex(1)

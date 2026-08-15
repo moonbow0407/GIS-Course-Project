@@ -11,7 +11,10 @@ from pyproj import CRS
 from app.application.display_projection_service import DisplayProjectionService
 from app.application.errors import WorkspaceOperationCancelled
 from app.application.gis_application import GisApplication
-from app.application.reprojection_service import ReprojectionService
+from app.application.reprojection_service import (
+    ReprojectionService,
+    resolve_reprojected_layer_name,
+)
 from app.domain.raster_layer import RasterLayer
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
@@ -175,6 +178,42 @@ def test_small_loaded_raster_keeps_memory_path_without_file(
     assert preparation.owns_output_file is False
     assert preparation.output_path is None
     assert preparation.projected_layer.source_path is None
+    assert preparation.projected_layer.name == "dem_reprojected"
+
+
+def test_resolve_reprojected_layer_name_follows_output_stem() -> None:
+    """有输出文件时图层名应与文件名一致，自动 UUID 后缀不进入显示名。"""
+    assert (
+        resolve_reprojected_layer_name("dem", Path("out/projected.tif")) == "projected"
+    )
+    assert (
+        resolve_reprojected_layer_name(
+            "dem", Path("dem_reprojected_5ccdb73e48f54d32b5fe2be722f9d15c.tif")
+        )
+        == "dem_reprojected"
+    )
+    assert resolve_reprojected_layer_name("dem", None) == "dem_reprojected"
+    assert resolve_reprojected_layer_name("dem_reprojected", None) == "dem_reprojected"
+
+
+def test_streaming_reprojection_uses_output_filename_as_layer_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """流式重投影结果图层名应使用输出文件名，与源图层 dem 区分。"""
+    source_path = _write_dem_source(tmp_path)
+    application = make_application(monkeypatch)
+    opened = application.open_data(source_path)
+    output = tmp_path / "dem_4326.tif"
+
+    result = application.reproject_layer(
+        opened.layer_id, CRS.from_epsg(4326), output
+    )
+
+    names = [layer.name for layer in result.snapshot.layers]
+    assert names[0] == "dem"
+    assert names[1] == "dem_4326"
+    assert result.snapshot.layers[1].layer_id == result.layer_id
 
 
 def test_cancel_is_passthrough_and_cleans_output(

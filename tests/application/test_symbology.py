@@ -11,6 +11,7 @@ from shapely.geometry import Point
 from app.application.gis_application import GisApplication
 from app.application.symbology_service import (
     apply_raster_symbology,
+    create_dem_result_symbology,
     create_graduated_symbology,
     create_raster_classified_symbology,
     create_unique_value_symbology,
@@ -193,6 +194,99 @@ def test_raster_classification_accepts_custom_class_visibility() -> None:
 
     assert styled.image_data[0, 0, 3] == 0
     assert styled.image_data[0, 1, :3].tolist() == [0, 255, 0]
+
+
+def test_classified_raster_matches_value_range_when_upper_is_set() -> None:
+    """区间分类应按 [下限, 上限] 着色，精确值分类保持原语义。"""
+    data = np.asarray([[[1.5, 26.0], [90.0, 99.0]]])
+    valid = np.asarray([[True, True], [True, False]], dtype=np.bool_)
+    layer = RasterLayer.create(
+        name="坡度预览",
+        raster_data=data,
+        image_data=np.zeros((2, 2, 4), dtype=np.uint8),
+        valid_mask=valid,
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0, 0, 2, 2),
+    )
+    config = RasterSymbology(
+        renderer_type=RasterRendererType.CLASSIFIED,
+        classes=(
+            RasterClass(0.0, "平缓", "#00FF00", upper=2.0),
+            RasterClass(25.0, "陡坡", "#FF8800", upper=35.0),
+            RasterClass(45.0, "峭壁", "#FF0000", upper=90.0),
+        ),
+        other_visible=False,
+    )
+
+    styled = apply_raster_symbology(layer, config)
+
+    assert styled.image_data[0, 0, :3].tolist() == [0, 255, 0]
+    assert styled.image_data[0, 1, :3].tolist() == [255, 136, 0]
+    assert styled.image_data[1, 0, :3].tolist() == [255, 0, 0]
+    assert styled.image_data[1, 1, 3] == 0
+
+
+def test_classified_raster_range_can_wrap_around_zero() -> None:
+    """上限小于下限时按环形区间匹配，用于坡向正北。"""
+    data = np.asarray([[[350.0, 10.0, 90.0]]])
+    layer = RasterLayer.create(
+        name="坡向预览",
+        raster_data=data,
+        image_data=np.zeros((1, 3, 4), dtype=np.uint8),
+        valid_mask=np.ones((1, 3), dtype=np.bool_),
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0, 0, 3, 1),
+    )
+    config = RasterSymbology(
+        renderer_type=RasterRendererType.CLASSIFIED,
+        classes=(
+            RasterClass(337.5, "北", "#FF0000", upper=22.5),
+            RasterClass(67.5, "东", "#FFFF00", upper=112.5),
+        ),
+        other_visible=False,
+    )
+
+    styled = apply_raster_symbology(layer, config)
+
+    assert styled.image_data[0, 0, :3].tolist() == [255, 0, 0]
+    assert styled.image_data[0, 1, :3].tolist() == [255, 0, 0]
+    assert styled.image_data[0, 2, :3].tolist() == [255, 255, 0]
+
+
+def test_slope_result_symbology_is_classified_with_degree_labels() -> None:
+    """坡度结果应使用带度数标签的分类色，而不是默认灰度拉伸。"""
+    symbology = create_dem_result_symbology("slope")
+
+    assert symbology.renderer_type is RasterRendererType.CLASSIFIED
+    assert all(category.upper is not None for category in symbology.classes)
+    assert any("平缓" in category.label for category in symbology.classes)
+    assert any("峭壁" in category.label for category in symbology.classes)
+    restored = raster_symbology_from_dict(symbology_to_dict(symbology))
+    assert restored == symbology
+
+
+def test_aspect_result_symbology_classifies_compass_directions() -> None:
+    """坡向结果应按八方位分类，并覆盖跨越 0° 的正北区间。"""
+    symbology = create_dem_result_symbology("aspect")
+
+    assert symbology.renderer_type is RasterRendererType.CLASSIFIED
+    labels = [category.label for category in symbology.classes]
+    assert any(label.startswith("北") for label in labels)
+    assert any(label.startswith("东") for label in labels)
+    north = next(category for category in symbology.classes if category.label.startswith("北"))
+    assert north.upper is not None
+    assert north.value > north.upper
+
+
+def test_hillshade_result_symbology_uses_minmax_gray_stretch() -> None:
+    """山体阴影应使用最小—最大灰度拉伸，呈现明暗起伏。"""
+    symbology = create_dem_result_symbology("hillshade")
+
+    assert symbology.renderer_type is RasterRendererType.STRETCH
+    assert symbology.stretch_type is StretchType.MIN_MAX
+    assert symbology.color_scheme == "gray"
 
 
 def test_application_replaces_symbology_without_changing_layer_identity() -> None:

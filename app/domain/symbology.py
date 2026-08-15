@@ -110,12 +110,18 @@ class RasterSymbology:
 
 @dataclass(frozen=True, slots=True)
 class RasterClass:
-    """描述一个栅格分类值及其显示颜色。"""
+    """描述一个栅格分类值或数值区间及其显示颜色。
+
+    ``upper`` 为空时按 ``value`` 精确匹配，供重分类离散码使用。
+    ``upper`` 非空时匹配闭区间；若 ``value`` 大于 ``upper``，按跨越 0
+    的环形区间解释，供坡向正北使用。
+    """
 
     value: float
     label: str
     color: str
     visible: bool = True
+    upper: float | None = None
 
 
 CATEGORICAL_SCHEMES: dict[str, tuple[str, ...]] = {
@@ -242,6 +248,11 @@ def raster_symbology_from_dict(payload: dict[str, object]) -> RasterSymbology:
             label=str(item["label"]),
             color=str(item["color"]),
             visible=bool(item.get("visible", True)),
+            upper=(
+                float(cast(str | int | float, item["upper"]))
+                if item.get("upper") is not None
+                else None
+            ),
         )
         for item in _dict_items(payload.get("classes", []))
     )

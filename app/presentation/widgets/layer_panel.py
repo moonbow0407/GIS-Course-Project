@@ -574,9 +574,12 @@ class LayerPanel(QWidget):
         """添加单个栅格分类值及其对应颜色。"""
         value_text: str = f"{category.value:.6g}"
         label: str = category.label.strip()
-        display_label: str = (
-            value_text if not label or label == value_text else f"{value_text} · {label}"
-        )
+        if category.upper is not None:
+            display_label = label or f"{value_text}–{category.upper:.6g}"
+        else:
+            display_label = (
+                value_text if not label or label == value_text else f"{value_text} · {label}"
+            )
         child = QTreeWidgetItem([display_label])
         child.setIcon(0, cls._color_icon((category.color,)))
         child.setFlags(Qt.ItemFlag.ItemIsEnabled)

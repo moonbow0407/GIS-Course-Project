@@ -14,7 +14,10 @@ from PySide6.QtWidgets import QAbstractItemView, QApplication, QMenu, QTreeWidge
 from shapely.geometry import Point
 
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
-from app.application.symbology_service import create_raster_classified_symbology
+from app.application.symbology_service import (
+    create_dem_result_symbology,
+    create_raster_classified_symbology,
+)
 from app.domain.feature import Feature
 from app.domain.raster_layer import RasterLayer
 from app.domain.symbology import RasterRendererType
@@ -56,6 +59,40 @@ def test_raster_classified_legend_shows_each_value_and_color() -> None:
     assert parent.childCount() == 4
     assert [parent.child(index).text(0) for index in range(1, 4)] == ["1", "2", "3"]
     assert all(not parent.child(index).icon(0).isNull() for index in range(1, 4))
+    panel.close()
+    assert application is not None
+
+
+def test_dem_slope_legend_shows_range_labels_instead_of_raw_values() -> None:
+    """坡度专题图例应显示等级名称，而不是分类下限数值。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    raster = RasterLayer.create(
+        layer_id="slope-result",
+        name="坡度",
+        raster_data=np.ones((1, 2, 2), dtype=np.float32),
+        image_data=np.full((2, 2, 4), 255, dtype=np.uint8),
+        valid_mask=np.ones((2, 2), dtype=bool),
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4326),
+        bounds=(0.0, 0.0, 2.0, 2.0),
+        symbology=create_dem_result_symbology("slope"),
+    )
+    panel: LayerPanel = LayerPanel()
+    panel.apply_snapshot(
+        WorkspaceSnapshot(
+            layers=(LayerSnapshot(layer=raster, visible=True, selected_feature_ids=()),),
+            active_layer_id=raster.layer_id,
+            display_crs=raster.crs,
+        )
+    )
+    tree: QTreeWidget | None = panel.findChild(QTreeWidget, "layerTree")
+    assert tree is not None
+    parent = tree.topLevelItem(0)
+    assert parent is not None
+    legend_texts = [parent.child(index).text(0) for index in range(parent.childCount())]
+    assert any("平缓" in text for text in legend_texts)
+    assert any("峭壁" in text for text in legend_texts)
+    assert "0" not in legend_texts
     panel.close()
     assert application is not None
 

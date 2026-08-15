@@ -1,5 +1,6 @@
 """独立的矢量和栅格重投影图层工具。"""
 
+import re
 from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
@@ -24,6 +25,35 @@ MAX_EAGER_REPROJECTION_BYTES: int = 64 * 1024 * 1024
 
 # 进度回调：接收（已完成窗口数, 总窗口数），返回 False 表示请求取消。
 ProgressCallback = Callable[[int, int], bool]
+
+# 工程目录临时重投影文件：{源名}_reprojected_{32位hex}.tif
+_AUTO_REPROJECTED_STEM = re.compile(
+    r"^(?P<base>.+)_reprojected_[0-9a-f]{32}$",
+    re.IGNORECASE,
+)
+
+
+def resolve_reprojected_layer_name(
+    source_name: str,
+    output_path: Path | None,
+) -> str:
+    """根据输出文件确定重投影图层显示名，避免与源图层重名。
+
+    有输出文件时默认使用文件名（不含扩展名），与打开数据的命名规则一致。
+    工程自动生成的 ``*_reprojected_<uuid>`` 文件去掉 UUID，只保留
+    ``源名_reprojected``。无输出路径的内存图层同样追加 ``_reprojected``。
+    """
+    if output_path is not None:
+        stem = output_path.stem.strip()
+        if stem:
+            matched = _AUTO_REPROJECTED_STEM.fullmatch(stem)
+            if matched is not None:
+                return f"{matched.group('base')}_reprojected"
+            return stem
+    cleaned = source_name.strip() or "layer"
+    if cleaned.endswith("_reprojected"):
+        return cleaned
+    return f"{cleaned}_reprojected"
 
 
 def should_stream_raster(
@@ -148,7 +178,7 @@ class ReprojectionService:
             layer.features, source_crs, target_crs
         )
         projected_vector_layer = VectorLayer.create(
-            name=layer.name,
+            name=resolve_reprojected_layer_name(layer.name, output_path),
             features=features,
             crs=target_crs,
             source_path=output_path,
@@ -192,7 +222,7 @@ class ReprojectionService:
         bounds = array_bounds(height, width, projected.transform)
         resolved_resampling = raster_resampling or "bilinear"
         placeholder = RasterLayer.create(
-            name=layer.name,
+            name=resolve_reprojected_layer_name(layer.name, output_path),
             raster_data=projected.data,
             image_data=np.zeros((height, width, 4), dtype=np.uint8),
             valid_mask=projected.valid_mask,
@@ -272,7 +302,7 @@ class ReprojectionService:
             )
         projected_raster_layer = reloaded.with_identity(
             layer_id=uuid4().hex,
-            name=layer.name,
+            name=resolve_reprojected_layer_name(layer.name, output_path),
             source_path=output_path,
             symbology=layer.symbology,
             crs_override=False,

@@ -206,6 +206,9 @@ def test_temp_mode_resolves_project_dir_file_and_commits(
     result = application.commit_reprojection(preparation)
     assert result.layer_id == preparation.projected_layer.layer_id
     assert preparation.output_path.is_file()
+    names = [layer.name for layer in result.snapshot.layers]
+    assert names[0] == "dem"
+    assert names[1] == "dem_reprojected"
 
 
 def test_temp_mode_requires_saved_project(

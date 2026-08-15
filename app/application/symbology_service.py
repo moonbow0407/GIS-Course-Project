@@ -112,6 +112,63 @@ def create_graduated_symbology(
     )
 
 
+_SLOPE_DISPLAY_CLASSES: tuple[tuple[float, float, str, str], ...] = (
+    (0.0, 2.0, "平缓（0°–2°）", "#2E7D32"),
+    (2.0, 5.0, "较缓（2°–5°）", "#7CB342"),
+    (5.0, 15.0, "缓坡（5°–15°）", "#C0CA33"),
+    (15.0, 25.0, "斜坡（15°–25°）", "#FDD835"),
+    (25.0, 35.0, "陡坡（25°–35°）", "#FFB300"),
+    (35.0, 45.0, "急陡（35°–45°）", "#F57C00"),
+    (45.0, 90.0, "峭壁（45°–90°）", "#C62828"),
+)
+
+_ASPECT_DISPLAY_CLASSES: tuple[tuple[float, float, str, str], ...] = (
+    (337.5, 22.5, "北（337.5°–22.5°）", "#E53935"),
+    (22.5, 67.5, "东北（22.5°–67.5°）", "#FB8C00"),
+    (67.5, 112.5, "东（67.5°–112.5°）", "#FDD835"),
+    (112.5, 157.5, "东南（112.5°–157.5°）", "#43A047"),
+    (157.5, 202.5, "南（157.5°–202.5°）", "#00ACC1"),
+    (202.5, 247.5, "西南（202.5°–247.5°）", "#1E88E5"),
+    (247.5, 292.5, "西（247.5°–292.5°）", "#5E35B1"),
+    (292.5, 337.5, "西北（292.5°–337.5°）", "#8E24AA"),
+)
+
+
+def create_dem_result_symbology(mode: str) -> RasterSymbology:
+    """为 DEM 坡度、坡向或山体阴影结果生成可直接图例化的显示符号。
+
+    坡度、坡向使用区间分类，图层树能看出等级含义；山体阴影保留
+    最小—最大灰度拉伸，以明暗表达起伏。不改变分析结果的像元值。
+    """
+    if mode == "slope":
+        return RasterSymbology(
+            renderer_type=RasterRendererType.CLASSIFIED,
+            color_scheme="standard",
+            classes=tuple(
+                RasterClass(lower, label, color, upper=upper)
+                for lower, upper, label, color in _SLOPE_DISPLAY_CLASSES
+            ),
+            other_visible=False,
+        )
+    if mode == "aspect":
+        return RasterSymbology(
+            renderer_type=RasterRendererType.CLASSIFIED,
+            color_scheme="standard",
+            classes=tuple(
+                RasterClass(lower, label, color, upper=upper)
+                for lower, upper, label, color in _ASPECT_DISPLAY_CLASSES
+            ),
+            other_visible=False,
+        )
+    if mode == "hillshade":
+        return RasterSymbology(
+            renderer_type=RasterRendererType.STRETCH,
+            stretch_type=StretchType.MIN_MAX,
+            color_scheme="gray",
+        )
+    raise ValueError(f"不支持的 DEM 分析类型：{mode}")
+
+
 def create_raster_classified_symbology(
     values: tuple[float, ...],
     color_scheme: str = "standard",
@@ -225,8 +282,10 @@ def render_raster_classified(
     visible = np.asarray(valid_mask, dtype=bool).copy()
     matched = np.zeros(shape, dtype=bool)
     for category in symbology.classes:
-        category_mask = valid_mask & np.isfinite(numeric_values) & (
-            numeric_values == category.value
+        category_mask = (
+            valid_mask
+            & ~matched
+            & _raster_class_mask(numeric_values, category)
         )
         matched |= category_mask
         rgb[category_mask] = _hex_to_rgb(category.color)
@@ -250,6 +309,21 @@ def _symbol_with_color(base: LayerStyle, color: str) -> LayerStyle:
     if base.fill_color == "transparent":
         return replace(base, stroke_color=color)
     return replace(base, fill_color=color, stroke_color="#4B5563")
+
+
+def _raster_class_mask(
+    values: NDArray[np.float64],
+    category: RasterClass,
+) -> NDArray[np.bool_]:
+    """按精确值或数值区间生成分类掩膜。"""
+    finite = np.isfinite(values)
+    if category.upper is None:
+        return finite & (values == category.value)
+    lower = category.value
+    upper = category.upper
+    if lower <= upper:
+        return finite & (values >= lower) & (values <= upper)
+    return finite & ((values >= lower) | (values <= upper))
 
 
 def _format_raster_class_value(value: float) -> str:
