@@ -19,6 +19,7 @@ build/
 dist/
 *.egg-info/
 *.spec
+!deploy/windows/gis_desktop.spec
 
 # IDE and editor files
 .idea/

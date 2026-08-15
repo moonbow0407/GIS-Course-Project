@@ -126,6 +126,46 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Windows 安装程序构建
+
+发布包采用 PyInstaller `onedir` 保存 Qt、GDAL、PROJ 等原生依赖，再通过 Inno Setup
+生成单个安装程序。最终用户不需要安装 Python，也不需要单独配置 GIS 运行库。
+
+构建环境要求：
+
+- Windows x64
+- 项目 `.venv` 已通过 `uv sync` 创建
+- Inno Setup 6 已安装
+
+在项目根目录执行：
+
+```powershell
+.\scripts\build_windows.ps1
+```
+
+脚本依次执行 PyInstaller 构建、冻结程序自检和安装程序编译。自检会构造完整主窗口，
+并验证 QSS、Qt PDF、GeoPackage 双图层读写、GeoTIFF CRS 读写、PROJ 坐标转换、
+SciPy 栅格运算和 SQLAlchemy/psycopg 驱动。PostGIS 自检只验证客户端驱动，真实服务器
+连接仍需在目标环境中单独确认。
+
+构建结果：
+
+```text
+dist/GISDesktop/                         # 可直接运行的 onedir 目录
+dist/installer/GISDesktop-Setup-0.1.0.exe
+dist/installer/GISDesktop-Setup-0.1.0.exe.sha256
+```
+
+调试时可以只构建 onedir：
+
+```powershell
+.\scripts\build_windows.ps1 -SkipInstaller
+```
+
+`build/`、`dist/` 和安装程序均为本地生成产物，不提交到 Git；仓库只提交 spec、hook、
+Inno Setup 脚本和构建脚本。发布安装程序前应在没有 Python/GDAL 的干净 Windows x64
+环境中复核实际数据和 PostGIS 连接，并按发布要求完成代码签名。
+
 ## 开发检查
 
 ```powershell
