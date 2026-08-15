@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from rasterio.enums import Resampling
 from shapely.geometry import Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
@@ -77,11 +78,15 @@ from app.domain.layer_style import GeometryFamily
 from app.domain.layout import LayoutDocument, layout_from_dict
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
-from app.domain.symbology import RasterSymbology, VectorSymbology
+from app.domain.symbology import RasterRendererType, RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.database.postgis_database_gateway import PostgisDatabaseGateway
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
+from app.infrastructure.file_io.raster_overview_service import (
+    RasterOverviewResult,
+    RasterOverviewService,
+)
 from app.infrastructure.project.json_project_store import JsonProjectStore
 from app.infrastructure.projection.pyproj_coordinate_transformer import (
     PyprojCoordinateTransformer,
@@ -115,6 +120,7 @@ from app.presentation.widgets.layout_toolbar import LayoutToolbar
 from app.presentation.widgets.layout_view import LayoutView
 from app.presentation.widgets.map_canvas import MapCanvas
 from app.presentation.widgets.new_layer_dialog import NewLayerDialog
+from app.presentation.widgets.open_data_worker import OpenDataWorker
 from app.presentation.widgets.overlay_analysis_dialog import OverlayAnalysisDialog
 from app.presentation.widgets.raster_analysis_worker import (
     RasterAnalysisTask,
@@ -122,6 +128,7 @@ from app.presentation.widgets.raster_analysis_worker import (
 )
 from app.presentation.widgets.raster_calculator_dialog import RasterCalculatorDialog
 from app.presentation.widgets.raster_clip_dialog import RasterClipDialog
+from app.presentation.widgets.raster_overview_worker import RasterOverviewWorker
 from app.presentation.widgets.raster_reclassify_dialog import RasterReclassifyDialog
 from app.presentation.widgets.raster_viewport_worker import (
     RasterViewportRequest,
@@ -134,6 +141,7 @@ from app.presentation.widgets.snapping_settings_dialog import (
     load_snap_tolerance,
     load_snap_types,
 )
+from app.presentation.widgets.spatial_file_dialog import select_spatial_data_files
 from app.presentation.widgets.startup_dialog import (
     save_recent_project,
 )
@@ -154,6 +162,15 @@ class _RasterAnalysisContext:
     output_layer_name: str
     started_monotonic: float
     success_message: Callable[[RasterLayer], str]
+
+
+@dataclass(frozen=True, slots=True)
+class _OpenDataRequest:
+    """记录一个等待后台读取的空间文件及其读取参数。"""
+
+    path: Path
+    layer_name: str | None = None
+    source_crs_override: CRS | None = None
 
 
 class MainWindow(QMainWindow):
@@ -238,6 +255,20 @@ class MainWindow(QMainWindow):
         self._crs_label: QLabel = QLabel("坐标系  未设置")
         # 延迟刷新标记：避免在图层树信号回调中删除仍在处理事件的 Qt 节点。
         self._workspace_refresh_scheduled: bool = False
+        # 文件读取在后台串行执行，所有图层只在主线程提交并统一刷新界面。
+        self._open_data_worker: OpenDataWorker | None = None
+        self._open_data_progress_dialog: QProgressDialog | None = None
+        self._open_data_pending: list[_OpenDataRequest] = []
+        self._open_data_current: _OpenDataRequest | None = None
+        self._open_data_loaded_paths: list[Path] = []
+        self._open_data_failures: list[str] = []
+        self._open_data_warnings: list[str] = []
+        # 大栅格显示金字塔在文件加载完成后串行后台构建，缓存不改写源数据。
+        self._overview_service: RasterOverviewService = RasterOverviewService()
+        self._overview_worker: RasterOverviewWorker | None = None
+        self._overview_pending: list[tuple[Path, Resampling]] = []
+        self._overview_current: tuple[Path, Resampling] | None = None
+        self._overview_checked_sources: dict[Path, tuple[int, int, str]] = {}
         # 后台栅格分析状态：计算和文件 I/O 在 worker 中执行，结果只在主线程注册。
         self._raster_worker: RasterAnalysisWorker | None = None
         self._raster_progress_dialog: QProgressDialog | None = None
@@ -763,63 +794,179 @@ class MainWindow(QMainWindow):
             parent=self,
         ).exec()
 
+    def _select_spatial_data_files(self) -> list[str]:
+        """选择空间文件；不使用系统预览，避免选中大 TIFF 时对话框冻结。"""
+        return select_spatial_data_files(self)
+
     def _open_data(self) -> None:
-        """选择一个或多个空间数据文件，并逐个交给应用层读取。"""
-        # 原生多选对话框同时支持单击、Ctrl 追加选择和 Shift 连续选择。
-        path_strings: list[str] = QFileDialog.getOpenFileNames(
-            self,
-            "打开空间数据",
-            "",
-            "空间数据 (*.shp *.geojson *.json *.gpkg *.kml *.tif *.tiff *.img *.dem);;所有文件 (*.*)",
-        )[0]
+        """选择空间文件，并在后台逐个读取后提交到工作区。"""
+        if self._open_data_worker is not None:
+            self.statusBar().showMessage("已有空间数据正在加载，请稍候。", 3500)
+            return
+        path_strings: list[str] = self._select_spatial_data_files()
         if not path_strings:
             return
 
-        loaded_paths: list[Path] = []
-        failures: list[str] = []
-        warnings: list[str] = []
+        requests: list[_OpenDataRequest] = []
+        self._open_data_failures = []
         for path_string in path_strings:
             data_path: Path = Path(path_string)
-            source_crs_override: CRS | None = None
             try:
                 layer_name, accepted = self._select_geopackage_layer(data_path)
-                if not accepted:
-                    continue
-                result = self._application.open_data(data_path, layer_name)
-            except CoordinateReferenceSystemRequired:
-                source_crs_override = self._prompt_layer_crs(data_path.name)
-                if source_crs_override is None:
-                    failures.append(f"{data_path.name}：未定义 CRS，已跳过。")
-                    continue
-                try:
-                    result = self._application.open_data(
-                        data_path,
-                        layer_name,
-                        source_crs_override,
-                    )
-                except (ApplicationError, ValueError) as error:
-                    failures.append(f"{data_path.name}：{error}")
-                    continue
             except (ApplicationError, ValueError) as error:
-                failures.append(f"{data_path.name}：{error}")
+                self._open_data_failures.append(f"{data_path.name}：{error}")
                 continue
-            loaded_paths.append(data_path)
-            if result.warning:
-                warnings.append(f"{data_path.name}：{result.warning}")
-            # 可变单元：重做重新打开文件会生成新图层编号，撤销始终移除当前编号。
-            current_layer_id: list[str] = [result.layer_id]
-            self._push_undo(
-                f"打开数据  {data_path.name}",
-                undo_action=partial(self._remove_layer_record, current_layer_id),
-                redo_action=partial(
-                    self._reopen_data,
-                    data_path,
-                    layer_name,
-                    current_layer_id,
-                    source_crs_override,
-                ),
-            )
+            if accepted:
+                requests.append(_OpenDataRequest(data_path, layer_name))
 
+        self._open_data_pending = requests
+        self._open_data_loaded_paths = []
+        self._open_data_warnings = []
+        if not requests:
+            self._finish_open_data_batch()
+            return
+        progress = QProgressDialog(self)
+        progress.setLabelText("正在准备读取空间数据…")
+        progress.setRange(0, 1)
+        progress.setValue(0)
+        progress.setCancelButton(None)
+        progress.setWindowTitle("加载空间数据")
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self._open_data_progress_dialog = progress
+        self._ribbon.set_action_enabled("open_data", False)
+        progress.show()
+        self._start_next_open_data()
+
+    def _start_next_open_data(self) -> None:
+        """启动队列中的下一个文件读取任务。"""
+        if self._open_data_worker is not None:
+            return
+        if not self._open_data_pending:
+            self._finish_open_data_batch()
+            return
+        request = self._open_data_pending.pop(0)
+        self._open_data_current = request
+        progress = self._open_data_progress_dialog
+        if progress is not None:
+            size_text = self._open_data_size_text(request.path)
+            progress.setLabelText(f"{request.path.name}{size_text}\n正在读取…")
+            progress.show()
+        worker = OpenDataWorker(
+            partial(
+                self._application.prepare_open_data,
+                request.path,
+                request.layer_name,
+                request.source_crs_override,
+            ),
+            self,
+        )
+        self._open_data_worker = worker
+        worker.progress.connect(self._on_open_data_progress)
+        worker.completed.connect(self._on_open_data_prepared)
+        worker.failed.connect(self._on_open_data_failed)
+        worker.finished.connect(lambda: self._on_open_data_finished(worker))
+        self._ready_label.setText(f"正在加载  {request.path.name}")
+        worker.start()
+
+    def _on_open_data_progress(self, current: int, total: int, message: str) -> None:
+        """把后台读取阶段同步到进度条，保持主窗口可绘制。"""
+        dialog = self._open_data_progress_dialog
+        request = self._open_data_current
+        if dialog is None:
+            return
+        if total > 0:
+            dialog.setRange(0, total)
+            dialog.setValue(min(max(current, 0), total))
+        name = request.path.name if request is not None else "空间数据"
+        size_text = self._open_data_size_text(request.path) if request is not None else ""
+        dialog.setLabelText(f"{name}{size_text}\n{message}")
+
+    @staticmethod
+    def _open_data_size_text(path: Path) -> str:
+        """大文件在进度条上附带体积，便于判断耗时原因。"""
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return ""
+        if size < 1024 * 1024:
+            return ""
+        megabytes = size / (1024 * 1024)
+        if megabytes >= 100.0:
+            return f"（{megabytes:.0f} MB）"
+        return f"（{megabytes:.1f} MB）"
+
+    def _on_open_data_prepared(self, payload: object) -> None:
+        """在主线程把后台准备好的图层提交到工作区。"""
+        request = self._open_data_current
+        if request is None or not isinstance(payload, SpatialLayer):
+            return
+        progress = self._open_data_progress_dialog
+        if progress is not None:
+            if progress.maximum() > 0:
+                progress.setValue(progress.maximum())
+            size_text = self._open_data_size_text(request.path)
+            progress.setLabelText(f"{request.path.name}{size_text}\n正在加入地图…")
+        try:
+            result = self._application.add_layer(payload)
+        except (ApplicationError, ValueError) as error:
+            self._open_data_failures.append(f"{request.path.name}：{error}")
+            return
+        self._open_data_loaded_paths.append(request.path)
+        if result.warning:
+            self._open_data_warnings.append(f"{request.path.name}：{result.warning}")
+        # 可变单元：重做重新打开文件会生成新图层编号，撤销始终移除当前编号。
+        current_layer_id: list[str] = [result.layer_id]
+        self._push_undo(
+            f"打开数据  {request.path.name}",
+            undo_action=partial(self._remove_layer_record, current_layer_id),
+            redo_action=partial(
+                self._reopen_data,
+                request.path,
+                request.layer_name,
+                current_layer_id,
+                request.source_crs_override,
+            ),
+        )
+
+    def _on_open_data_failed(self, payload: object) -> None:
+        """记录读取失败；缺失 CRS 时在主线程询问后重新排队。"""
+        request = self._open_data_current
+        if request is None:
+            return
+        if isinstance(payload, CoordinateReferenceSystemRequired):
+            progress = self._open_data_progress_dialog
+            if progress is not None:
+                progress.hide()
+            source_crs = self._prompt_layer_crs(request.path.name)
+            if source_crs is None:
+                self._open_data_failures.append(
+                    f"{request.path.name}：未定义 CRS，已跳过。"
+                )
+            else:
+                self._open_data_pending.insert(
+                    0,
+                    _OpenDataRequest(request.path, request.layer_name, source_crs),
+                )
+            return
+        message = str(payload) if isinstance(payload, Exception) else "未知读取错误"
+        self._open_data_failures.append(f"{request.path.name}：{message}")
+
+    def _on_open_data_finished(self, worker: OpenDataWorker) -> None:
+        """释放当前读取线程，并继续处理队列。"""
+        worker.deleteLater()
+        if worker is self._open_data_worker:
+            self._open_data_worker = None
+            self._open_data_current = None
+        QTimer.singleShot(0, self._start_next_open_data)
+
+    def _finish_open_data_batch(self) -> None:
+        """统一刷新批量读取结果并恢复界面状态。"""
+        loaded_paths = self._open_data_loaded_paths
+        failures = self._open_data_failures
+        warnings = self._open_data_warnings
         if loaded_paths:
             # 全部文件处理完后只刷新一次，避免大批量导入时反复重绘地图。
             self._refresh_workspace()
@@ -832,6 +979,100 @@ class MainWindow(QMainWindow):
         if failures:
             title: str = "部分数据打开失败" if loaded_paths else "打开数据失败"
             QMessageBox.warning(self, title, "\n".join(failures))
+        progress = self._open_data_progress_dialog
+        if progress is not None:
+            progress.close()
+            progress.deleteLater()
+        self._open_data_progress_dialog = None
+        self._open_data_pending = []
+        self._open_data_current = None
+        self._open_data_loaded_paths = []
+        self._open_data_failures = []
+        self._open_data_warnings = []
+        self._ribbon.set_action_enabled("open_data", True)
+
+    def _queue_raster_overviews(self, snapshot: WorkspaceSnapshot) -> None:
+        """把尚未检查或源版本已变化的文件栅格加入自动优化队列。"""
+        pending_requests = set(self._overview_pending)
+        for layer_snapshot in snapshot.layers:
+            layer = layer_snapshot.layer
+            if not isinstance(layer, RasterLayer) or layer.source_path is None:
+                continue
+            source_path = layer.source_path.expanduser().resolve()
+            try:
+                stat = source_path.stat()
+            except OSError:
+                continue
+            renderer_type = (
+                layer.symbology.renderer_type
+                if layer.symbology is not None
+                else RasterRendererType.STRETCH
+            )
+            resampling = (
+                Resampling.nearest
+                if renderer_type is RasterRendererType.CLASSIFIED
+                else Resampling.average
+            )
+            signature = (stat.st_size, stat.st_mtime_ns, resampling.name)
+            if self._overview_checked_sources.get(source_path) == signature:
+                continue
+            self._overview_checked_sources[source_path] = signature
+            request = (source_path, resampling)
+            if request == self._overview_current or request in pending_requests:
+                continue
+            self._overview_pending.append(request)
+            pending_requests.add(request)
+        if self._overview_pending and self._overview_worker is None:
+            QTimer.singleShot(0, self._start_next_raster_overview)
+
+    def _start_next_raster_overview(self) -> None:
+        """串行启动下一个自动 Overview 检查与构建任务。"""
+        if self._overview_worker is not None or not self._overview_pending:
+            return
+        source_path, resampling = self._overview_pending.pop(0)
+        self._overview_current = (source_path, resampling)
+        worker = RasterOverviewWorker(
+            partial(
+                self._overview_service.optimize,
+                source_path,
+                resampling=resampling,
+            ),
+            self,
+        )
+        self._overview_worker = worker
+        worker.completed.connect(self._on_raster_overview_ready)
+        worker.failed.connect(self._on_raster_overview_failed)
+        worker.finished.connect(lambda: self._on_raster_overview_finished(worker))
+        self.statusBar().showMessage(f"正在检查 {source_path.name} 的显示金字塔…")
+        worker.start()
+
+    def _on_raster_overview_ready(self, payload: object) -> None:
+        """接纳后台优化结果，并让后续视口请求立即使用新缓存。"""
+        if not isinstance(payload, RasterOverviewResult):
+            return
+        if payload.built:
+            levels = "、".join(str(factor) for factor in payload.factors)
+            self._ready_label.setText(f"显示优化完成  {payload.source_path.name}")
+            self.statusBar().showMessage(f"已构建 Overview 层级：{levels}", 5000)
+            self._map_canvas.schedule_viewport_refresh(force=True)
+        else:
+            self.statusBar().showMessage(
+                f"{payload.source_path.name} 无需重复构建显示金字塔。",
+                2500,
+            )
+
+    def _on_raster_overview_failed(self, message: str) -> None:
+        """Overview 优化失败时保留原始显示路径并给出非阻塞提示。"""
+        source_name = self._overview_current[0].name if self._overview_current else "栅格"
+        self.statusBar().showMessage(f"{source_name} 显示优化失败：{message}", 6000)
+
+    def _on_raster_overview_finished(self, worker: RasterOverviewWorker) -> None:
+        """释放当前 Overview worker，并继续处理队列。"""
+        worker.deleteLater()
+        if worker is self._overview_worker:
+            self._overview_worker = None
+            self._overview_current = None
+        QTimer.singleShot(0, self._start_next_raster_overview)
 
     def _prompt_layer_crs(self, layer_name: str) -> CRS | None:
         """在未知 CRS 数据导入前要求用户定义坐标系。"""
@@ -1822,6 +2063,42 @@ class MainWindow(QMainWindow):
                 ),
                 redo_action=partial(
                     self._application.apply_vector_symbology, layer_id, after
+                ),
+            )
+        self._refresh_workspace()
+
+    def _apply_raster_classified_symbology(
+        self,
+        layer_id: str,
+        color_scheme: str,
+        method: str,
+        class_count: int,
+    ) -> None:
+        """生成并自动应用连续栅格分级着色。"""
+        before: VectorSymbology | RasterSymbology | None = self._current_symbology(
+            layer_id
+        )
+        try:
+            self._application.apply_raster_classified_symbology(
+                layer_id,
+                color_scheme,
+                method,
+                class_count,
+            )
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "分级着色更新失败", str(error))
+            return
+        after: VectorSymbology | RasterSymbology | None = self._current_symbology(
+            layer_id
+        )
+        if isinstance(before, RasterSymbology) and isinstance(after, RasterSymbology):
+            self._push_undo(
+                "栅格分级着色",
+                undo_action=partial(
+                    self._application.apply_raster_symbology, layer_id, before
+                ),
+                redo_action=partial(
+                    self._application.apply_raster_symbology, layer_id, after
                 ),
             )
         self._refresh_workspace()
@@ -4428,6 +4705,9 @@ class MainWindow(QMainWindow):
         dialog.symbology_changed.connect(self._apply_symbology)
         dialog.unique_requested.connect(self._apply_unique_symbology)
         dialog.graduated_requested.connect(self._apply_graduated_symbology)
+        dialog.raster_classified_requested.connect(
+            self._apply_raster_classified_symbology
+        )
         dialog.global_display_changed.connect(lambda: self._refresh_workspace())
         snapshot: WorkspaceSnapshot = self._application.snapshot()
         dialog.set_layers(snapshot.layers, snapshot.active_layer_id)
@@ -4629,6 +4909,7 @@ class MainWindow(QMainWindow):
                 self._attribute_table_panel.set_layer(None)
                 self._hide_attribute_table()
         self._update_window_title()
+        self._queue_raster_overviews(snapshot)
 
     def _request_raster_viewports(
         self,
@@ -4829,6 +5110,28 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """关闭窗口前清空查询选择和要素选择，避免未保存修改被静默丢弃。"""
+        open_data_worker = self._open_data_worker
+        if open_data_worker is not None and open_data_worker.isRunning():
+            QMessageBox.information(
+                self,
+                "空间数据仍在加载",
+                "请等待当前空间数据读取完成后再关闭窗口。",
+            )
+            event.ignore()
+            return
+        overview_worker = self._overview_worker
+        if overview_worker is not None and overview_worker.isRunning():
+            # 小栅格的元数据检查通常会立刻结束，先短暂等待可避免测试和快速退出
+            # 遇到无意义提示；真正的大栅格构建仍不允许随窗口强制销毁。
+            if not overview_worker.wait(1000):
+                QMessageBox.information(
+                    self,
+                    "显示金字塔仍在构建",
+                    "请等待当前栅格显示优化完成后再关闭窗口。",
+                )
+                event.ignore()
+                return
+        self._overview_pending.clear()
         # 视口 worker 没有共享可变状态；关闭前等待当前磁盘读取自然结束，
         # 不改变分析和 CRS worker 的既有互斥或取消规则。
         for viewport_worker in tuple(self._viewport_workers.values()):

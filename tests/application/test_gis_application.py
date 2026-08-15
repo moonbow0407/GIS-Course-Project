@@ -91,6 +91,21 @@ def test_open_vector_returns_workspace_snapshot() -> None:
     assert reader.last_target_crs is None
 
 
+def test_prepare_open_data_does_not_mutate_workspace_until_commit() -> None:
+    """后台准备阶段只读取图层，主线程提交前不得修改地图文档。"""
+    reader = InMemoryVectorReader(make_layer("roads"))
+    application = GisApplication(data_reader=reader)
+
+    prepared = application.prepare_open_data(Path("roads.geojson"))
+
+    assert prepared.layer_id == "roads"
+    assert application.snapshot().layers == ()
+
+    result = application.add_layer(prepared)
+
+    assert result.snapshot.active_layer_id == "roads"
+
+
 def test_reader_failure_keeps_document_unchanged() -> None:
     """文件读取失败时不能向地图文档写入部分状态。"""
     error: VectorReadFailed = VectorReadFailed("文件损坏")

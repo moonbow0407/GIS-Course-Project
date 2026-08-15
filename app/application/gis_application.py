@@ -1,6 +1,6 @@
 """GIS 应用功能统一入口。"""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,7 +118,10 @@ from app.application.results import (
 from app.application.symbology_service import (
     apply_raster_symbology,
     create_graduated_symbology,
+    create_raster_graduated_symbology,
     create_unique_value_symbology,
+    infer_default_raster_symbology,
+    is_placeholder_raster_symbology,
 )
 from app.domain.feature import AttributeValue, Feature, FeatureId
 from app.domain.labeling import LabelingConfig
@@ -383,6 +386,39 @@ class GisApplication:
             ApplicationError: 文件不存在、格式不支持或数据无法读取时抛出。
             ValueError: 图层坐标系与地图文档无法安全叠加时抛出。
         """
+        layer = self.prepare_open_data(path, layer_name, source_crs_override)
+        return self.add_layer(layer)
+
+    def prepare_open_data(
+        self,
+        path: Path,
+        layer_name: str | None = None,
+        source_crs_override: CRS | None = None,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> SpatialLayer:
+        """读取并校验空间文件，但不修改地图文档。
+
+        该准备阶段可安全放入后台线程；调用方必须在主线程通过
+        :meth:`add_layer` 提交结果，避免文件 I/O 阻塞界面或跨线程修改工作区。
+        大栅格会先构建显示金字塔，再读取预览并套用默认符号。
+        """
+        is_raster = path.suffix.lower() in {".tif", ".tiff", ".img", ".dem"}
+        total_steps = 4 if is_raster else 3
+        self._report_open_data_progress(
+            progress_callback,
+            0,
+            total_steps,
+            "正在准备显示金字塔…" if is_raster else "正在读取矢量数据…",
+        )
+        prepare_display = getattr(self.data_reader, "prepare_raster_display", None)
+        if is_raster and callable(prepare_display):
+            prepare_display(path)
+        self._report_open_data_progress(
+            progress_callback,
+            2 if is_raster else 1,
+            total_steps,
+            "正在读取预览…" if is_raster else "正在解析要素…",
+        )
         if source_crs_override is None:
             # 保留旧版测试/插件读取器的三参数调用兼容性；新读取器仍返回原始 CRS。
             if layer_name is None:
@@ -402,18 +438,40 @@ class GisApplication:
             )
         if source_crs_override is not None:
             layer = self._with_crs_override(layer, True)
-        self._document.add_layer(layer)
-        self._modified = True
-        return OpenDataResult(
-            layer_id=layer.layer_id,
-            snapshot=self.snapshot(),
-        )
+        if isinstance(layer, RasterLayer) and (
+            layer.symbology is None or is_placeholder_raster_symbology(layer.symbology)
+        ):
+            self._report_open_data_progress(
+                progress_callback, 3, total_steps, "正在应用默认符号…"
+            )
+            layer = apply_raster_symbology(
+                layer, infer_default_raster_symbology(layer)
+            )
+        self._report_open_data_progress(progress_callback, total_steps, total_steps, "读取完成")
+        return layer
+
+    @staticmethod
+    def _report_open_data_progress(
+        progress_callback: Callable[[int, int, str], None] | None,
+        current: int,
+        total: int,
+        message: str,
+    ) -> None:
+        """向打开数据界面回传阶段进度；回调为空时忽略。"""
+        if progress_callback is not None:
+            progress_callback(current, total, message)
 
     def add_layer(self, layer: SpatialLayer) -> OpenDataResult:
         """将已经由其他数据源构造好的图层加入当前地图文档。"""
         if layer.crs is None:
             raise CoordinateReferenceSystemRequired(
                 "图层未定义 CRS，请先定义或修正 CRS 后再加入地图。"
+            )
+        if isinstance(layer, RasterLayer) and (
+            layer.symbology is None or is_placeholder_raster_symbology(layer.symbology)
+        ):
+            layer = apply_raster_symbology(
+                layer, infer_default_raster_symbology(layer)
             )
         self._document.add_layer(layer)
         self._modified = True
@@ -480,10 +538,6 @@ class GisApplication:
                 and resolved_output_path == layer.source_path.expanduser().resolve()
             ):
                 raise LayerReprojectionFailed("重投影输出不能覆盖输入数据源。")
-            if resolved_output_path.exists():
-                raise LayerReprojectionFailed(
-                    f"重投影输出已存在：{resolved_output_path.name}。请使用新文件。"
-                )
         resolved_resampling = raster_resampling
         if (
             resolved_resampling is None
@@ -936,6 +990,27 @@ class GisApplication:
         self._document.replace_layer(apply_raster_symbology(layer, symbology))
         self._modified = True
         return self.snapshot()
+
+    def apply_raster_classified_symbology(
+        self,
+        layer_id: str,
+        color_scheme: str,
+        classification_method: str,
+        class_count: int,
+    ) -> WorkspaceSnapshot:
+        """为连续栅格生成等间隔或分位数分级着色。"""
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, RasterLayer):
+            raise ValueError("栅格分级着色只能应用到栅格图层。")
+        return self.apply_raster_symbology(
+            layer_id,
+            create_raster_graduated_symbology(
+                layer,
+                color_scheme,
+                classification_method,
+                class_count,
+            ),
+        )
 
     def set_raster_display_resampling(
         self, layer_id: str, resampling: str | None
@@ -1789,8 +1864,6 @@ class GisApplication:
             and output_path.suffix.lower() != ".gpkg"
         ):
             raise InvalidBufferParameters("缓冲区输出位置不能覆盖输入图层源文件。")
-        if output_path.exists() and output_path.suffix.lower() != ".gpkg":
-            raise InvalidBufferParameters("分析结果输出已存在，请使用新的结果文件或图层名称。")
 
         calculation_crs: CRS = resolve_buffer_analysis_crs(input_layer, request.analysis_crs)
         prepared_layer: VectorLayer = reproject_vector_layer(input_layer, calculation_crs)
@@ -2436,8 +2509,6 @@ class GisApplication:
             and output_path.suffix.lower() != ".gpkg"
         ):
             raise InvalidOverlayParameters("叠加分析输出位置不能覆盖叠加图层源文件。")
-        if output_path.exists() and output_path.suffix.lower() != ".gpkg":
-            raise InvalidOverlayParameters("分析结果输出已存在，请使用新的结果文件或图层名称。")
 
         # 叠加分析不自动跨 CRS；用户应先手动重投影统一输入。
         try:
@@ -2699,7 +2770,18 @@ class GisApplication:
             source_path=output_path,
         )
 
-        # 7. 写出 GeoTIFF。
+        # 7. 写出 GeoTIFF。保存对话框已确认覆盖时允许替换已有结果文件，
+        # 但不能写回任一输入栅格的源文件。
+        for mapping in request.band_mappings:
+            input_layer = self._find_layer(mapping.layer_id)
+            if (
+                isinstance(input_layer, RasterLayer)
+                and input_layer.source_path is not None
+                and input_layer.source_path.expanduser().resolve() == output_path
+            ):
+                raise InvalidRasterCalculatorParameters(
+                    "栅格计算结果不能覆盖输入栅格源文件。"
+                )
         self.data_writer.write(output_layer, output_path)
 
         # 8. 加入工作区。
