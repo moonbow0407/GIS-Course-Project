@@ -11,16 +11,20 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 from affine import Affine
 from pyproj import CRS
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtCore import QEvent
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QProgressDialog
 from rasterio.enums import Resampling
+from shapely.geometry import Point
 
 from app.application.errors import (
     CoordinateReferenceSystemRequired,
     UnsupportedVectorFormat,
 )
+from app.domain.feature import Feature
 from app.domain.raster_layer import RasterLayer
+from app.domain.vector_layer import VectorLayer
 from app.infrastructure.file_io.raster_overview_service import RasterOverviewResult
-from app.presentation.main_window import MainWindow
+from app.presentation.main_window import MainWindow, _OpenDataRequest
 
 
 def _pump_until_open_finished(application: QApplication, window: MainWindow) -> None:
@@ -59,6 +63,18 @@ def _raster_layer(path: Path, index: int) -> RasterLayer:
         transform=Affine.identity(),
         crs=CRS.from_epsg(4326),
         bounds=(0.0, 0.0, 1.0, 1.0),
+        source_path=path,
+    )
+
+
+def _vector_layer(path: Path, layer_id: str, crs: CRS) -> VectorLayer:
+    """创建用于首图层 CRS 确认流程的点图层。"""
+    point = Point(500_000.0, 3_300_000.0) if crs == CRS.from_epsg(4549) else Point(120, 30)
+    return VectorLayer.create(
+        layer_id=layer_id,
+        name=path.stem,
+        features=(Feature(1, point, {}),),
+        crs=crs,
         source_path=path,
     )
 
@@ -294,4 +310,123 @@ def test_open_data_progress_dialog_receives_determinate_updates(monkeypatch) -> 
 
     assert any(total > 0 and current == total for current, total, _message in progress_events)
     assert any("金字塔" in message or "预览" in message for _c, _t, message in progress_events)
+    window.close()
+
+
+def test_first_unsuitable_layer_can_choose_independent_display_crs(monkeypatch) -> None:
+    """首图层确认应在提交前设置地图 CRS，后续图层不得再次改变画布。"""
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    choices: list[str] = []
+    monkeypatch.setattr(window, "_confirm_project_switch", lambda: True)
+
+    def choose(layer: object) -> tuple[bool, CRS | None]:
+        choices.append(layer.layer_id)
+        return True, CRS.from_epsg(4490)
+
+    monkeypatch.setattr(window, "_choose_initial_display_crs", choose)
+
+    first_path = Path("local-grid.shp")
+    window._open_data_current = _OpenDataRequest(first_path)
+    first = _vector_layer(first_path, "local-grid", CRS.from_epsg(4549))
+    window._on_open_data_prepared(first)
+
+    second_path = Path("global.geojson")
+    window._open_data_current = _OpenDataRequest(second_path)
+    second = _vector_layer(second_path, "global", CRS.from_epsg(4326))
+    window._on_open_data_prepared(second)
+
+    snapshot = window._application.snapshot()
+    assert choices == ["local-grid"]
+    assert snapshot.display_crs == CRS.from_epsg(4490)
+    assert tuple(item.layer.crs for item in snapshot.layers) == (
+        CRS.from_epsg(4549),
+        CRS.from_epsg(4326),
+    )
+    window.close()
+
+
+class _FinishedWorker:
+    """只提供 deleteLater，用于在确认框期间模拟 QThread.finished。"""
+
+    def deleteLater(self) -> None:
+        return None
+
+
+def _begin_open_data_batch(window: MainWindow, path: Path) -> _FinishedWorker:
+    """构造一个已显示进度框、等待提交的打开队列状态。"""
+    progress = QProgressDialog(window)
+    progress.setAutoClose(False)
+    progress.setAutoReset(False)
+    window._open_data_progress_dialog = progress
+    window._open_data_current = _OpenDataRequest(path)
+    window._open_data_pending = []
+    window._open_data_loaded_paths = []
+    window._open_data_failures = []
+    window._open_data_warnings = []
+    worker = _FinishedWorker()
+    window._open_data_worker = worker  # type: ignore[assignment]
+    return worker
+
+
+def test_open_data_crs_confirmation_survives_finished_reentry(monkeypatch) -> None:
+    """确认显示 CRS 的嵌套循环处理 finished 时，不得提前销毁进度框。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    path = Path("narrow-zone.shp")
+    layer = _vector_layer(path, "narrow-zone", CRS.from_epsg(4549))
+    worker = _begin_open_data_batch(window, path)
+    monkeypatch.setattr(window, "_refresh_workspace", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_confirm_project_switch", lambda: True)
+
+    def choose(_layer: object) -> tuple[bool, CRS | None]:
+        window._on_open_data_finished(worker)  # type: ignore[arg-type]
+        # QDialog.exec() 会泵出 DeferredDelete；普通 processEvents 不会。
+        application.processEvents()
+        application.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        return True, CRS.from_epsg(4490)
+
+    monkeypatch.setattr(window, "_choose_initial_display_crs", choose)
+
+    window._on_open_data_prepared(layer)
+    application.processEvents()
+
+    snapshot = window._application.snapshot()
+    assert len(snapshot.layers) == 1
+    assert snapshot.display_crs == CRS.from_epsg(4490)
+    assert window._open_data_progress_dialog is None
+    window.close()
+
+
+def test_unknown_crs_prompt_does_not_finish_batch_before_retry(monkeypatch) -> None:
+    """定义缺失 CRS 的嵌套循环不得在重新入队前提前清空打开队列。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    path = Path("unknown-crs.tif")
+    worker = _begin_open_data_batch(window, path)
+    start_calls: list[tuple[Path, CRS | None]] = []
+    monkeypatch.setattr(window, "_confirm_project_switch", lambda: True)
+
+    def start_next() -> None:
+        current = window._open_data_pending[0] if window._open_data_pending else None
+        start_calls.append(
+            (current.path, current.source_crs_override) if current is not None else (Path("."), None)
+        )
+
+    def prompt(_name: str) -> CRS:
+        window._on_open_data_finished(worker)  # type: ignore[arg-type]
+        application.processEvents()
+        application.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert start_calls == []
+        assert window._open_data_progress_dialog is not None
+        return CRS.from_epsg(3857)
+
+    monkeypatch.setattr(window, "_start_next_open_data", start_next)
+    monkeypatch.setattr(window, "_prompt_layer_crs", prompt)
+
+    window._on_open_data_failed(CoordinateReferenceSystemRequired("数据未声明坐标参考系统"))
+    application.processEvents()
+
+    assert start_calls == [(path, CRS.from_epsg(3857))]
+    assert window._open_data_progress_dialog is not None
     window.close()

@@ -15,8 +15,8 @@ _PRESETS: tuple[tuple[str, str], ...] = (
     ("EPSG:4326", "WGS 84"),
     ("EPSG:3857", "Web Mercator"),
     ("EPSG:4490", "CGCS2000"),
-    ("EPSG:4549", "CGCS2000 / 3-degree Gauss-Kruger zone 39"),
-    ("EPSG:4527", "CGCS2000 / 3-degree Gauss-Kruger zone 41"),
+    ("EPSG:4549", "CGCS2000 / 3-degree Gauss-Kruger CM 120E"),
+    ("EPSG:4527", "CGCS2000 / 3-degree Gauss-Kruger zone 39"),
     ("ESRI:102026", "Asia North Equidistant Conic"),
 )
 

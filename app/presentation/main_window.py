@@ -47,6 +47,7 @@ from rasterio.enums import Resampling
 from shapely.geometry import Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
+from app.application.crs_suitability import CrsSuitabilityService
 from app.application.crs_utils import crs_equivalent
 from app.application.database_service import DatabaseService
 from app.application.display_models import RasterDisplayPayload
@@ -109,6 +110,9 @@ from app.presentation.widgets.database_dialogs import (
     DatabaseLayerDialog,
 )
 from app.presentation.widgets.dem_analysis_dialog import DemAnalysisDialog
+from app.presentation.widgets.display_crs_confirmation_dialog import (
+    DisplayCrsConfirmationDialog,
+)
 from app.presentation.widgets.display_settings_dialog import DisplaySettingsDialog
 from app.presentation.widgets.edit_feature_dialog import EditFeatureDialog
 from app.presentation.widgets.geometry_edit_toolbar import GeometryEditToolbar
@@ -199,6 +203,7 @@ class MainWindow(QMainWindow):
             display_projection_service=display_projection_service,
             windowed_raster_projector=WindowedRasterProjector(),
         )
+        self._crs_suitability_service = CrsSuitabilityService()
         # 顶部功能区：集中呈现文档规划的全部现有及预留功能入口。
         self._ribbon: RibbonBar = RibbonBar()
         # 图层面板：展示并操作当前地图文档中的真实图层。
@@ -263,6 +268,9 @@ class MainWindow(QMainWindow):
         self._open_data_loaded_paths: list[Path] = []
         self._open_data_failures: list[str] = []
         self._open_data_warnings: list[str] = []
+        # completed/failed 槽若弹出模态框，finished 会在嵌套循环里先到；
+        # 此标记阻止队列在结果提交前被收尾并销毁进度框。
+        self._open_data_handling_result: bool = False
         # 大栅格显示金字塔在文件加载完成后串行后台构建，缓存不改写源数据。
         self._overview_service: RasterOverviewService = RasterOverviewService()
         self._overview_worker: RasterOverviewWorker | None = None
@@ -746,19 +754,32 @@ class MainWindow(QMainWindow):
         db_layer_id: int = dialog.selected_layer_id()
         source_crs_override: CRS | None = None
         try:
-            result = self._application.load_database_layer(db_layer_id)
+            layer = self._application.prepare_database_layer(db_layer_id)
         except CoordinateReferenceSystemRequired:
             source_crs_override = self._prompt_layer_crs(f"数据库图层 {db_layer_id}")
             if source_crs_override is None:
                 return
             try:
-                result = self._application.load_database_layer(
+                layer = self._application.prepare_database_layer(
                     db_layer_id,
                     source_crs_override,
                 )
             except (ApplicationError, ValueError) as error:
                 QMessageBox.warning(self, "加载数据库图层失败", str(error))
                 return
+        except (ApplicationError, ValueError) as error:
+            QMessageBox.warning(self, "加载数据库图层失败", str(error))
+            return
+        initial_display_crs: CRS | None = None
+        if not self._application.snapshot().layers:
+            accepted, initial_display_crs = self._choose_initial_display_crs(layer)
+            if not accepted:
+                return
+        try:
+            result = self._application.add_layer(
+                layer,
+                initial_display_crs=initial_display_crs,
+            )
         except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "加载数据库图层失败", str(error))
             return
@@ -772,6 +793,7 @@ class MainWindow(QMainWindow):
                 db_layer_id,
                 current_layer_id,
                 source_crs_override,
+                initial_display_crs,
             ),
         )
         self._refresh_workspace()
@@ -795,7 +817,7 @@ class MainWindow(QMainWindow):
         ).exec()
 
     def _select_spatial_data_files(self) -> list[str]:
-        """选择空间文件；不使用系统预览，避免选中大 TIFF 时对话框冻结。"""
+        """选择空间文件；必须使用系统原生对话框。"""
         return select_spatial_data_files(self)
 
     def _open_data(self) -> None:
@@ -849,7 +871,7 @@ class MainWindow(QMainWindow):
             return
         request = self._open_data_pending.pop(0)
         self._open_data_current = request
-        progress = self._open_data_progress_dialog
+        progress = self._live_open_data_progress()
         if progress is not None:
             size_text = self._open_data_size_text(request.path)
             progress.setLabelText(f"{request.path.name}{size_text}\n正在读取…")
@@ -873,7 +895,7 @@ class MainWindow(QMainWindow):
 
     def _on_open_data_progress(self, current: int, total: int, message: str) -> None:
         """把后台读取阶段同步到进度条，保持主窗口可绘制。"""
-        dialog = self._open_data_progress_dialog
+        dialog = self._live_open_data_progress()
         request = self._open_data_current
         if dialog is None:
             return
@@ -900,67 +922,157 @@ class MainWindow(QMainWindow):
 
     def _on_open_data_prepared(self, payload: object) -> None:
         """在主线程把后台准备好的图层提交到工作区。"""
-        request = self._open_data_current
-        if request is None or not isinstance(payload, SpatialLayer):
-            return
-        progress = self._open_data_progress_dialog
-        if progress is not None:
-            if progress.maximum() > 0:
-                progress.setValue(progress.maximum())
-            size_text = self._open_data_size_text(request.path)
-            progress.setLabelText(f"{request.path.name}{size_text}\n正在加入地图…")
+        self._begin_open_data_result()
         try:
-            result = self._application.add_layer(payload)
-        except (ApplicationError, ValueError) as error:
-            self._open_data_failures.append(f"{request.path.name}：{error}")
-            return
-        self._open_data_loaded_paths.append(request.path)
-        if result.warning:
-            self._open_data_warnings.append(f"{request.path.name}：{result.warning}")
-        # 可变单元：重做重新打开文件会生成新图层编号，撤销始终移除当前编号。
-        current_layer_id: list[str] = [result.layer_id]
-        self._push_undo(
-            f"打开数据  {request.path.name}",
-            undo_action=partial(self._remove_layer_record, current_layer_id),
-            redo_action=partial(
-                self._reopen_data,
-                request.path,
-                request.layer_name,
-                current_layer_id,
-                request.source_crs_override,
-            ),
-        )
+            request = self._open_data_current
+            if request is None or not isinstance(payload, SpatialLayer):
+                return
+            initial_display_crs: CRS | None = None
+            if not self._application.snapshot().layers:
+                accepted, initial_display_crs = self._choose_initial_display_crs(payload)
+                if not accepted:
+                    return
+            progress = self._live_open_data_progress()
+            if progress is not None:
+                progress.show()
+                if progress.maximum() > 0:
+                    progress.setValue(progress.maximum())
+                size_text = self._open_data_size_text(request.path)
+                progress.setLabelText(f"{request.path.name}{size_text}\n正在加入地图…")
+            try:
+                result = self._application.add_layer(
+                    payload,
+                    initial_display_crs=initial_display_crs,
+                )
+            except (ApplicationError, ValueError) as error:
+                self._open_data_failures.append(f"{request.path.name}：{error}")
+                return
+            self._open_data_loaded_paths.append(request.path)
+            if result.warning:
+                self._open_data_warnings.append(f"{request.path.name}：{result.warning}")
+            # 可变单元：重做重新打开文件会生成新图层编号，撤销始终移除当前编号。
+            current_layer_id: list[str] = [result.layer_id]
+            self._push_undo(
+                f"打开数据  {request.path.name}",
+                undo_action=partial(self._remove_layer_record, current_layer_id),
+                redo_action=partial(
+                    self._reopen_data,
+                    request.path,
+                    request.layer_name,
+                    current_layer_id,
+                    request.source_crs_override,
+                    initial_display_crs,
+                ),
+            )
+        finally:
+            self._end_open_data_result()
+
+    def _choose_initial_display_crs(
+        self,
+        layer: SpatialLayer,
+    ) -> tuple[bool, CRS | None]:
+        """必要时在首图层提交前确认地图显示 CRS。
+
+        返回 ``(是否继续导入, 初始显示 CRS)``；显示 CRS 为空表示继续沿用
+        首图层 CRS。候选 CRS 仍不适配时允许用户二次确认。
+        """
+        if layer.crs is None:
+            return True, None
+        source_assessment = self._crs_suitability_service.assess(layer, layer.crs)
+        if not source_assessment.requires_confirmation:
+            return True, None
+
+        progress = self._live_open_data_progress()
+        if progress is not None:
+            progress.hide()
+        while True:
+            dialog = DisplayCrsConfirmationDialog(
+                layer.crs,
+                source_assessment.message,
+                self,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return False, None
+            target_crs = dialog.selected_crs()
+            if target_crs is None:
+                QMessageBox.warning(self, "显示 CRS 无效", "请输入有效的显示 CRS。")
+                continue
+            if crs_equivalent(layer.crs, target_crs):
+                return True, None
+
+            target_assessment = self._crs_suitability_service.assess(layer, target_crs)
+            if target_assessment.requires_confirmation:
+                answer = QMessageBox.question(
+                    self,
+                    "确认显示 CRS",
+                    f"{target_assessment.message}\n是否仍要使用该显示 CRS？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    continue
+            return True, target_crs
 
     def _on_open_data_failed(self, payload: object) -> None:
         """记录读取失败；缺失 CRS 时在主线程询问后重新排队。"""
-        request = self._open_data_current
-        if request is None:
-            return
-        if isinstance(payload, CoordinateReferenceSystemRequired):
-            progress = self._open_data_progress_dialog
-            if progress is not None:
-                progress.hide()
-            source_crs = self._prompt_layer_crs(request.path.name)
-            if source_crs is None:
-                self._open_data_failures.append(
-                    f"{request.path.name}：未定义 CRS，已跳过。"
-                )
-            else:
-                self._open_data_pending.insert(
-                    0,
-                    _OpenDataRequest(request.path, request.layer_name, source_crs),
-                )
-            return
-        message = str(payload) if isinstance(payload, Exception) else "未知读取错误"
-        self._open_data_failures.append(f"{request.path.name}：{message}")
+        self._begin_open_data_result()
+        try:
+            request = self._open_data_current
+            if request is None:
+                return
+            if isinstance(payload, CoordinateReferenceSystemRequired):
+                progress = self._live_open_data_progress()
+                if progress is not None:
+                    progress.hide()
+                source_crs = self._prompt_layer_crs(request.path.name)
+                if source_crs is None:
+                    self._open_data_failures.append(
+                        f"{request.path.name}：未定义 CRS，已跳过。"
+                    )
+                else:
+                    self._open_data_pending.insert(
+                        0,
+                        _OpenDataRequest(request.path, request.layer_name, source_crs),
+                    )
+                return
+            message = str(payload) if isinstance(payload, Exception) else "未知读取错误"
+            self._open_data_failures.append(f"{request.path.name}：{message}")
+        finally:
+            self._end_open_data_result()
 
     def _on_open_data_finished(self, worker: OpenDataWorker) -> None:
-        """释放当前读取线程，并继续处理队列。"""
+        """释放当前读取线程；结果槽未结束时不推进队列。"""
         worker.deleteLater()
-        if worker is self._open_data_worker:
-            self._open_data_worker = None
-            self._open_data_current = None
+        if worker is not self._open_data_worker:
+            return
+        self._open_data_worker = None
+        if self._open_data_handling_result:
+            return
+        self._open_data_current = None
         QTimer.singleShot(0, self._start_next_open_data)
+
+    def _begin_open_data_result(self) -> None:
+        """标记正在处理读取结果，避免 finished 抢先收尾队列。"""
+        self._open_data_handling_result = True
+
+    def _end_open_data_result(self) -> None:
+        """结果处理结束后，若线程已结束则继续打开队列。"""
+        self._open_data_handling_result = False
+        if self._open_data_worker is None and self._open_data_progress_dialog is not None:
+            self._open_data_current = None
+            QTimer.singleShot(0, self._start_next_open_data)
+
+    def _live_open_data_progress(self) -> QProgressDialog | None:
+        """返回仍有效的进度框；C++ 对象已销毁时清除悬挂引用。"""
+        dialog = self._open_data_progress_dialog
+        if dialog is None:
+            return None
+        try:
+            dialog.objectName()
+        except RuntimeError:
+            self._open_data_progress_dialog = None
+            return None
+        return dialog
 
     def _finish_open_data_batch(self) -> None:
         """统一刷新批量读取结果并恢复界面状态。"""
@@ -979,7 +1091,7 @@ class MainWindow(QMainWindow):
         if failures:
             title: str = "部分数据打开失败" if loaded_paths else "打开数据失败"
             QMessageBox.warning(self, title, "\n".join(failures))
-        progress = self._open_data_progress_dialog
+        progress = self._live_open_data_progress()
         if progress is not None:
             progress.close()
             progress.deleteLater()
@@ -989,6 +1101,7 @@ class MainWindow(QMainWindow):
         self._open_data_loaded_paths = []
         self._open_data_failures = []
         self._open_data_warnings = []
+        self._open_data_handling_result = False
         self._ribbon.set_action_enabled("open_data", True)
 
     def _queue_raster_overviews(self, snapshot: WorkspaceSnapshot) -> None:
@@ -1803,6 +1916,7 @@ class MainWindow(QMainWindow):
         layer_name: str | None,
         current_layer_id: list[str],
         source_crs_override: CRS | None = None,
+        initial_display_crs: CRS | None = None,
     ) -> None:
         """重做打开数据：重新读取文件并刷新当前图层编号。
 
@@ -1813,14 +1927,12 @@ class MainWindow(QMainWindow):
             layer_name: 首次加载时解析的容器内部图层名；为空表示非容器格式。
             current_layer_id: 可变单元，更新为该次重开产生的图层编号。
         """
-        if source_crs_override is None:
-            result = self._application.open_data(data_path, layer_name)
-        else:
-            result = self._application.open_data(
-                data_path,
-                layer_name,
-                source_crs_override,
-            )
+        result = self._application.open_data(
+            data_path,
+            layer_name,
+            source_crs_override,
+            initial_display_crs,
+        )
         current_layer_id[0] = result.layer_id
 
     def _reload_database_layer(
@@ -1828,6 +1940,7 @@ class MainWindow(QMainWindow):
         db_layer_id: int,
         current_layer_id: list[str],
         source_crs_override: CRS | None = None,
+        initial_display_crs: CRS | None = None,
     ) -> None:
         """重做加载数据库图层：重新按数据库编号加载并刷新当前图层编号。
 
@@ -1835,7 +1948,11 @@ class MainWindow(QMainWindow):
             db_layer_id: 数据库中的图层编号。
             current_layer_id: 可变单元，更新为该次加载产生的图层编号。
         """
-        result = self._application.load_database_layer(db_layer_id, source_crs_override)
+        result = self._application.load_database_layer(
+            db_layer_id,
+            source_crs_override,
+            initial_display_crs,
+        )
         current_layer_id[0] = result.layer_id
 
     def _move_layer(self, layer_id: str, target_index: int) -> None:

@@ -270,6 +270,7 @@ def test_open_data_undo_redo_supports_cycles_with_new_layer_ids(monkeypatch) -> 
         "_select_spatial_data_files",
         lambda: [str(Path("roads.geojson"))],
     )
+    monkeypatch.setattr(window, "_choose_initial_display_crs", lambda _layer: (True, None))
     monkeypatch.setattr(window._application, "prepare_open_data", prepare_open_data)
     window._open_data()
     application = QApplication.instance()

@@ -125,6 +125,27 @@ def test_database_load_keeps_source_crs_and_display_switch_is_cache_only() -> No
     assert application.snapshot().display_crs == CRS.from_epsg(3857)
 
 
+def test_database_first_layer_can_use_independent_display_crs() -> None:
+    """数据库首图层也应在不覆盖源 CRS 的前提下建立独立地图 CRS。"""
+    service = FakeDatabaseService()
+    application = GisApplication(
+        AutoDataReader(),
+        document=MapDocument(),
+        database_service=service,  # type: ignore[arg-type]
+        display_projection_service=DisplayProjectionService(
+            coordinate_transformer=PyprojCoordinateTransformer()
+        ),
+    )
+
+    result = application.load_database_layer(
+        8,
+        initial_display_crs=CRS.from_epsg(3857),
+    )
+
+    assert result.snapshot.display_crs == CRS.from_epsg(3857)
+    assert result.snapshot.layers[0].layer.crs == CRS.from_epsg(4326)
+
+
 def test_database_methods_fail_explicitly_when_service_is_not_configured() -> None:
     """未装配数据库服务时，应用入口应给出明确异常而不是静默失败。"""
     application: GisApplication = GisApplication(AutoDataReader())

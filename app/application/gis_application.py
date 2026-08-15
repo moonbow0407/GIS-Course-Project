@@ -373,6 +373,7 @@ class GisApplication:
         path: Path,
         layer_name: str | None = None,
         source_crs_override: CRS | None = None,
+        initial_display_crs: CRS | None = None,
     ) -> OpenDataResult:
         """读取空间文件并原子加入地图文档。
 
@@ -387,7 +388,7 @@ class GisApplication:
             ValueError: 图层坐标系与地图文档无法安全叠加时抛出。
         """
         layer = self.prepare_open_data(path, layer_name, source_crs_override)
-        return self.add_layer(layer)
+        return self.add_layer(layer, initial_display_crs=initial_display_crs)
 
     def prepare_open_data(
         self,
@@ -461,12 +462,22 @@ class GisApplication:
         if progress_callback is not None:
             progress_callback(current, total, message)
 
-    def add_layer(self, layer: SpatialLayer) -> OpenDataResult:
-        """将已经由其他数据源构造好的图层加入当前地图文档。"""
+    def add_layer(
+        self,
+        layer: SpatialLayer,
+        initial_display_crs: CRS | None = None,
+    ) -> OpenDataResult:
+        """将图层加入地图，并允许首图层原子建立独立显示 CRS。
+
+        ``initial_display_crs`` 只允许用于空地图；后续图层不能借此改变已经
+        建立的地图显示坐标系，避免导入顺序导致画布跳变。
+        """
         if layer.crs is None:
             raise CoordinateReferenceSystemRequired(
                 "图层未定义 CRS，请先定义或修正 CRS 后再加入地图。"
             )
+        if initial_display_crs is not None and self._document.layers:
+            raise ValueError("初始显示 CRS 仅能在空地图加入首图层时指定。")
         if isinstance(layer, RasterLayer) and (
             layer.symbology is None or is_placeholder_raster_symbology(layer.symbology)
         ):
@@ -474,10 +485,18 @@ class GisApplication:
                 layer, infer_default_raster_symbology(layer)
             )
         self._document.add_layer(layer)
+        try:
+            if initial_display_crs is not None:
+                self._document.set_display_crs(initial_display_crs)
+            snapshot = self.snapshot()
+        except Exception:
+            self._document.remove_layer(layer.layer_id)
+            self._display_cache.invalidate_layer(layer.layer_id)
+            raise
         self._modified = True
         return OpenDataResult(
             layer_id=layer.layer_id,
-            snapshot=self.snapshot(),
+            snapshot=snapshot,
         )
 
     def define_layer_crs(self, layer_id: str, crs: CRS) -> WorkspaceSnapshot:
@@ -772,8 +791,18 @@ class GisApplication:
         self,
         layer_id: int,
         source_crs_override: CRS | None = None,
+        initial_display_crs: CRS | None = None,
     ) -> OpenDataResult:
         """加载数据库图层，保留数据库源 CRS 后加入工作区。"""
+        layer = self.prepare_database_layer(layer_id, source_crs_override)
+        return self.add_layer(layer, initial_display_crs=initial_display_crs)
+
+    def prepare_database_layer(
+        self,
+        layer_id: int,
+        source_crs_override: CRS | None = None,
+    ) -> VectorLayer:
+        """读取并校验数据库图层，但不在确认显示 CRS 前修改工作区。"""
         layer: VectorLayer = self._require_database_service().load_layer(layer_id, None)
         if source_crs_override is not None:
             if layer.crs is None:
@@ -794,7 +823,7 @@ class GisApplication:
             raise CoordinateReferenceSystemRequired(
                 "数据库图层未声明坐标参考系统，请先定义或修正 CRS 后再导入。"
             )
-        return self.add_layer(layer)
+        return layer
 
     def remove_layer(self, layer_id: str) -> WorkspaceSnapshot:
         """移除指定图层并返回最新工作区快照。"""

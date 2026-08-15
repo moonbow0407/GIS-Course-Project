@@ -5,8 +5,12 @@ from pathlib import Path
 
 import pytest
 from pyproj import CRS
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, box
 
+from app.application.crs_suitability import (
+    CrsSuitabilityReason,
+    CrsSuitabilityService,
+)
 from app.application.display_projection_service import DisplayProjectionService
 from app.application.errors import (
     CoordinateReferenceSystemRequired,
@@ -44,6 +48,90 @@ def make_application() -> GisApplication:
             coordinate_transformer=PyprojCoordinateTransformer()
         ),
     )
+
+
+def make_suitability_layer(
+    bounds: tuple[float, float, float, float],
+    crs: CRS,
+) -> VectorLayer:
+    """创建覆盖指定范围的 CRS 适用性测试图层。"""
+    return VectorLayer.create(
+        name="测试图层",
+        features=(Feature(1, box(*bounds), {}),),
+        crs=crs,
+    )
+
+
+def test_narrow_projected_crs_requires_confirmation() -> None:
+    """三度分带投影即使覆盖图层，也应提示其适用范围较窄。"""
+    layer = make_suitability_layer(
+        (500_000.0, 3_300_000.0, 510_000.0, 3_310_000.0),
+        CRS.from_epsg(4549),
+    )
+
+    assessment = CrsSuitabilityService().assess(layer, layer.crs)
+
+    assert assessment.requires_confirmation is True
+    assert CrsSuitabilityReason.NARROW_AREA in assessment.reasons
+    assert assessment.message == "当前 CRS 适用范围较窄，可能不适合后续图层显示。"
+
+
+def test_layer_outside_candidate_area_uses_short_reason() -> None:
+    """图层范围超出候选 CRS 适用区时应优先给出简短范围提示。"""
+    layer = make_suitability_layer((114.0, 22.0, 123.0, 32.0), CRS.from_epsg(4326))
+
+    assessment = CrsSuitabilityService().assess(layer, CRS.from_epsg(4527))
+
+    assert CrsSuitabilityReason.OUTSIDE_AREA in assessment.reasons
+    assert assessment.message == "当前图层部分超出 CRS 适用范围，可能出现变形或缺失。"
+
+
+def test_unidentified_custom_crs_requires_confirmation() -> None:
+    """无法识别权威定义的自定义 CRS 应由用户确认。"""
+    custom = CRS.from_proj4(
+        "+proj=aea +lat_1=25 +lat_2=47 +lat_0=0 +lon_0=105 "
+        "+datum=WGS84 +units=m +no_defs +type=crs"
+    )
+    layer = make_suitability_layer((110.0, 25.0, 120.0, 35.0), CRS.from_epsg(4326))
+
+    assessment = CrsSuitabilityService().assess(layer, custom)
+
+    assert CrsSuitabilityReason.UNKNOWN_AUTHORITY in assessment.reasons
+    assert assessment.message == "当前 CRS 无法识别适用范围，建议确认地图显示 CRS。"
+
+
+def test_severe_projection_distortion_requires_confirmation() -> None:
+    """高纬区域使用 Web Mercator 时应识别明显变形。"""
+    layer = make_suitability_layer((10.0, 75.0, 20.0, 80.0), CRS.from_epsg(4326))
+
+    assessment = CrsSuitabilityService().assess(layer, CRS.from_epsg(3857))
+
+    assert CrsSuitabilityReason.STRONG_DISTORTION in assessment.reasons
+    assert assessment.message == "当前 CRS 在该区域变形较明显，显示效果可能不理想。"
+
+
+def test_broad_crs_with_moderate_distortion_does_not_interrupt_import() -> None:
+    """低纬区域使用常见宽区域 CRS 时不应频繁打扰用户。"""
+    layer = make_suitability_layer((110.0, 15.0, 120.0, 20.0), CRS.from_epsg(4326))
+
+    assessment = CrsSuitabilityService().assess(layer, CRS.from_epsg(3857))
+
+    assert assessment.requires_confirmation is False
+    assert assessment.reasons == ()
+    assert assessment.message == ""
+
+
+def test_suitable_wide_regional_projection_is_not_misclassified_as_niche() -> None:
+    """覆盖数据的宽区域圆锥投影不应因不在固定推荐项中被误判。"""
+    layer = make_suitability_layer((110.0, 25.0, 120.0, 35.0), CRS.from_epsg(4326))
+
+    assessment = CrsSuitabilityService().assess(
+        layer,
+        CRS.from_user_input("ESRI:102026"),
+    )
+
+    assert assessment.requires_confirmation is False
+    assert assessment.reasons == ()
 
 
 def test_set_display_crs_rebuilds_display_payload_without_changing_domain_layer(
@@ -101,6 +189,52 @@ def test_display_crs_is_established_by_first_known_layer(tmp_path: Path) -> None
 
     assert application.snapshot().display_crs == CRS.from_epsg(4326)
     assert application.snapshot().layers[0].layer.crs == CRS.from_epsg(4326)
+
+
+def test_first_layer_can_atomically_establish_independent_display_crs() -> None:
+    """首图层提交时可指定独立显示 CRS，且不能覆盖图层源 CRS。"""
+    application: GisApplication = make_application()
+    layer = VectorLayer.create(
+        name="local-grid",
+        features=(Feature(1, Point(120.0, 30.0), {}),),
+        crs=CRS.from_epsg(4326),
+    )
+
+    result = application.add_layer(layer, initial_display_crs=CRS.from_epsg(3857))
+
+    assert result.snapshot.display_crs == CRS.from_epsg(3857)
+    assert result.snapshot.layers[0].layer.crs == CRS.from_epsg(4326)
+    assert result.snapshot.layers[0].layer.features[0].geometry.equals(Point(120.0, 30.0))
+    assert result.snapshot.layers[0].display_payload.features[0].geometry.x == pytest.approx(
+        13_358_338.895,
+        rel=1e-6,
+    )
+
+
+def test_initial_display_crs_cannot_change_existing_map() -> None:
+    """初始显示 CRS 参数只能用于空地图，避免后续图层导致画布跳变。"""
+    application: GisApplication = make_application()
+    application.add_layer(
+        VectorLayer.create(
+            name="first",
+            features=(Feature(1, Point(0.0, 0.0), {}),),
+            crs=CRS.from_epsg(4326),
+        )
+    )
+
+    with pytest.raises(ValueError, match="仅能在空地图"):
+        application.add_layer(
+            VectorLayer.create(
+                name="second",
+                features=(Feature(2, Point(1.0, 1.0), {}),),
+                crs=CRS.from_epsg(4326),
+            ),
+            initial_display_crs=CRS.from_epsg(3857),
+        )
+
+    snapshot = application.snapshot()
+    assert len(snapshot.layers) == 1
+    assert snapshot.display_crs == CRS.from_epsg(4326)
 
 
 def test_unknown_crs_requires_definition_before_import(tmp_path: Path) -> None:
