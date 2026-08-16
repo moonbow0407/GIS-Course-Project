@@ -24,6 +24,7 @@ from app.domain.symbology import (
     GraduatedClass,
     RasterClass,
     RasterRendererType,
+    RasterSymbology,
     UniqueValueClass,
     VectorRendererType,
 )
@@ -478,7 +479,6 @@ class LayerPanel(QWidget):
                         "其他值",
                         (raster_symbology.other_color,),
                     )
-                return
             else:
                 ramp_colors = COLOR_RAMPS.get(raster_symbology.color_scheme, ("#000000", "#FFFFFF"))
                 if raster_symbology.inverted:
@@ -488,6 +488,7 @@ class LayerPanel(QWidget):
                     raster_stretch_legend_text(layer),
                     ramp_colors,
                 )
+            self._add_raster_nodata_legend(parent, layer, raster_symbology)
             return
         vector_symbology = layer.symbology
         if vector_symbology is None:
@@ -585,6 +586,22 @@ class LayerPanel(QWidget):
         child.setIcon(0, cls._color_icon((category.color,)))
         child.setFlags(Qt.ItemFlag.ItemIsEnabled)
         parent.addChild(child)
+
+    @classmethod
+    def _add_raster_nodata_legend(
+        cls,
+        parent: QTreeWidgetItem,
+        layer: RasterLayer,
+        symbology: RasterSymbology,
+    ) -> None:
+        """在有效分类之后列出正在上色的无数据取值。"""
+        if not symbology.nodata_visible:
+            return
+        if layer.nodata is None:
+            label = "无数据"
+        else:
+            label = f"无数据 · {float(layer.nodata):.6g}"
+        cls._add_raster_legend_item(parent, label, (symbology.nodata_color,))
 
     @staticmethod
     def _color_icon(colors: tuple[str, ...]) -> QIcon:

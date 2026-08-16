@@ -63,6 +63,46 @@ def test_raster_classified_legend_shows_each_value_and_color() -> None:
     assert application is not None
 
 
+def test_raster_legend_lists_nodata_value_when_visible() -> None:
+    """开启显示 NoData 后，图层树应在有效分类之外单独列出无数据取值。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    raster = RasterLayer.create(
+        layer_id="clip-with-nodata",
+        name="test_clip",
+        raster_data=np.ones((1, 2, 2), dtype=np.float32),
+        image_data=np.full((2, 2, 4), 255, dtype=np.uint8),
+        valid_mask=np.array([[True, False], [True, False]], dtype=bool),
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4490),
+        bounds=(0.0, 0.0, 2.0, 2.0),
+        nodata=32767.0,
+        symbology=replace(
+            create_raster_classified_symbology((93.0, 1096.0, 2099.0)),
+            other_visible=False,
+            nodata_visible=True,
+            nodata_color="#2563eb",
+        ),
+    )
+    panel = LayerPanel()
+    panel.apply_snapshot(
+        WorkspaceSnapshot(
+            layers=(LayerSnapshot(layer=raster, visible=True, selected_feature_ids=()),),
+            active_layer_id=raster.layer_id,
+            display_crs=raster.crs,
+        )
+    )
+    tree: QTreeWidget | None = panel.findChild(QTreeWidget, "layerTree")
+    assert tree is not None
+    parent = tree.topLevelItem(0)
+    assert parent is not None
+    legend_texts = [parent.child(index).text(0) for index in range(parent.childCount())]
+
+    assert any("93" in text for text in legend_texts)
+    assert any(text.startswith("无数据") and "32767" in text for text in legend_texts)
+    panel.close()
+    assert application is not None
+
+
 def test_raster_stretch_legend_shows_scheme_and_value_range() -> None:
     """拉伸栅格图例应显示色带中文名和有效值范围。"""
     application: QApplication = QApplication.instance() or QApplication([])

@@ -13,6 +13,7 @@ from shapely.geometry import LineString, Point
 
 from app.application.results import LayerSnapshot
 from app.application.symbology_service import (
+    apply_raster_symbology,
     create_graduated_symbology,
     create_raster_classified_symbology,
     create_unique_value_symbology,
@@ -21,6 +22,7 @@ from app.domain.feature import Feature
 from app.domain.layer_style import LayerStyle
 from app.domain.raster_layer import RasterLayer
 from app.domain.symbology import (
+    RasterClass,
     RasterRendererType,
     RasterSymbology,
     VectorRendererType,
@@ -348,6 +350,63 @@ def test_raster_panel_edits_nodata_visibility_and_color(monkeypatch) -> None:
     assert emitted
     assert emitted[-1].nodata_visible is True
     assert emitted[-1].nodata_color == "#e11d48"
+
+
+def test_graduated_raster_panel_persists_nodata_visibility_and_color(monkeypatch) -> None:
+    """分级着色时勾选显示 NoData 并改颜色应写回图层，再次打开仍保持勾选。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = RasterLayer.create(
+        layer_id="graduated-nodata",
+        name="test_clip",
+        raster_data=np.asarray([[[100.0, -9999.0]]]),
+        image_data=np.zeros((1, 2, 4), dtype=np.uint8),
+        valid_mask=np.asarray([[True, False]], dtype=np.bool_),
+        transform=Affine.identity(),
+        crs=CRS.from_epsg(4490),
+        bounds=(0, 0, 2, 1),
+        nodata=-9999.0,
+        symbology=RasterSymbology(
+            renderer_type=RasterRendererType.CLASSIFIED,
+            color_scheme="gray",
+            classification_method="equal_interval",
+            classes=(
+                RasterClass(0.0, "0 – 200", "#111111", upper=200.0),
+                RasterClass(200.0, "200 – 400", "#888888", upper=400.0),
+                RasterClass(400.0, "400 – 600", "#eeeeee", upper=600.0),
+            ),
+            nodata_color="#000000",
+            nodata_visible=False,
+        ),
+    )
+    panel = SymbologyPanel()
+    panel.set_layer(LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()))
+    emitted: list[RasterSymbology] = []
+    panel.symbology_changed.connect(
+        lambda _layer_id, symbology: emitted.append(symbology)
+    )
+    monkeypatch.setattr(
+        ColorWheelPicker,
+        "get_color",
+        lambda *_args, **_kwargs: QColor("#2563eb"),
+    )
+
+    assert panel._renderer.currentData() == SymbologyPanel._RASTER_GRADUATED
+    assert panel._nodata_visible.isChecked() is False
+    panel._nodata_visible.setChecked(True)
+    panel._nodata_color_button.click()
+    application.processEvents()
+
+    assert emitted
+    applied = emitted[-1]
+    assert applied.renderer_type is RasterRendererType.CLASSIFIED
+    assert applied.nodata_visible is True
+    assert applied.nodata_color == "#2563eb"
+    styled = apply_raster_symbology(layer, applied)
+    assert styled.image_data[0, 1].tolist() == [37, 99, 235, 255]
+
+    panel.set_layer(LayerSnapshot(layer=styled, visible=True, selected_feature_ids=()))
+    assert panel._nodata_visible.isChecked() is True
+    assert application is not None
 
 
 def test_classified_raster_panel_shows_discrete_levels() -> None:

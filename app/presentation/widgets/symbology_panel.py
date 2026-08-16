@@ -622,26 +622,39 @@ class SymbologyPanel(QWidget):
         layer = self._snapshot.layer
         if not isinstance(layer, RasterLayer):
             return
-        renderer_type = RasterRendererType(str(self._renderer.currentData()))
-        if renderer_type is RasterRendererType.CLASSIFIED:
+        renderer_data = str(self._renderer.currentData())
+        # 分级着色在下拉框里用内部标记 classified_graduated，不是 RasterRendererType
+        # 枚举值。若直接拿它构造枚举，勾选「显示 NoData」会抛错，配置无法写回。
+        if (
+            renderer_data == RasterRendererType.CLASSIFIED.value
+            or renderer_data == self._RASTER_GRADUATED
+        ):
             current: RasterSymbology = layer.symbology  # type: ignore[assignment]
-            scheme = str(self._scheme.currentData())
-            colors = CATEGORICAL_SCHEMES[scheme]
-            classes = tuple(
-                replace(category, color=colors[index % len(colors)])
-                for index, category in enumerate(current.classes)
-            )
-            config = replace(
-                current,
-                color_scheme=scheme,
-                classes=classes,
-                nodata_color=self._current_nodata_color,
-                nodata_visible=self._nodata_visible.isChecked(),
-            )
+            if renderer_data == RasterRendererType.CLASSIFIED.value:
+                scheme = str(self._scheme.currentData())
+                colors = CATEGORICAL_SCHEMES[scheme]
+                classes = tuple(
+                    replace(category, color=colors[index % len(colors)])
+                    for index, category in enumerate(current.classes)
+                )
+                config = replace(
+                    current,
+                    color_scheme=scheme,
+                    classes=classes,
+                    nodata_color=self._current_nodata_color,
+                    nodata_visible=self._nodata_visible.isChecked(),
+                )
+            else:
+                config = replace(
+                    current,
+                    nodata_color=self._current_nodata_color,
+                    nodata_visible=self._nodata_visible.isChecked(),
+                )
             self._emit_or_defer(
                 lambda: self.symbology_changed.emit(layer.layer_id, config)
             )
             return
+        renderer_type = RasterRendererType(renderer_data)
         lower: float = self._lower_percent.value()
         upper: float = self._upper_percent.value()
         if lower >= upper:
