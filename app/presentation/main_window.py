@@ -2625,10 +2625,11 @@ class MainWindow(QMainWindow):
             "polygon": GeometryFamily.POLYGON,
         }[mode]
         options: list[TargetLayerOption] = []
+        # 几何与格式都合适、只因坐标系与显示坐标系不一致而被排除的图层；
+        # 收集起来用于给出针对性的提示，而不是笼统地说"没有矢量图层"。
+        crs_blocked_layers: list[tuple[str, str, str]] = []
         for layer in snapshot.layers:
             if not isinstance(layer.layer, VectorLayer):
-                continue
-            if not self._application.can_edit_layer(layer.layer_id):
                 continue
             family: GeometryFamily | None = layer.geometry_family
             if family != GeometryFamily.MIXED and family != expected_family:
@@ -2638,6 +2639,16 @@ class MainWindow(QMainWindow):
                 ".shp",
                 ".geojson",
             }:
+                continue
+            if not self._application.can_edit_layer(layer.layer_id):
+                layer_crs = layer.layer.crs
+                crs_blocked_layers.append(
+                    (
+                        layer.layer_id,
+                        layer.name,
+                        layer_crs.name if layer_crs is not None else "未知坐标系",
+                    )
+                )
                 continue
             options.append(
                 TargetLayerOption(
@@ -2652,12 +2663,17 @@ class MainWindow(QMainWindow):
             )
         if target_layer_id is None:
             if not options:
-                QMessageBox.information(
-                    self,
-                    "新增要素",
-                    f"没有可用于添加{label}要素的图层。\n"
-                    "请先打开一个 Shapefile 或 GeoJSON 矢量图层。",
-                )
+                if crs_blocked_layers:
+                    self._show_crs_blocked_digitize_message(
+                        label, snapshot.display_crs, crs_blocked_layers
+                    )
+                else:
+                    QMessageBox.information(
+                        self,
+                        "新增要素",
+                        f"没有可用于添加{label}要素的图层。\n"
+                        "请先打开一个 Shapefile 或 GeoJSON 矢量图层。",
+                    )
                 return
             dialog: TargetLayerDialog = TargetLayerDialog(
                 tuple(options),
@@ -2670,11 +2686,21 @@ class MainWindow(QMainWindow):
                 return
             target_layer_id = dialog.selected_layer_id()
         elif not any(option.layer_id == target_layer_id for option in options):
-            QMessageBox.information(
-                self,
-                "新增要素",
-                f"图层不支持新增{label}要素，请检查图层几何类型和文件格式。",
-            )
+            blocked_names: list[str] = [
+                name
+                for layer_id, name, _crs_name in crs_blocked_layers
+                if layer_id == target_layer_id
+            ]
+            if blocked_names:
+                self._show_crs_blocked_digitize_message(
+                    label, snapshot.display_crs, crs_blocked_layers
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "新增要素",
+                    f"图层不支持新增{label}要素，请检查图层几何类型和文件格式。",
+                )
             return
         if target_layer_id is None:
             return
@@ -2697,6 +2723,34 @@ class MainWindow(QMainWindow):
             f"数字化{label}：左键放置  |  双击完成  |  Esc 取消"
             f"  （将追加到「{target_layer.name}」）"
         )
+
+    def _show_crs_blocked_digitize_message(
+        self,
+        label: str,
+        display_crs: CRS | None,
+        blocked_layers: list[tuple[str, str, str]],
+    ) -> None:
+        """提示因坐标系不一致而无法新增要素的图层及可行做法。
+
+        参数:
+            label: 中文几何类型名（点/线/面）。
+            display_crs: 当前地图显示坐标系。
+            blocked_layers: (图层编号, 图层名, 图层坐标系名) 列表。
+        """
+        display_name: str = display_crs.name if display_crs is not None else "未定义"
+        lines: list[str] = [
+            f"以下图层可以承载{label}要素，但其坐标系与当前地图显示坐标系"
+            f"（{display_name}）不一致，无法编辑："
+        ]
+        lines.extend(
+            f"　·　{layer_name}（{crs_name}）"
+            for _layer_id, layer_name, crs_name in blocked_layers
+        )
+        lines.append(
+            "请在“视图 → 坐标系统”中把显示坐标系切换为该图层的坐标系，"
+            "或在图层属性中重投影该图层后重试。"
+        )
+        QMessageBox.information(self, "新增要素", "\n".join(lines))
 
     def _on_feature_digitized(self, geometry: BaseGeometry) -> None:
         """数字化完成回调：填写属性并追加到活动矢量图层。

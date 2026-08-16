@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from shapely.geometry import LineString, Point, Polygon
 
 import app.presentation.main_window as main_window_module
+from app.application.display_projection_service import DisplayProjectionService
 from app.application.gis_application import GisApplication
 from app.domain.feature import Feature
 from app.domain.map_document import MapDocument
@@ -23,6 +24,9 @@ from app.domain.raster_layer import RasterLayer
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
+from app.infrastructure.projection.pyproj_coordinate_transformer import (
+    PyprojCoordinateTransformer,
+)
 from app.presentation.main_window import MainWindow
 
 CRS_4549: CRS = CRS.from_epsg(4549)
@@ -148,7 +152,14 @@ def _make_window(document: MapDocument) -> MainWindow:
     """创建主窗口并替换为使用指定文档的应用服务。"""
     QApplication.instance() or QApplication([])
     window: MainWindow = MainWindow()
-    window._application = GisApplication(AutoDataReader(), AutoDataWriter(), document)
+    window._application = GisApplication(
+        AutoDataReader(),
+        AutoDataWriter(),
+        document,
+        display_projection_service=DisplayProjectionService(
+            PyprojCoordinateTransformer()
+        ),
+    )
     window._refresh_workspace()
     return window
 
@@ -490,3 +501,87 @@ def test_digitize_polygon_finishes_with_double_click(
     assert features[1].geometry.geom_type == "Polygon"
     assert "已向图层「管理分区」添加面要素" in window._ready_label.text()
     window.close()
+
+
+def _make_raster_layer_epsg4326(layer_id: str) -> RasterLayer:
+    """构造 WGS84 栅格图层，用于先建立与点图层不同的显示坐标系。"""
+    return RasterLayer.create(
+        layer_id=layer_id,
+        name="底图影像",
+        raster_data=np.ones((1, 2, 2), dtype=np.uint8),
+        image_data=np.full((2, 2, 4), 255, dtype=np.uint8),
+        valid_mask=np.ones((2, 2), dtype=np.bool_),
+        transform=Affine(1, 0, 0, 0, -1, 2),
+        crs=CRS.from_epsg(4326),
+        bounds=(0, 0, 2, 2),
+    )
+
+
+def test_add_point_reports_crs_mismatch_reason(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """仅有的点图层因坐标系不一致被排除时，应说明原因和做法。"""
+    messages: list[str] = _collect_messages(monkeypatch)
+    document: MapDocument = MapDocument()
+    document.add_layer(_make_raster_layer_epsg4326("base"))
+    point_layer: VectorLayer = _make_point_layer(
+        "points", tmp_path / "points.shp"
+    )
+    document.add_layer(point_layer)
+    window: MainWindow = _make_window(document)
+
+    window._start_digitize("point", "点")
+
+    assert len(messages) == 1
+    assert "坐标系" in messages[0]
+    assert "监测点" in messages[0]
+    assert "重投影" in messages[0]
+    assert "Shapefile 或 GeoJSON" not in messages[0]
+    window.close()
+
+
+def test_add_point_without_matching_layers_keeps_generic_hint(
+    monkeypatch,
+) -> None:
+    """没有任何几何类型匹配的图层时，仍提示打开矢量图层的通用做法。"""
+    messages: list[str] = _collect_messages(monkeypatch)
+    document: MapDocument = MapDocument()
+    document.add_layer(_make_line_layer("routes", Path("routes.shp")))
+    window: MainWindow = _make_window(document)
+
+    window._start_digitize("point", "点")
+
+    assert len(messages) == 1
+    assert "Shapefile 或 GeoJSON" in messages[0]
+    assert "坐标系" not in messages[0]
+    window.close()
+
+
+def test_specified_digitize_target_distinguishes_crs_and_geometry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """属性表指定目标图层时，坐标系问题与几何/格式问题应分开提示。"""
+    messages: list[str] = _collect_messages(monkeypatch)
+
+    # 场景一：目标点图层坐标系与显示坐标系不一致。
+    document: MapDocument = MapDocument()
+    document.add_layer(_make_raster_layer_epsg4326("base"))
+    point_layer: VectorLayer = _make_point_layer(
+        "points", tmp_path / "points.shp"
+    )
+    document.add_layer(point_layer)
+    window: MainWindow = _make_window(document)
+    window._start_digitize("point", "点", target_layer_id="points")
+    assert "坐标系" in messages[-1]
+    assert "监测点" in messages[-1]
+    window.close()
+
+    # 场景二：目标图层几何类型不匹配（线图层承载点要素）。
+    document_two: MapDocument = MapDocument()
+    line_layer: VectorLayer = _make_line_layer("routes", Path("routes.shp"))
+    document_two.add_layer(line_layer)
+    window_two: MainWindow = _make_window(document_two)
+    window_two._start_digitize("point", "点", target_layer_id="routes")
+    assert "图层不支持新增点要素" in messages[-1]
+    assert "坐标系" not in messages[-1]
+    window_two.close()
