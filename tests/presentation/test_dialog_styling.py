@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
-    QTableWidget,
+    QTableView,
     QToolButton,
     QWidget,
 )
@@ -59,7 +59,9 @@ def test_dialogs_keep_light_readable_background_with_dark_system_palette() -> No
     message_box.show()
     application.processEvents()
 
-    table: QTableWidget = attribute_panel.findChild(QTableWidget)
+    # 属性表使用 QTableView（QTableWidget 的基类）；深色系统调色板下
+    # 仍依赖 QSS 提供浅色背景。
+    table: QTableView = attribute_panel.findChild(QTableView)
     assert table is not None
     assert _pixel_is_light(attribute_panel, QPoint(5, 5))
     assert _pixel_is_light(table, table.rect().center())
@@ -236,14 +238,14 @@ def test_attribute_table_keeps_vertical_scrollbar_visible() -> None:
     panel.set_layer(
         LayerSnapshot(layer=layer, visible=True, selected_feature_ids=())
     )
-    table: QTableWidget = panel.findChild(QTableWidget)
+    table: QTableView = panel.findChild(QTableView)
     panel.show()
     application.processEvents()
 
     assert application is not None
     assert table is not None
     assert table.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
-    assert table.verticalScrollMode() == QTableWidget.ScrollMode.ScrollPerPixel
+    assert table.verticalScrollMode() == QTableView.ScrollMode.ScrollPerPixel
     assert table.verticalScrollBar().isVisible()
 
     panel.close()

@@ -35,7 +35,7 @@ from app.application.results import LayerSnapshot
 from app.domain.feature import Feature
 from app.domain.labeling import LabelClass, LabelPlacement
 from app.domain.layer_style import LayerStyle
-from app.domain.vector_layer import VectorLayer
+from app.domain.vector_layer import Bounds, VectorLayer
 from app.presentation.global_display_settings import selection_color
 
 
@@ -67,6 +67,29 @@ def _simplify_polygon_exteriors_only(
             return geometry
         return MultiPolygon(simplified_polys)
     return geometry
+
+
+def _cull_features(
+    features: tuple[Feature, ...],
+    visible_bounds: Bounds,
+) -> tuple[Feature, ...]:
+    """按包围盒粗筛掉完全位于渲染范围之外的要素。
+
+    只比较包围盒，不做精确相交：边界恰好接触的要素必须保留给 Qt
+    裁剪，且粗筛在 Shapely C 层完成，代价远低于逐要素几何运算。
+    空几何的包围盒为 NaN，比较恒为 False，会在渲染循环中被跳过。
+    """
+    min_x, min_y, max_x, max_y = visible_bounds
+    return tuple(
+        feature
+        for feature in features
+        if not (
+            feature.geometry.bounds[2] < min_x
+            or feature.geometry.bounds[0] > max_x
+            or feature.geometry.bounds[3] < min_y
+            or feature.geometry.bounds[1] > max_y
+        )
+    )
 
 
 _BLEND_MODE_MAP: dict[str, QPainter.CompositionMode] = {
@@ -288,14 +311,17 @@ class QtVectorRenderer:
         snapshot: LayerSnapshot,
         z_value: float,
         map_units_per_pixel: float = 1.0,
+        visible_bounds: Bounds | None = None,
     ) -> list[QGraphicsItem]:
-        """将图层快照完整渲染到场景，并返回创建的图元。
+        """将图层快照渲染到场景，并返回创建的图元。
 
         参数:
             scene: 接收图元的 Qt 地图场景。
             snapshot: 待绘制的矢量图层快照。
             z_value: 图层在场景中的堆叠顺序。
             map_units_per_pixel: 当前视图每个屏幕像素对应的地图单位。
+            visible_bounds: 当前需要渲染的地图范围（含余量）；为空时渲染
+                全部要素。视野外的要素不生成图元，缩小大图层的重建成本。
 
         说明:
             图层级透明度和显示比例范围在渲染时统一应用到全部要素图元。
@@ -308,6 +334,8 @@ class QtVectorRenderer:
             display_features = snapshot.display_payload.features
         else:
             raise TypeError("矢量快照的显示载荷类型无效。")
+        if visible_bounds is not None:
+            display_features = _cull_features(display_features, visible_bounds)
         composition_mode = _BLEND_MODE_MAP.get(
             snapshot.blend_mode,
             QPainter.CompositionMode.CompositionMode_SourceOver,

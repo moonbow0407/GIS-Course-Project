@@ -252,6 +252,90 @@ def test_renderer_repairs_light_text_with_light_halo_for_readability() -> None:
     assert application is not None
 
 
+def test_renderer_culls_features_outside_visible_bounds() -> None:
+    """传入渲染范围时，完全在范围外的要素不应生成图元。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = VectorLayer.create(
+        layer_id="spread-points",
+        name="散点",
+        features=(
+            Feature(fid=1, geometry=Point(0, 0), attributes={}),
+            Feature(fid=2, geometry=Point(50, 50), attributes={}),
+            Feature(fid=3, geometry=Point(100, 100), attributes={}),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    scene = QGraphicsScene()
+
+    items = QtVectorRenderer().render_layer(
+        scene,
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),
+        z_value=0.0,
+        visible_bounds=(40.0, 40.0, 60.0, 60.0),
+    )
+
+    assert application is not None
+    assert {item.data(1) for item in items} == {2}
+
+
+def test_renderer_culling_keeps_boundary_touching_features() -> None:
+    """包围盒恰好接触渲染范围边界的要素应保留，由 Qt 负责最终裁剪。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = VectorLayer.create(
+        layer_id="edge-points",
+        name="边界点",
+        features=(
+            Feature(fid=1, geometry=Point(10.0, 10.0), attributes={}),
+            Feature(fid=2, geometry=Point(20.0, 20.0), attributes={}),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    scene = QGraphicsScene()
+
+    items = QtVectorRenderer().render_layer(
+        scene,
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),
+        z_value=0.0,
+        visible_bounds=(10.0, 10.0, 20.0, 20.0),
+    )
+
+    assert application is not None
+    assert {item.data(1) for item in items} == {1, 2}
+
+
+def test_renderer_culling_applies_to_labels() -> None:
+    """视野外要素的标注应随要素一起裁剪，不生成标签图元。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = VectorLayer.create(
+        layer_id="label-culling",
+        name="标注裁剪",
+        features=(
+            Feature(fid=1, geometry=Point(0, 0), attributes={"name": "远处"}),
+            Feature(fid=2, geometry=Point(50, 50), attributes={"name": "近处"}),
+        ),
+        crs=CRS.from_epsg(4326),
+        labeling=LabelingConfig(
+            enabled=True,
+            classes=(LabelClass(name="名称", field_name="name"),),
+        ),
+    )
+    scene = QGraphicsScene()
+
+    items = QtVectorRenderer().render_layer(
+        scene,
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),
+        z_value=0.0,
+        map_units_per_pixel=1.0,
+        visible_bounds=(45.0, 45.0, 55.0, 55.0),
+    )
+
+    assert application is not None
+    label_fids = {item.data(1) for item in items if item.data(2) == "label"}
+    assert label_fids == {2}
+    # 要素主体同样只剩视野内要素。
+    assert {item.data(1) for item in items if item.data(2) != "label"} == {2}
+
+
 def test_label_stays_near_feature_when_map_units_are_geographic_degrees() -> None:
     """地理坐标系下每像素对应远小于 1 的地图单位时，标注应仍贴在要素锚点附近。
 

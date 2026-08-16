@@ -138,7 +138,133 @@ def test_attribute_table_shows_horizontal_scrollbar_for_many_fields() -> None:
     assert table.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
     assert table.horizontalScrollBar().isVisible()
     style_sheet: str = application.styleSheet()
-    assert "QTableWidget QScrollBar:horizontal" in style_sheet
-    assert "QTableWidget QScrollBar::handle:horizontal" in style_sheet
+    # 属性表为 QTableView；QTableWidget 是其子类，规则同时覆盖两者。
+    assert "QTableView QScrollBar:horizontal" in style_sheet
+    assert "QTableView QScrollBar::handle:horizontal" in style_sheet
     assert "background: #9eb5ca" in style_sheet
     panel.close()
+
+
+def test_attribute_table_model_supplies_values_and_fid_mapping() -> None:
+    """模型应按需提供单元格文本，FID 列在 UserRole 携带原始编号。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = VectorLayer.create(
+        layer_id="roads",
+        name="道路",
+        features=(
+            Feature(fid=1, geometry=Point(0, 0), attributes={"名称": "甲", "等级": 3}),
+            Feature(fid="a-2", geometry=Point(1, 1), attributes={"名称": "乙"}),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    panel = AttributeTablePanel()
+    panel.set_layer(
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=())
+    )
+
+    model = panel._model
+    assert model.columnCount() == 3  # FID + 名称 + 等级
+    assert model.rowCount() == 2
+    assert model.index(0, 0).data(Qt.ItemDataRole.DisplayRole) == "1"
+    assert model.index(0, 0).data(Qt.ItemDataRole.UserRole) == 1
+    assert model.index(1, 0).data(Qt.ItemDataRole.UserRole) == "a-2"
+    assert model.index(0, 2).data(Qt.ItemDataRole.DisplayRole) == "3"
+    assert model.index(1, 2).data(Qt.ItemDataRole.DisplayRole) == ""
+    assert model.row_for_fid("a-2") == 1
+    assert application is not None
+
+
+def test_attribute_table_sorts_numeric_strings_numerically() -> None:
+    """点击表头排序时应按数值而非字典序比较可解析文本。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = VectorLayer.create(
+        layer_id="sort-check",
+        name="排序",
+        features=(
+            Feature(fid=1, geometry=Point(0, 0), attributes={"值": "10"}),
+            Feature(fid=2, geometry=Point(1, 1), attributes={"值": "2"}),
+            Feature(fid=3, geometry=Point(2, 2), attributes={"值": "文本"}),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    panel = AttributeTablePanel()
+    panel.set_layer(
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=())
+    )
+
+    panel._table.sortByColumn(1, Qt.SortOrder.AscendingOrder)
+
+    fids = [
+        panel._model.index(row, 0).data(Qt.ItemDataRole.UserRole)
+        for row in range(panel._model.rowCount())
+    ]
+    assert fids == [2, 1, 3]  # 数值 2 < 10，非数值文本排在最后。
+    assert panel._model.row_for_fid(1) == 1
+    assert application is not None
+
+
+def test_highlight_features_selects_mapped_rows_without_full_scan() -> None:
+    """地图侧高亮应通过 fid 映射直接定位行，而不是逐行扫描。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = VectorLayer.create(
+        layer_id="highlight",
+        name="高亮",
+        features=tuple(
+            Feature(fid=index, geometry=Point(index, index), attributes={})
+            for index in range(50)
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    panel = AttributeTablePanel()
+    panel.set_layer(
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=())
+    )
+
+    panel.highlight_features({7, 41})
+
+    assert panel.selected_feature_ids() == (7, 41)
+    panel.highlight_features(set())
+    assert panel.selected_feature_ids() == ()
+    assert application is not None
+
+
+def test_refresh_layer_restores_selection_after_attribute_edit() -> None:
+    """要素属性编辑刷新后，先前选中的行应按 fid 恢复高亮。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    features: tuple[Feature, ...] = tuple(
+        Feature(fid=index, geometry=Point(index, index), attributes={"名称": f"行{index}"})
+        for index in range(5)
+    )
+    layer = VectorLayer.create(
+        layer_id="editable", name="可编辑", features=features, crs=CRS.from_epsg(4326)
+    )
+    panel = AttributeTablePanel()
+    panel.set_layer(
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=(3,))
+    )
+    panel.highlight_features({3})
+
+    edited_layer = VectorLayer.create(
+        layer_id="editable",
+        name="可编辑",
+        features=tuple(
+            Feature(
+                fid=feature.fid,
+                geometry=feature.geometry,
+                attributes={"名称": "已改"} if feature.fid == 3 else feature.attributes,
+            )
+            for feature in features
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    panel.refresh_layer(
+        LayerSnapshot(
+            layer=edited_layer, visible=True, selected_feature_ids=(3,)
+        )
+    )
+
+    assert panel.selected_feature_ids() == (3,)
+    assert panel._model.index(
+        panel._model.row_for_fid(3), 1
+    ).data(Qt.ItemDataRole.DisplayRole) == "已改"
+    assert application is not None

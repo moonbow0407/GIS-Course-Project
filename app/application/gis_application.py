@@ -10,6 +10,7 @@ from uuid import uuid4
 import numpy as np
 from affine import Affine
 from pyproj import CRS
+from shapely import STRtree
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import split as split_geometry
@@ -315,6 +316,11 @@ class GisApplication:
         self._modified: bool = False
         # 地图书签：按名称保存当前会话的地图视图定位。
         self._bookmarks: dict[str, MapViewState] = {}
+        # 图层要素 STRtree 缓存：图层不可变，按对象身份命中，编辑替换后自动重建。
+        self._feature_index_cache: dict[
+            str,
+            tuple[VectorLayer, STRtree | None, tuple[Feature, ...]],
+        ] = {}
 
     @property
     def project_path(self) -> Path | None:
@@ -1095,9 +1101,16 @@ class GisApplication:
             layer_point: BaseGeometry = self._query_geometry_for_layer(point, layer)
             layer_tolerance: float = self._query_tolerance_for_layer(point, layer, tolerance)
             type_penalty: float = layer_tolerance * 0.01
-            for feature in layer.features:
-                if feature.geometry.is_empty:
-                    continue
+            tree, indexed_features = self._layer_feature_index(layer)
+            if tree is None:
+                continue
+            # 包围盒查询得到候选超集（含零容差时的查询点本身），逐个精确
+            # 计算距离，结果与全量遍历一致；索引按输入序返回保证平局稳定。
+            query_region: BaseGeometry = (
+                layer_point.buffer(layer_tolerance) if layer_tolerance > 0.0 else layer_point
+            )
+            for hit_index in sorted(tree.query(query_region)):
+                feature: Feature = indexed_features[int(hit_index)]
                 distance: float = float(feature.geometry.distance(layer_point))
                 if distance <= layer_tolerance:
                     effective: float = (
@@ -1156,12 +1169,17 @@ class GisApplication:
             layer_point: BaseGeometry = self._query_geometry_for_layer(point, layer)
             layer_tolerance: float = self._query_tolerance_for_layer(point, layer, tolerance)
             type_penalty: float = layer_tolerance * 0.01
+            tree, indexed_features = self._layer_feature_index(layer)
+            if tree is None:
+                continue
+            query_region: BaseGeometry = (
+                layer_point.buffer(layer_tolerance) if layer_tolerance > 0.0 else layer_point
+            )
             nearest_feature: Feature | None = None
             nearest_effective: float = float("inf")
             feature: Feature
-            for feature in layer.features:
-                if feature.geometry.is_empty:
-                    continue
+            for hit_index in sorted(tree.query(query_region)):
+                feature = indexed_features[int(hit_index)]
                 distance: float = float(feature.geometry.distance(layer_point))
                 if distance > layer_tolerance:
                     continue
@@ -1226,10 +1244,15 @@ class GisApplication:
             ):
                 continue
             layer_rectangle: BaseGeometry = self._query_geometry_for_layer(rectangle, layer)
+            tree, indexed_features = self._layer_feature_index(layer)
+            if tree is None:
+                continue
             feature_ids: list[FeatureId] = []
             feature: Feature
-            for feature in layer.features:
-                if not feature.geometry.is_empty and feature.geometry.intersects(layer_rectangle):
+            # 包围盒候选 + 精确相交，语义与逐要素 intersects 遍历一致。
+            for hit_index in sorted(tree.query(layer_rectangle)):
+                feature = indexed_features[int(hit_index)]
+                if feature.geometry.intersects(layer_rectangle):
                     feature_ids.append(feature.fid)
                     selected_features.append(
                         SelectedFeature(
@@ -2315,6 +2338,35 @@ class GisApplication:
                 else None
             ),
         )
+
+    def _layer_feature_index(
+        self,
+        layer: VectorLayer,
+    ) -> tuple[STRtree | None, tuple[Feature, ...]]:
+        """返回图层非空要素的 STRtree 空间索引及对应要素元组。
+
+        图层对象不可变，编辑会生成新对象，因此按对象身份缓存即可保证
+        索引与要素一致。大图层的点选/框选查询从逐要素遍历降为对数级
+        候选查找，再对候选做精确距离/相交计算，结果语义与全量遍历相同。
+
+        返回:
+            (索引, 非空要素元组)；图层没有非空要素时索引为 None。
+        """
+        cached: tuple[VectorLayer, STRtree | None, tuple[Feature, ...]] | None = (
+            self._feature_index_cache.get(layer.layer_id)
+        )
+        if cached is not None and cached[0] is layer:
+            return cached[1], cached[2]
+        indexed_features: tuple[Feature, ...] = tuple(
+            feature for feature in layer.features if not feature.geometry.is_empty
+        )
+        tree: STRtree | None = (
+            STRtree([feature.geometry for feature in indexed_features])
+            if indexed_features
+            else None
+        )
+        self._feature_index_cache[layer.layer_id] = (layer, tree, indexed_features)
+        return tree, indexed_features
 
     def _point_query_order(self) -> tuple[VectorLayer, ...]:
         """返回活动图层优先、其余图层自顶向下的点选顺序。"""

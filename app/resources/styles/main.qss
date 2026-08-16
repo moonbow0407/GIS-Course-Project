@@ -765,7 +765,7 @@ QMessageBox QLabel {
     color: #263548;
 }
 
-QTableWidget {
+QTableView {
     border: 1px solid #d9e1ea;
     background: #ffffff;
     alternate-background-color: #f8fafc;
@@ -775,17 +775,17 @@ QTableWidget {
     selection-color: #0f5f9f;
 }
 
-QTableWidget::item {
+QTableView::item {
     background: #ffffff;
     color: #263548;
     padding: 4px 6px;
 }
 
-QTableWidget::item:alternate {
+QTableView::item:alternate {
     background: #f8fafc;
 }
 
-QTableWidget QScrollBar:vertical {
+QTableView QScrollBar:vertical {
     width: 12px;
     margin: 2px 2px 2px 0;
     border: 1px solid #d9e1ea;
@@ -793,29 +793,29 @@ QTableWidget QScrollBar:vertical {
     background: #eef4fa;
 }
 
-QTableWidget QScrollBar::handle:vertical {
+QTableView QScrollBar::handle:vertical {
     min-height: 28px;
     border-radius: 5px;
     background: #9eb5ca;
 }
 
-QTableWidget QScrollBar::handle:vertical:hover {
+QTableView QScrollBar::handle:vertical:hover {
     background: #6f9bc0;
 }
 
-QTableWidget QScrollBar::add-page:vertical,
-QTableWidget QScrollBar::sub-page:vertical {
+QTableView QScrollBar::add-page:vertical,
+QTableView QScrollBar::sub-page:vertical {
     background: #eef4fa;
 }
 
-QTableWidget QScrollBar::add-line:vertical,
-QTableWidget QScrollBar::sub-line:vertical {
+QTableView QScrollBar::add-line:vertical,
+QTableView QScrollBar::sub-line:vertical {
     height: 14px;
     border: none;
     background: #dce8f2;
 }
 
-QTableWidget QScrollBar:horizontal {
+QTableView QScrollBar:horizontal {
     min-height: 14px;
     max-height: 14px;
     margin: 0 2px 2px 2px;
@@ -824,23 +824,23 @@ QTableWidget QScrollBar:horizontal {
     background: #eef4fa;
 }
 
-QTableWidget QScrollBar::handle:horizontal {
+QTableView QScrollBar::handle:horizontal {
     min-width: 36px;
     border-radius: 5px;
     background: #9eb5ca;
 }
 
-QTableWidget QScrollBar::handle:horizontal:hover {
+QTableView QScrollBar::handle:horizontal:hover {
     background: #6f9bc0;
 }
 
-QTableWidget QScrollBar::add-page:horizontal,
-QTableWidget QScrollBar::sub-page:horizontal {
+QTableView QScrollBar::add-page:horizontal,
+QTableView QScrollBar::sub-page:horizontal {
     background: #eef4fa;
 }
 
-QTableWidget QScrollBar::add-line:horizontal,
-QTableWidget QScrollBar::sub-line:horizontal {
+QTableView QScrollBar::add-line:horizontal,
+QTableView QScrollBar::sub-line:horizontal {
     width: 14px;
     border: none;
     background: #dce8f2;

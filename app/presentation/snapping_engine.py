@@ -52,6 +52,19 @@ class _SnapCandidate:
         return Point((ax + bx) / 2.0, (ay + by) / 2.0)
 
 
+@dataclass
+class _LayerSnapIndex:
+    """单个图层的捕捉候选缓存。
+
+    图层对象不可变（编辑会生成新对象），按对象身份缓存候选与子树；
+    快照刷新和比例范围变化只重组各图层的索引，不再逐要素重建候选。
+    """
+
+    layer: VectorLayer
+    candidates: list[_SnapCandidate]
+    strtree: STRtree | None
+
+
 class SnappingEngine:
     """捕捉引擎：空间索引 + 类型检测。
 
@@ -61,8 +74,10 @@ class SnappingEngine:
 
     def __init__(self) -> None:
         """创建空的捕捉引擎；调用 build_index 填充候选。"""
-        self._strtree: STRtree | None = None
-        self._candidates: list[_SnapCandidate] = []
+        # 按图层编号缓存的候选与子树；图层对象身份变化时失效重建。
+        self._layer_indexes: dict[str, _LayerSnapIndex] = {}
+        # 当前参与捕捉的图层索引列表，按快照自底向上顺序排列。
+        self._active_indexes: list[_LayerSnapIndex] = []
         self._indexed_layer_ids: frozenset[str] = frozenset()
         # 用户可配置参数。
         self._enabled: bool = False
@@ -123,7 +138,7 @@ class SnappingEngine:
             queryable_ids: 当前可查询（可见且未超比例范围）的图层编号集合。
             active_layer_id: 当前活动图层编号；all_layers=False 时仅使用该图层。
         """
-        candidates: list[_SnapCandidate] = []
+        active_indexes: list[_LayerSnapIndex] = []
         target_ids: set[str] = (
             queryable_ids
             if self._all_layers
@@ -136,21 +151,28 @@ class SnappingEngine:
             if not isinstance(layer.layer, VectorLayer):
                 continue
 
-            for feature in layer.layer.features:
-                geom: BaseGeometry = feature.geometry
-                if geom.is_empty:
-                    continue
-                self._collect_candidates(
-                    geom, layer.layer_id, candidates
+            cached: _LayerSnapIndex | None = self._layer_indexes.get(layer.layer_id)
+            if cached is None or cached.layer is not layer.layer:
+                candidates: list[_SnapCandidate] = []
+                for feature in layer.layer.features:
+                    geom: BaseGeometry = feature.geometry
+                    if geom.is_empty:
+                        continue
+                    self._collect_candidates(geom, layer.layer_id, candidates)
+                cached = _LayerSnapIndex(
+                    layer=layer.layer,
+                    candidates=candidates,
+                    strtree=(
+                        STRtree([c.query_point for c in candidates])
+                        if candidates
+                        else None
+                    ),
                 )
+                self._layer_indexes[layer.layer_id] = cached
+            active_indexes.append(cached)
 
         self._indexed_layer_ids = frozenset(target_ids)
-        self._candidates = candidates
-        if candidates:
-            geoms: list[Point] = [c.query_point for c in candidates]
-            self._strtree = STRtree(geoms)
-        else:
-            self._strtree = None
+        self._active_indexes = active_indexes
 
     @staticmethod
     def _collect_candidates(
@@ -219,63 +241,68 @@ class SnappingEngine:
         返回:
             最近的 SnapResult；无命中返回 None。
         """
-        if not self._enabled or self._strtree is None or not self._candidates:
+        if not self._enabled or not self._active_indexes:
             return None
 
         tol_map: float = self._tolerance_pixels * map_units_per_pixel
 
-        # STRtree 范围查询。
         query_geom: Point = Point(cursor_point.x, cursor_point.y)
         query_region: Point = query_geom.buffer(
             tol_map * 2.0
         )  # 放宽容差确保不漏检。
-        try:
-            hit_indices: list[int] = list(self._strtree.query(query_region))
-        except Exception:
-            return None
-
-        if not hit_indices:
-            return None
 
         px, py = cursor_point.x, cursor_point.y
         best: SnapResult | None = None
         best_dist: float = tol_map
 
-        for idx in hit_indices:
-            candidate: _SnapCandidate = self._candidates[idx]
-            kind: str = candidate.kind
-
-            if kind not in self._snap_types:
+        # 逐图层查询各自的子树；图层顺序与候选顺序和整树重建时一致，
+        # 平局时仍按先遇到的候选取胜。
+        for layer_index in self._active_indexes:
+            strtree: STRtree | None = layer_index.strtree
+            if strtree is None:
                 continue
+            try:
+                hit_indices: list[int] = list(strtree.query(query_region))
+            except Exception:
+                continue
+            if not hit_indices:
+                continue
+            candidates: list[_SnapCandidate] = layer_index.candidates
+            for idx in hit_indices:
+                candidate: _SnapCandidate = candidates[idx]
+                kind: str = candidate.kind
 
-            if not self._all_layers and active_layer_id is not None:
-                if candidate.layer_id != active_layer_id:
+                if kind not in self._snap_types:
                     continue
 
-            if kind == "vertex":
-                vx, vy = candidate.data[0], candidate.data[1]
-                d: float = ((px - vx) ** 2 + (py - vy) ** 2) ** 0.5
-                if d < best_dist:
-                    best_dist = d
-                    best = SnapResult(
-                        map_point=Point(vx, vy),
-                        snap_type="vertex",
-                        layer_id=candidate.layer_id,
-                        source_coords=((vx, vy),),
+                if not self._all_layers and active_layer_id is not None:
+                    if candidate.layer_id != active_layer_id:
+                        continue
+
+                if kind == "vertex":
+                    vx, vy = candidate.data[0], candidate.data[1]
+                    d: float = ((px - vx) ** 2 + (py - vy) ** 2) ** 0.5
+                    if d < best_dist:
+                        best_dist = d
+                        best = SnapResult(
+                            map_point=Point(vx, vy),
+                            snap_type="vertex",
+                            layer_id=candidate.layer_id,
+                            source_coords=((vx, vy),),
+                        )
+                elif kind == "edge":
+                    ax, ay, bx, by = candidate.data
+                    d, proj_pt = SnappingEngine._point_to_segment(
+                        px, py, ax, ay, bx, by
                     )
-            elif kind == "edge":
-                ax, ay, bx, by = candidate.data
-                d, proj_pt = SnappingEngine._point_to_segment(
-                    px, py, ax, ay, bx, by
-                )
-                if d < best_dist:
-                    best_dist = d
-                    best = SnapResult(
-                        map_point=proj_pt,
-                        snap_type="edge",
-                        layer_id=candidate.layer_id,
-                        source_coords=((ax, ay), (bx, by)),
-                    )
+                    if d < best_dist:
+                        best_dist = d
+                        best = SnapResult(
+                            map_point=proj_pt,
+                            snap_type="edge",
+                            layer_id=candidate.layer_id,
+                            source_coords=((ax, ay), (bx, by)),
+                        )
 
         return best
 
@@ -308,6 +335,6 @@ class SnappingEngine:
 
     def clear(self) -> None:
         """清除索引和候选。"""
-        self._strtree = None
-        self._candidates.clear()
+        self._layer_indexes.clear()
+        self._active_indexes = []
         self._indexed_layer_ids = frozenset()

@@ -470,8 +470,9 @@ def test_restoring_view_recalculates_point_symbol_scale() -> None:
         display_crs=point_layer.crs,
     )
     canvas.set_snapshot(snapshot)
+    # 恢复中心放在要素位置：深缩放视野外的要素会被视域裁剪，不生成图元。
     canvas.restore_view_state(
-        MapViewState(center_x=5.0, center_y=5.0, zoom_percent=5000.0)
+        MapViewState(center_x=0.0, center_y=0.0, zoom_percent=5000.0)
     )
     application.processEvents()
 
@@ -489,6 +490,7 @@ def test_restoring_view_recalculates_point_symbol_scale() -> None:
         if isinstance(item, QGraphicsPathItem) and item.data(0) == point_layer.layer_id
     ]
     assert point_items
+    assert {item.data(1) for item in point_items} == {1}
     assert max(item.path().boundingRect().width() for item in point_items) < (
         visible_rect.width() * 0.25
     )

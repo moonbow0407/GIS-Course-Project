@@ -41,6 +41,10 @@ from app.presentation.renderers.qt_raster_renderer import QtRasterRenderer
 from app.presentation.renderers.qt_vector_renderer import QtVectorRenderer
 from app.presentation.snapping_engine import SnappingEngine, SnapResult
 
+# 矢量视域裁剪：视口每边向外预留的整幅视口倍数。余量内的平移和未超过
+# 重建阈值的缩放复用现有图元；越出余量后由防抖视口刷新按新视野重渲染。
+_CULL_VIEWPORT_MARGIN: float = 1.0
+
 
 class MapCanvas(QGraphicsView):
     """显示工作区快照并保留基础地图导航能力。"""
@@ -128,6 +132,8 @@ class MapCanvas(QGraphicsView):
         self._viewport_timer.setInterval(180)
         self._viewport_timer.timeout.connect(self._emit_viewport_changed)
         self._last_viewport_key: tuple[float | int, ...] | None = None
+        # 最近一次矢量渲染的裁剪场景范围：视口越出其余量时触发重渲染。
+        self._last_cull_scene_rect: QRectF | None = None
         # 图层图元缓存：按图层编号保存该图层全部 Qt 图元，供显示比例过滤使用。
         self._layer_items: dict[str, list[QGraphicsItem]] = {}
         # 顶点编辑状态。
@@ -225,6 +231,7 @@ class MapCanvas(QGraphicsView):
             self._selected_fids.clear()
             self._snap_engine.clear()
             self._map_scene_rect = None
+            self._last_cull_scene_rect = None
             self._scene.setSceneRect(0, 0, 1000, 700)
             self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
             self._reset_view_scale()
@@ -253,6 +260,8 @@ class MapCanvas(QGraphicsView):
         # 先扩展可平移场景，再测量当前视野，保证点符号尺寸和最终视口一致。
         self._ensure_pan_area()
         self._update_map_units_per_pixel()
+        # 矢量按当前视野加余量裁剪；栅格由视口 worker 单独提供高清窗口。
+        cull_bounds: Bounds | None = self._cull_bounds_for_current_view()
         for z_value, current_layer in enumerate(layer_snapshot):
             if isinstance(current_layer.display_payload, RasterDisplayPayload):
                 raster_item = self._raster_renderer.render_layer(
@@ -265,6 +274,7 @@ class MapCanvas(QGraphicsView):
                     current_layer,
                     float(z_value),
                     self._map_units_per_pixel,
+                    cull_bounds,
                 )
                 self._layer_items[current_layer.layer_id] = vector_items
             elif isinstance(current_layer.layer, RasterLayer):
@@ -279,6 +289,7 @@ class MapCanvas(QGraphicsView):
                     current_layer,
                     float(z_value),
                     self._map_units_per_pixel,
+                    cull_bounds,
                 )
                 self._layer_items[current_layer.layer_id] = vector_items
         queryable_ids: set[str] = set(self._queryable_layer_ids(snapshot))
@@ -363,6 +374,58 @@ class MapCanvas(QGraphicsView):
             return
         self._last_viewport_key = key
         self.viewport_changed.emit(bounds, viewport_size)
+        # 平移不重建矢量；越出裁剪余量后按新视野重渲染，保证新暴露区域有图元。
+        if (
+            self._last_snapshot is not None
+            and self._last_snapshot.layers
+            and self._needs_cull_refresh(visible)
+        ):
+            self.set_snapshot(self._last_snapshot)
+
+    def _cull_bounds_for_current_view(self) -> Bounds | None:
+        """计算当前视口外扩后的矢量渲染裁剪范围（地图坐标，Y 向上）。
+
+        返回:
+            (min_x, min_y, max_x, max_y)；尚未建立地图范围或视口退化时返回
+            None，此时渲染全部要素。
+
+        状态变化:
+            同时把裁剪范围记录到 _last_cull_scene_rect，供导航越界判断。
+        """
+        if self._map_scene_rect is None:
+            self._last_cull_scene_rect = None
+            return None
+        viewport_rect: QRectF = self._visible_scene_rect()
+        if viewport_rect.width() <= 0.0 or viewport_rect.height() <= 0.0:
+            return None
+        margin_x: float = viewport_rect.width() * _CULL_VIEWPORT_MARGIN
+        margin_y: float = viewport_rect.height() * _CULL_VIEWPORT_MARGIN
+        cull_rect: QRectF = viewport_rect.adjusted(-margin_x, -margin_y, margin_x, margin_y)
+        self._last_cull_scene_rect = cull_rect
+        return (
+            cull_rect.left(),
+            -cull_rect.bottom(),
+            cull_rect.right(),
+            -cull_rect.top(),
+        )
+
+    def _needs_cull_refresh(self, viewport_rect: QRectF) -> bool:
+        """判断视口是否已越出矢量裁剪余量，需要按新视野重渲染。
+
+        余量按半个裁剪边距收缩为"核心区"：视口完全位于核心区内时平移
+        后暴露的区域仍被现有图元覆盖，无需重建。
+        """
+        if self._last_snapshot is None or not self._last_snapshot.layers:
+            return False
+        cull_rect = self._last_cull_scene_rect
+        if cull_rect is None:
+            return False
+        margin_x: float = viewport_rect.width() * _CULL_VIEWPORT_MARGIN / 2.0
+        margin_y: float = viewport_rect.height() * _CULL_VIEWPORT_MARGIN / 2.0
+        core_rect: QRectF = cull_rect.adjusted(margin_x, margin_y, -margin_x, -margin_y)
+        if core_rect.width() <= 0.0 or core_rect.height() <= 0.0:
+            return True
+        return not core_rect.contains(viewport_rect)
 
     def capture_view_state(self) -> MapViewState:
         """捕获当前地图中心和相对于全图的缩放比例。"""
