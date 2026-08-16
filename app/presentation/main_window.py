@@ -287,6 +287,10 @@ class MainWindow(QMainWindow):
         # 视口金字塔读取独立于分析/重投影任务；旧请求完成后按编号丢弃。
         self._viewport_request_id: int = 0
         self._viewport_workers: dict[tuple[int, str], RasterViewportWorker] = {}
+        # 每图层正在运行的读取标识与允许提交结果的请求代次：
+        # 同参数读取未完成时不再起新线程，并收养在跑 worker 的结果。
+        self._viewport_layer_running: dict[str, tuple[tuple, int]] = {}
+        self._viewport_layer_accept: dict[str, int] = {}
         # 后台坐标系转换状态：准备完成后才在主线程原子替换地图文档。
         self._crs_worker: CrsReprojectionWorker | None = None
         self._crs_progress_dialog: QProgressDialog | None = None
@@ -5034,7 +5038,10 @@ class MainWindow(QMainWindow):
         viewport_size: tuple[int, int],
     ) -> None:
         """为可见文件栅格启动后台金字塔窗口读取，不干预其他 worker。"""
-        snapshot = self._application.snapshot()
+        # 画布快照与工作区状态一致，导航期间无需再取一次全量快照。
+        snapshot = self._map_canvas.current_snapshot
+        if snapshot is None:
+            return
         self._viewport_request_id += 1
         request_id = self._viewport_request_id
         for layer_snapshot in snapshot.layers:
@@ -5045,6 +5052,21 @@ class MainWindow(QMainWindow):
                 or layer.source_path is None
             ):
                 continue
+            running_mark: tuple = (
+                bounds,
+                viewport_size,
+                layer_snapshot.raster_display_resampling,
+                str(snapshot.display_crs),
+                id(layer),
+            )
+            running = self._viewport_layer_running.get(layer.layer_id)
+            if running is not None and running[0] == running_mark:
+                # 同参数读取已在进行：不再起线程，并把在跑 worker 的结果
+                # 登记为当前视口可接受，避免其完成后被代次号误丢弃。
+                self._viewport_layer_accept[layer.layer_id] = running[1]
+                continue
+            self._viewport_layer_running[layer.layer_id] = (running_mark, request_id)
+            self._viewport_layer_accept[layer.layer_id] = request_id
             request = RasterViewportRequest(
                 request_id=request_id,
                 layer=layer,
@@ -5058,8 +5080,21 @@ class MainWindow(QMainWindow):
             self._viewport_workers[key] = worker
             worker.completed.connect(self._on_raster_viewport_ready)
             worker.failed.connect(self._on_raster_viewport_failed)
-            worker.finished.connect(lambda key=key: self._viewport_workers.pop(key, None))
+            worker.finished.connect(
+                lambda key=key, layer_id=layer.layer_id: self._cleanup_viewport_worker(
+                    key, layer_id
+                )
+            )
             worker.start()
+
+    def _cleanup_viewport_worker(self, key: tuple[int, str], layer_id: str) -> None:
+        """线程结束后注销 worker；同参读取登记只清除仍指向本次请求的条目。"""
+        self._viewport_workers.pop(key, None)
+        running = self._viewport_layer_running.get(layer_id)
+        if running is not None and running[1] == key[0]:
+            del self._viewport_layer_running[layer_id]
+        if self._viewport_layer_accept.get(layer_id) == key[0]:
+            del self._viewport_layer_accept[layer_id]
 
     def _on_raster_viewport_ready(
         self,
@@ -5067,8 +5102,10 @@ class MainWindow(QMainWindow):
         layer_id: str,
         payload: object,
     ) -> None:
-        """仅接纳最新导航请求的载荷，防止慢 I/O 覆盖新视口。"""
-        if request_id != self._viewport_request_id or payload is None:
+        """仅接纳各图层最新导航请求的载荷，防止慢 I/O 覆盖新视口。"""
+        if payload is None:
+            return
+        if request_id != self._viewport_layer_accept.get(layer_id):
             return
         if isinstance(payload, RasterDisplayPayload):
             self._map_canvas.update_raster_viewport(payload)
@@ -5080,7 +5117,7 @@ class MainWindow(QMainWindow):
         message: str,
     ) -> None:
         """最新视口读取失败时保留旧预览并给出非阻塞状态提示。"""
-        if request_id == self._viewport_request_id:
+        if request_id == self._viewport_layer_accept.get(layer_id):
             self._ready_label.setText(f"栅格视口读取失败：{message}")
 
     def _refresh_analysis_history(self, snapshot: WorkspaceSnapshot | None = None) -> None:

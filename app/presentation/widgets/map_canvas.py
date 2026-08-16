@@ -206,6 +206,11 @@ class MapCanvas(QGraphicsView):
         """返回画布当前是否已经建立真实地图范围。"""
         return self._map_scene_rect is not None
 
+    @property
+    def current_snapshot(self) -> WorkspaceSnapshot | None:
+        """返回画布最近一次应用的工作区快照。"""
+        return self._last_snapshot
+
     def queryable_layer_ids(self) -> tuple[str, ...]:
         """返回当前视图中可见且未超出比例范围的图层编号。"""
         if self._last_snapshot is None:

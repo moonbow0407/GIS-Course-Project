@@ -1005,3 +1005,71 @@ def test_set_snapshot_removes_items_of_deleted_layers() -> None:
     assert canvas._layer_items[second.layer_id]
     assert application is not None
     canvas.close()
+
+
+def test_refresh_keeps_raster_viewport_item_instead_of_downgrading() -> None:
+    """工作区刷新不得把画布上的高清视口图元替换回低分辨率预览。
+
+    应用服务的显示缓存对同一图层返回同一预览载荷对象；画布据此在
+    渲染签名中复用现有图元，避免"预览降级再等待高清"的往返闪烁。
+    """
+    application: QApplication = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    raster = RasterLayer.create(
+        layer_id="raster",
+        name="栅格",
+        raster_data=np.ones((1, 4, 4), dtype=np.uint8),
+        image_data=np.full((4, 4, 4), 255, dtype=np.uint8),
+        valid_mask=np.ones((4, 4), dtype=np.bool_),
+        transform=Affine(1, 0, 0, 0, -1, 4),
+        crs=CRS.from_epsg(3857),
+        bounds=(0, 0, 4, 4),
+    )
+    preview_payload = RasterDisplayPayload(
+        layer_id=raster.layer_id,
+        image_data=np.full((4, 4, 4), 255, dtype=np.uint8),
+        transform=Affine(1, 0, 0, 0, -1, 4),
+        bounds=(0, 0, 4, 4),
+    )
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(
+                LayerSnapshot(
+                    layer=raster,
+                    visible=True,
+                    selected_feature_ids=(),
+                    display_payload=preview_payload,
+                ),
+            ),
+            active_layer_id=raster.layer_id,
+            display_crs=raster.crs,
+        )
+    )
+    canvas.update_raster_viewport(
+        RasterDisplayPayload(
+            layer_id=raster.layer_id,
+            image_data=np.full((8, 8, 4), 200, dtype=np.uint8),
+            transform=Affine(0.25, 0, 1, 0, -0.25, 3),
+            bounds=(1, 1, 3, 3),
+        )
+    )
+    hi_res_item = canvas._layer_items[raster.layer_id][0]
+
+    # 模拟 _refresh_workspace：全新外层快照，预览载荷仍是缓存中的同一对象。
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(
+                LayerSnapshot(
+                    layer=raster,
+                    visible=True,
+                    selected_feature_ids=(),
+                    display_payload=preview_payload,
+                ),
+            ),
+            active_layer_id=raster.layer_id,
+            display_crs=raster.crs,
+        )
+    )
+
+    assert application is not None
+    assert canvas._layer_items[raster.layer_id][0] is hi_res_item
