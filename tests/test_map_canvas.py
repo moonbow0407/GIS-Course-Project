@@ -1,6 +1,7 @@
 """地图画布初始状态测试。"""
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 # 必须在导入 Qt 前启用无界面平台，测试才能在没有显示器的环境运行。
@@ -859,3 +860,148 @@ def test_measurement_tools_emit_temporary_geometry_without_editing_layers() -> N
     assert [kind for kind, _geometry in measurements] == ["length", "area"]
     assert canvas._digitize_mode == "none"
     assert application is not None
+
+
+def test_set_snapshot_reuses_unchanged_layer_items() -> None:
+    """未变化图层的图元应在快照刷新时原样复用，不做重建。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    first = VectorLayer.create(
+        layer_id="first",
+        name="第一层",
+        features=(
+            Feature(fid=1, geometry=Point(0, 0), attributes={}),
+            Feature(fid=2, geometry=Point(1, 1), attributes={}),
+        ),
+        crs=CRS.from_epsg(4326),
+    )
+    second = VectorLayer.create(
+        layer_id="second",
+        name="第二层",
+        features=(Feature(fid=1, geometry=Point(2, 2), attributes={}),),
+        crs=CRS.from_epsg(4326),
+    )
+    first_snapshot = LayerSnapshot(layer=first, visible=True, selected_feature_ids=())
+    second_snapshot = LayerSnapshot(layer=second, visible=True, selected_feature_ids=())
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(first_snapshot, second_snapshot),
+            active_layer_id=first.layer_id,
+            display_crs=first.crs,
+        )
+    )
+    first_items = list(canvas._layer_items[first.layer_id])
+    second_items = list(canvas._layer_items[second.layer_id])
+    assert first_items and second_items
+
+    # 模拟一次普通刷新：外层快照对象全新，但图层与载荷身份不变。
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(replace(first_snapshot), replace(second_snapshot)),
+            active_layer_id=first.layer_id,
+            display_crs=first.crs,
+        )
+    )
+
+    assert canvas._layer_items[first.layer_id] == first_items
+    assert canvas._layer_items[second.layer_id] == second_items
+    assert application is not None
+    canvas.close()
+
+
+def test_set_snapshot_rebuilds_layer_when_selection_changes() -> None:
+    """选中集变化只重建该图层，其余图层继续复用旧图元。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    first = VectorLayer.create(
+        layer_id="first",
+        name="第一层",
+        features=(Feature(fid=1, geometry=Point(0, 0), attributes={}),),
+        crs=CRS.from_epsg(4326),
+    )
+    second = VectorLayer.create(
+        layer_id="second",
+        name="第二层",
+        features=(Feature(fid=1, geometry=Point(2, 2), attributes={}),),
+        crs=CRS.from_epsg(4326),
+    )
+    first_snapshot = LayerSnapshot(layer=first, visible=True, selected_feature_ids=())
+    second_snapshot = LayerSnapshot(layer=second, visible=True, selected_feature_ids=())
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(first_snapshot, second_snapshot),
+            active_layer_id=first.layer_id,
+            display_crs=first.crs,
+        )
+    )
+    first_items = list(canvas._layer_items[first.layer_id])
+    second_items = list(canvas._layer_items[second.layer_id])
+
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(
+                replace(first_snapshot, selected_feature_ids=(1,)),
+                replace(second_snapshot),
+            ),
+            active_layer_id=first.layer_id,
+            display_crs=first.crs,
+        )
+    )
+
+    # 选中要素带光晕层，重建后图元对象应全部更换。
+    rebuilt_items = canvas._layer_items[first.layer_id]
+    assert rebuilt_items != first_items
+    assert not any(old is new for old in first_items for new in rebuilt_items)
+    # 未变化图层仍复用旧图元。
+    assert canvas._layer_items[second.layer_id] == second_items
+    assert application is not None
+    canvas.close()
+
+
+def test_set_snapshot_removes_items_of_deleted_layers() -> None:
+    """快照中消失的图层，其图元应从场景中移除。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    first = VectorLayer.create(
+        layer_id="first",
+        name="第一层",
+        features=(Feature(fid=1, geometry=Point(0, 0), attributes={}),),
+        crs=CRS.from_epsg(4326),
+    )
+    second = VectorLayer.create(
+        layer_id="second",
+        name="第二层",
+        features=(Feature(fid=1, geometry=Point(2, 2), attributes={}),),
+        crs=CRS.from_epsg(4326),
+    )
+    first_snapshot = LayerSnapshot(layer=first, visible=True, selected_feature_ids=())
+    second_snapshot = LayerSnapshot(layer=second, visible=True, selected_feature_ids=())
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(first_snapshot, second_snapshot),
+            active_layer_id=first.layer_id,
+            display_crs=first.crs,
+        )
+    )
+
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(replace(second_snapshot),),
+            active_layer_id=second.layer_id,
+            display_crs=second.crs,
+        )
+    )
+
+    assert first.layer_id not in canvas._layer_items
+    assert [
+        item for item in canvas.scene().items() if item.data(0) == first.layer_id
+    ] == []
+    assert canvas._layer_items[second.layer_id]
+    assert application is not None
+    canvas.close()

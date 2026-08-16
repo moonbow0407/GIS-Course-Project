@@ -1,7 +1,7 @@
 """基于领域图层快照的地图画布。"""
 
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -44,6 +44,19 @@ from app.presentation.snapping_engine import SnappingEngine, SnapResult
 # 矢量视域裁剪：视口每边向外预留的整幅视口倍数。余量内的平移和未超过
 # 重建阈值的缩放复用现有图元；越出余量后由防抖视口刷新按新视野重渲染。
 _CULL_VIEWPORT_MARGIN: float = 1.0
+
+
+@dataclass
+class _LayerRenderState:
+    """图层级图元缓存：签名一致时整层图元原样复用。
+
+    属性:
+        signature: 渲染签名，由图层身份、载荷、状态、堆叠顺序和视域组成。
+        items: 该图层当前在场景中的全部图元。
+    """
+
+    signature: tuple
+    items: list[QGraphicsItem]
 
 
 class MapCanvas(QGraphicsView):
@@ -136,6 +149,8 @@ class MapCanvas(QGraphicsView):
         self._last_cull_scene_rect: QRectF | None = None
         # 图层图元缓存：按图层编号保存该图层全部 Qt 图元，供显示比例过滤使用。
         self._layer_items: dict[str, list[QGraphicsItem]] = {}
+        # 图层级增量重建状态：签名一致的图层直接复用缓存图元。
+        self._layer_render_state: dict[str, _LayerRenderState] = {}
         # 顶点编辑状态。
         self._vertex_edit_active: bool = False
         self._edit_geometry: BaseGeometry | None = None
@@ -203,30 +218,24 @@ class MapCanvas(QGraphicsView):
         return self._map_units_per_pixel
 
     def set_snapshot(self, snapshot: WorkspaceSnapshot) -> None:
-        """原子替换场景中的图层图元并适配真实数据范围。
+        """按图层增量更新场景图元并适配真实数据范围。
 
         参数:
             snapshot: 包含真实矢量、栅格图层及显隐状态的工作区快照。
 
         状态变化:
-            清空旧图元并重绘快照；空快照只显示操作引导。
-            Qt 视图变换在 scene.clear / setSceneRect 期间保持不变，
-            无需额外恢复，避免了反复 fitInView 导致的持续缩放漂移。
+            只重建签名变化的图层，未变化图层的图元原样复用；空快照
+            移除全部图元并只显示操作引导。Qt 视图变换在更新期间保持
+            不变，无需额外恢复，避免反复 fitInView 导致的持续缩放漂移。
         """
         is_first_load: bool = self._map_scene_rect is None
 
-        self._scene.clear()
-        # scene.clear() 会销毁全部图元，先清空按图层保存的引用，避免空快照或
-        # 失败回滚时缩放状态仍访问已经删除的 QGraphicsItem。
-        self._layer_items.clear()
-        # scene.clear() 会立即销毁全部 C++ 图元；同步清空 Python 侧临时图元引用，
-        # 否则几何编辑提交后的工具切换会再次 removeItem 并中断查询工具激活。
-        self._vertex_items.clear()
-        self._sketch_items.clear()
-        self._snap_marker = None
-        self._snap_edge_marker = None
+        # 与旧 scene.clear() 行为保持一致：几何编辑、数字化草图和捕捉
+        # 标记都是临时图元，任何快照刷新都应移除，由工具自行重建。
+        self._clear_transient_items()
         self._empty_overlay.setVisible(not snapshot.layers)
         if not snapshot.layers:
+            self._remove_all_layer_items()
             self._last_snapshot = snapshot
             self._selected_fids.clear()
             self._snap_engine.clear()
@@ -262,36 +271,33 @@ class MapCanvas(QGraphicsView):
         self._update_map_units_per_pixel()
         # 矢量按当前视野加余量裁剪；栅格由视口 worker 单独提供高清窗口。
         cull_bounds: Bounds | None = self._cull_bounds_for_current_view()
+        new_render_state: dict[str, _LayerRenderState] = {}
         for z_value, current_layer in enumerate(layer_snapshot):
-            if isinstance(current_layer.display_payload, RasterDisplayPayload):
-                raster_item = self._raster_renderer.render_layer(
-                    self._scene, current_layer, float(z_value)
-                )
-                self._layer_items[current_layer.layer_id] = [raster_item]
-            elif isinstance(current_layer.display_payload, VectorDisplayPayload):
-                vector_items = self._vector_renderer.render_layer(
-                    self._scene,
-                    current_layer,
-                    float(z_value),
-                    self._map_units_per_pixel,
-                    cull_bounds,
-                )
-                self._layer_items[current_layer.layer_id] = vector_items
-            elif isinstance(current_layer.layer, RasterLayer):
-                # 兼容旧调用方直接构造未附带显示载荷的快照。
-                raster_item = self._raster_renderer.render_layer(
-                    self._scene, current_layer, float(z_value)
-                )
-                self._layer_items[current_layer.layer_id] = [raster_item]
-            else:
-                vector_items = self._vector_renderer.render_layer(
-                    self._scene,
-                    current_layer,
-                    float(z_value),
-                    self._map_units_per_pixel,
-                    cull_bounds,
-                )
-                self._layer_items[current_layer.layer_id] = vector_items
+            signature: tuple = self._layer_signature(current_layer, z_value, cull_bounds)
+            previous_state: _LayerRenderState | None = self._layer_render_state.get(
+                current_layer.layer_id
+            )
+            if previous_state is not None and previous_state.signature == signature:
+                # 图层、显示载荷、选择集、视域和堆叠顺序都未变化：整层复用。
+                new_render_state[current_layer.layer_id] = previous_state
+                self._layer_items[current_layer.layer_id] = previous_state.items
+                continue
+            if previous_state is not None:
+                for item in previous_state.items:
+                    self._scene.removeItem(item)
+            rendered_items: list[QGraphicsItem] = self._render_layer_items(
+                current_layer, float(z_value), cull_bounds
+            )
+            new_render_state[current_layer.layer_id] = _LayerRenderState(
+                signature=signature, items=rendered_items
+            )
+            self._layer_items[current_layer.layer_id] = rendered_items
+        # 移除快照中已不存在的图层图元。
+        for removed_layer_id in set(self._layer_render_state) - set(new_render_state):
+            for item in self._layer_render_state[removed_layer_id].items:
+                self._scene.removeItem(item)
+            self._layer_items.pop(removed_layer_id, None)
+        self._layer_render_state = new_render_state
         queryable_ids: set[str] = set(self._queryable_layer_ids(snapshot))
         self._snap_engine.build_index(
             snapshot, queryable_ids, snapshot.active_layer_id
@@ -307,6 +313,86 @@ class MapCanvas(QGraphicsView):
         # 记录本次重建时的地图单位，供缩放时判断是否需要再次重建。
         self._last_render_mupp = self._map_units_per_pixel
         self.schedule_viewport_refresh(force=True)
+
+    def _render_layer_items(
+        self,
+        current_layer: LayerSnapshot,
+        z_value: float,
+        cull_bounds: Bounds | None,
+    ) -> list[QGraphicsItem]:
+        """按图层类型调用渲染器生成图元列表。"""
+        if isinstance(current_layer.display_payload, RasterDisplayPayload):
+            return [
+                self._raster_renderer.render_layer(self._scene, current_layer, z_value)
+            ]
+        if isinstance(current_layer.display_payload, VectorDisplayPayload):
+            return self._vector_renderer.render_layer(
+                self._scene,
+                current_layer,
+                z_value,
+                self._map_units_per_pixel,
+                cull_bounds,
+            )
+        if isinstance(current_layer.layer, RasterLayer):
+            # 兼容旧调用方直接构造未附带显示载荷的快照。
+            return [
+                self._raster_renderer.render_layer(self._scene, current_layer, z_value)
+            ]
+        return self._vector_renderer.render_layer(
+            self._scene,
+            current_layer,
+            z_value,
+            self._map_units_per_pixel,
+            cull_bounds,
+        )
+
+    def _layer_signature(
+        self,
+        layer: LayerSnapshot,
+        z_value: int,
+        cull_bounds: Bounds | None,
+    ) -> tuple:
+        """生成图层渲染签名：签名一致时图元可直接复用。
+
+        领域图层与显示载荷均不可变，对象身份相等即内容相等。矢量签名
+        额外包含视域裁剪范围与地图单位比例，因为点符号尺寸和几何简化
+        都按当时的视野计算；栅格载荷按地理变换放置，与视域无关。
+        """
+        signature: tuple = (
+            id(layer.layer),
+            id(layer.display_payload),
+            layer.visible,
+            layer.opacity,
+            layer.blend_mode,
+            layer.selected_feature_ids,
+            z_value,
+        )
+        if isinstance(layer.layer, RasterLayer):
+            return signature
+        return signature + (cull_bounds, round(self._map_units_per_pixel, 12))
+
+    def _clear_transient_items(self) -> None:
+        """移除编辑顶点、数字化草图和捕捉标记等临时图元。"""
+        for item in self._vertex_items:
+            self._scene.removeItem(item)
+        self._vertex_items.clear()
+        for item in self._sketch_items:
+            self._scene.removeItem(item)
+        self._sketch_items.clear()
+        if self._snap_marker is not None:
+            self._scene.removeItem(self._snap_marker)
+            self._snap_marker = None
+        if self._snap_edge_marker is not None:
+            self._scene.removeItem(self._snap_edge_marker)
+            self._snap_edge_marker = None
+
+    def _remove_all_layer_items(self) -> None:
+        """移除全部图层图元并清空缓存状态。"""
+        for render_state in self._layer_render_state.values():
+            for item in render_state.items:
+                self._scene.removeItem(item)
+        self._layer_render_state.clear()
+        self._layer_items.clear()
 
     def update_raster_viewport(self, payload: RasterDisplayPayload) -> None:
         """只替换一个栅格图层的视口图元，不重建矢量场景或改变视图。
@@ -342,6 +428,11 @@ class MapCanvas(QGraphicsView):
             float(layer_index),
         )
         self._layer_items[payload.layer_id] = [raster_item]
+        # 视口高清图元替换了缓存中的预览图元，同步增量重建状态，
+        # 让后续 set_snapshot 在签名一致时继续复用高清图元。
+        render_state = self._layer_render_state.get(payload.layer_id)
+        if render_state is not None:
+            render_state.items = [raster_item]
         layers = list(self._last_snapshot.layers)
         layers[layer_index] = snapshot_layer
         self._last_snapshot = replace(self._last_snapshot, layers=tuple(layers))

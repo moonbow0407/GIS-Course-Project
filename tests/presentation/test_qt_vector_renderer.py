@@ -393,3 +393,37 @@ def test_label_stays_near_feature_when_map_units_are_geographic_degrees() -> Non
     assert abs(label_item.pos().x() - float(anchor.x)) < max_offset
     assert abs(label_item.pos().y() - (-float(anchor.y))) < max_offset
     assert application is not None
+
+
+def test_renderer_avoids_overlapping_labels_for_close_features() -> None:
+    """位置重叠的要素标注应相互避让，只保留先遇到的标签。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    layer = VectorLayer.create(
+        layer_id="dense-labels",
+        name="密集标注",
+        features=(
+            Feature(fid=1, geometry=Point(50, 50), attributes={"name": "第一个点"}),
+            Feature(fid=2, geometry=Point(50.001, 50.001), attributes={"name": "第二个点"}),
+            Feature(fid=3, geometry=Point(80, 80), attributes={"name": "远处点"}),
+        ),
+        crs=CRS.from_epsg(4326),
+        labeling=LabelingConfig(
+            enabled=True,
+            classes=(LabelClass(name="名称", field_name="name"),),
+        ),
+    )
+    scene = QGraphicsScene()
+
+    items = QtVectorRenderer().render_layer(
+        scene,
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),
+        z_value=0.0,
+        map_units_per_pixel=0.5,
+    )
+
+    assert application is not None
+    label_fids = [item.data(1) for item in items if item.data(2) == "label"]
+    # 前两个要素屏幕位置几乎重合，避让后只保留其一；远处点不受影响。
+    assert len(label_fids) == 2
+    assert 3 in label_fids
+    assert len({1, 2} & set(label_fids)) == 1

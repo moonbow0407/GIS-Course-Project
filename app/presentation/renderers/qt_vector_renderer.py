@@ -1,5 +1,7 @@
 """将 Shapely 矢量几何转换为 Qt 图元。"""
 
+import math
+
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (
     QBrush,
@@ -37,6 +39,10 @@ from app.domain.labeling import LabelClass, LabelPlacement
 from app.domain.layer_style import LayerStyle
 from app.domain.vector_layer import Bounds, VectorLayer
 from app.presentation.global_display_settings import selection_color
+
+# 标注避让网格的单元格边长（屏幕像素）：约等于单个标签高度，
+# 使每个已占矩形平均落在一到四个单元格内。
+_LABEL_GRID_CELL_SIZE: float = 48.0
 
 
 def _simplify_polygon_exteriors_only(
@@ -90,6 +96,44 @@ def _cull_features(
             or feature.geometry.bounds[1] > max_y
         )
     )
+
+
+class _LabelGrid:
+    """标签避让网格：按屏幕像素单元格登记已占用矩形。
+
+    标注数量大时线性扫描全部已占矩形是 O(n²)；标签尺寸相近，用均匀
+    网格把碰撞检测缩小到邻近单元格，平均 O(n)。
+    """
+
+    def __init__(self, cell_size: float) -> None:
+        """以近似单个标签高度的边长划分单元格。"""
+        self._cell: float = max(cell_size, 1.0)
+        self._cells: dict[tuple[int, int], list[QRectF]] = {}
+
+    def _cells_for(self, rect: QRectF) -> tuple[tuple[int, int], ...]:
+        """返回矩形覆盖的全部单元格坐标。"""
+        x_start: int = math.floor(rect.left() / self._cell)
+        x_end: int = math.floor(rect.right() / self._cell)
+        y_start: int = math.floor(rect.top() / self._cell)
+        y_end: int = math.floor(rect.bottom() / self._cell)
+        return tuple(
+            (x, y)
+            for x in range(x_start, x_end + 1)
+            for y in range(y_start, y_end + 1)
+        )
+
+    def collides(self, rect: QRectF) -> bool:
+        """判断矩形与任一已占用矩形相交。"""
+        for cell_key in self._cells_for(rect):
+            for occupied in self._cells.get(cell_key, ()):
+                if rect.intersects(occupied):
+                    return True
+        return False
+
+    def add(self, rect: QRectF) -> None:
+        """登记新占用的矩形。"""
+        for cell_key in self._cells_for(rect):
+            self._cells.setdefault(cell_key, []).append(rect)
 
 
 _BLEND_MODE_MAP: dict[str, QPainter.CompositionMode] = {
@@ -341,6 +385,12 @@ class QtVectorRenderer:
             QPainter.CompositionMode.CompositionMode_SourceOver,
         )
         _needs_blend = composition_mode != QPainter.CompositionMode.CompositionMode_SourceOver
+        labeling = snapshot.layer.labeling
+        # 标注锚点复用主循环已简化的显示几何；被符号规则隐藏的要素不渲染，
+        # 也不再单独生成漂浮标注。
+        label_anchors: list[tuple[Feature, BaseGeometry]] | None = (
+            [] if labeling is not None and labeling.enabled else None
+        )
         items: list[QGraphicsItem] = []
         feature: Feature
         for feature in display_features:
@@ -361,6 +411,8 @@ class QtVectorRenderer:
                 feature.geometry,
                 map_units_per_pixel,
             )
+            if label_anchors is not None:
+                label_anchors.append((feature, display_geometry))
             self._append_geometry(path, display_geometry, point_size)
             if path.isEmpty():
                 continue
@@ -398,7 +450,7 @@ class QtVectorRenderer:
         self._render_labels(
             scene,
             snapshot,
-            display_features,
+            label_anchors,
             z_value,
             map_units_per_pixel,
             items,
@@ -409,28 +461,31 @@ class QtVectorRenderer:
         self,
         scene: QGraphicsScene,
         snapshot: LayerSnapshot,
-        display_features: tuple[Feature, ...],
+        label_anchors: list[tuple[Feature, BaseGeometry]] | None,
         z_value: float,
         map_units_per_pixel: float,
         items: list[QGraphicsItem],
     ) -> None:
-        """按标注类为要素创建动态标签图元。"""
-        if not isinstance(snapshot.layer, VectorLayer):
+        """按标注类为已渲染要素创建动态标签图元。
+
+        参数:
+            label_anchors: (要素, 显示几何) 列表；为空表示图层未启用标注。
+        """
+        if label_anchors is None or not isinstance(snapshot.layer, VectorLayer):
             return
         labeling = snapshot.layer.labeling
         if labeling is None or not labeling.enabled:
             return
-        occupied_rects: list[QRectF] = []
+        occupied = _LabelGrid(_LABEL_GRID_CELL_SIZE)
         for class_index, label_class in enumerate(labeling.classes):
             if not label_class.visible:
                 continue
-            for feature in display_features:
-                if feature.geometry.is_empty:
-                    continue
+            for feature, display_geometry in label_anchors:
                 text: str | None = label_class.text_for(feature)
                 if text is None:
                     continue
-                anchor = feature.geometry.representative_point()
+                # 锚点取自简化后的显示几何，避免对原始几何逐要素求代表点。
+                anchor = display_geometry.representative_point()
                 label_item = _LabelItem(
                     text,
                     QPointF(float(anchor.x), -float(anchor.y)),
@@ -443,9 +498,9 @@ class QtVectorRenderer:
                     2.0,
                     2.0,
                 )
-                if any(collision_rect.intersects(occupied) for occupied in occupied_rects):
+                if occupied.collides(collision_rect):
                     continue
-                occupied_rects.append(collision_rect)
+                occupied.add(collision_rect)
                 label_item.setData(0, snapshot.layer_id)
                 label_item.setData(1, feature.fid)
                 label_item.setData(2, "label")
