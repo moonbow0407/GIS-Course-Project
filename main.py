@@ -29,7 +29,12 @@ def load_style(app: QApplication) -> None:
     """加载全局 QSS，样式文件缺失时保持默认样式运行。"""
     style_path = Path(__file__).resolve().parent / "app" / "resources" / "styles" / "main.qss"
     if style_path.exists():
-        app.setStyleSheet(style_path.read_text(encoding="utf-8"))
+        style_text: str = style_path.read_text(encoding="utf-8")
+        # QSS 中的相对 url() 按进程工作目录解析，file:/// 形式又不会被
+        # background-image 采纳；替换为样式目录的绝对正斜杠路径，保证从
+        # 任意目录启动（含冻结包）都能找到指示块图片。
+        style_text = style_text.replace("__STYLE_DIR__", style_path.parent.as_posix())
+        app.setStyleSheet(style_text)
 
 
 def main() -> int:

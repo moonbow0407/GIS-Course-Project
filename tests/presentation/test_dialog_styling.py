@@ -324,6 +324,22 @@ def _indicator_min_inner_luminance(button: QCheckBox | QRadioButton) -> float:
     return min(values)
 
 
+def _indicator_max_inner_luminance(button: QCheckBox | QRadioButton) -> float:
+    """返回指示块内部区域的最亮像素亮度，用于检测对勾笔画。"""
+    left, top, right, bottom, image = _indicator_rect(button)
+
+    def luminance(x: int, y: int) -> float:
+        color = image.pixelColor(x, y)
+        return 0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue()
+
+    values = [
+        luminance(x, y)
+        for x in range(left + 2, max(right - 1, left + 3))
+        for y in range(top + 2, max(bottom - 1, top + 3))
+    ]
+    return max(values)
+
+
 def test_checkbox_and_radio_indicators_stay_visible_when_checked() -> None:
     """对话框浅色规则下，勾选与未勾选的指示块都应清晰可辨。
 
@@ -337,11 +353,13 @@ def test_checkbox_and_radio_indicators_stay_visible_when_checked() -> None:
     dialog = QDialog()
     checked_box = QCheckBox("显示 NoData")
     checked_box.setChecked(True)
+    unchecked_box = QCheckBox("融合相互重叠的缓冲结果")
     radio_checked = QRadioButton("所有可见图层")
     radio_unchecked = QRadioButton("仅活动图层")
 
     layout = QFormLayout(dialog)
     layout.addRow(checked_box)
+    layout.addRow(unchecked_box)
     layout.addRow(radio_checked)
     layout.addRow(radio_unchecked)
     radio_checked.setChecked(True)
@@ -349,8 +367,14 @@ def test_checkbox_and_radio_indicators_stay_visible_when_checked() -> None:
     application.processEvents()
 
     assert application is not None
-    # 已勾选复选框：蓝色实心块与白色背景对比明显。
+    # 勾选与未勾选复选框：白底描边框始终可见。
     assert _indicator_contrast(checked_box) >= 40.0
+    assert _indicator_contrast(unchecked_box) >= 40.0
+    # 勾选态白底框内出现深色对勾，且大部分区域仍为白底。
+    assert _indicator_min_inner_luminance(checked_box) <= 140.0
+    assert _indicator_max_inner_luminance(checked_box) >= 240.0
+    # 未勾选框内部为空白白底，不能出现对勾或色块。
+    assert _indicator_min_inner_luminance(unchecked_box) >= 200.0
     # 已勾选与未勾选的单选按钮：圆环均可见。
     assert _indicator_contrast(radio_checked) >= 40.0
     assert _indicator_contrast(radio_unchecked) >= 40.0
