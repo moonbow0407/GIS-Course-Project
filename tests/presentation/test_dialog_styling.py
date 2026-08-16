@@ -11,12 +11,18 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
+    QFormLayout,
     QInputDialog,
     QLineEdit,
     QMenu,
     QMessageBox,
+    QRadioButton,
+    QStyle,
+    QStyleOptionButton,
     QTableView,
     QToolButton,
     QWidget,
@@ -255,3 +261,103 @@ def _pixel_is_light(widget: QWidget, point: QPoint) -> bool:
     """判断控件截图指定位置是否为浅色背景。"""
     color: QColor = widget.grab().toImage().pixelColor(point)
     return color.lightness() >= 180
+
+
+def _indicator_rect(button: QCheckBox | QRadioButton) -> tuple[int, int, int, int, object]:
+    """返回复选/单选按钮指示块的像素矩形和所属控件截图。"""
+    option = QStyleOptionButton()
+    button.initStyleOption(option)
+    element = (
+        QStyle.SubElement.SE_RadioButtonIndicator
+        if isinstance(button, QRadioButton)
+        else QStyle.SubElement.SE_CheckBoxIndicator
+    )
+    rect = button.style().subElementRect(element, option, button)
+    image = button.grab().toImage()
+    return (
+        max(rect.left(), 0),
+        max(rect.top(), 0),
+        min(rect.right(), image.width() - 1),
+        min(rect.bottom(), image.height() - 1),
+        image,
+    )
+
+
+def _indicator_contrast(button: QCheckBox | QRadioButton) -> float:
+    """返回指示块像素相对背景的最大亮度对比（边框或内部标记）。
+
+    用逐像素最大偏差而非区域均值：圆形指示块的采样线在四角会取到
+    背景白，均值会低估真实描边对比度。
+    """
+    left, top, right, bottom, image = _indicator_rect(button)
+
+    def luminance(x: int, y: int) -> float:
+        color = image.pixelColor(x, y)
+        return 0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue()
+
+    border_values = [luminance(x, top) for x in range(left, right + 1)]
+    border_values += [luminance(left, y) for y in range(top, bottom + 1)]
+    inner_values = [
+        luminance(x, y)
+        for x in range(left + 2, max(right - 1, left + 3))
+        for y in range(top + 2, max(bottom - 1, top + 3))
+    ]
+    background = luminance(min(right + 6, image.width() - 1), (top + bottom) // 2)
+    border_max = max(abs(value - background) for value in border_values)
+    inner_max = max(abs(value - background) for value in inner_values)
+    return max(border_max, inner_max)
+
+
+def _indicator_min_inner_luminance(button: QCheckBox | QRadioButton) -> float:
+    """返回指示块内部区域的最暗像素亮度，用于检测勾选态的蓝色标记。"""
+    left, top, right, bottom, image = _indicator_rect(button)
+
+    def luminance(x: int, y: int) -> float:
+        color = image.pixelColor(x, y)
+        return 0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue()
+
+    values = [
+        luminance(x, y)
+        for x in range(left + 2, max(right - 1, left + 3))
+        for y in range(top + 2, max(bottom - 1, top + 3))
+    ]
+    return min(values)
+
+
+def test_checkbox_and_radio_indicators_stay_visible_when_checked() -> None:
+    """对话框浅色规则下，勾选与未勾选的指示块都应清晰可辨。
+
+    QDialog QWidget 背景规则命中 QCheckBox/QRadioButton 后，Qt 不再用
+    原生样式绘制指示块；缺少显式 indicator 规则时勾选态会画成空白，
+    用户无法分辨是否勾选（白底白框）。
+    """
+    application: QApplication = QApplication.instance() or QApplication([])
+    load_style(application)
+
+    dialog = QDialog()
+    checked_box = QCheckBox("显示 NoData")
+    checked_box.setChecked(True)
+    radio_checked = QRadioButton("所有可见图层")
+    radio_unchecked = QRadioButton("仅活动图层")
+
+    layout = QFormLayout(dialog)
+    layout.addRow(checked_box)
+    layout.addRow(radio_checked)
+    layout.addRow(radio_unchecked)
+    radio_checked.setChecked(True)
+    dialog.show()
+    application.processEvents()
+
+    assert application is not None
+    # 已勾选复选框：蓝色实心块与白色背景对比明显。
+    assert _indicator_contrast(checked_box) >= 40.0
+    # 已勾选与未勾选的单选按钮：圆环均可见。
+    assert _indicator_contrast(radio_checked) >= 40.0
+    assert _indicator_contrast(radio_unchecked) >= 40.0
+    # 只有已勾选的单选按钮内部出现深色中心点。
+    assert (
+        _indicator_min_inner_luminance(radio_checked)
+        < _indicator_min_inner_luminance(radio_unchecked) - 40.0
+    )
+
+    dialog.close()

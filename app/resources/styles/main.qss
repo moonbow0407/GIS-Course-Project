@@ -720,6 +720,56 @@ QDialog QWidget {
     color: #263548;
 }
 
+/* 上述规则会命中对话框内的 QCheckBox/QRadioButton；一旦设置了背景，
+   Qt 便不再用 Windows 原生样式绘制指示块，而没有显式 indicator 规则时
+   勾选态会画成空白（白底白框，看不出是否勾选）。必须显式定义指示块。 */
+QCheckBox::indicator,
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #6f9bc0;
+    background: #ffffff;
+}
+
+QCheckBox::indicator {
+    border-radius: 3px;
+}
+
+QRadioButton::indicator {
+    border-radius: 8px;
+}
+
+QCheckBox::indicator:hover,
+QRadioButton::indicator:hover {
+    border-color: #0f5f9f;
+}
+
+QCheckBox::indicator:checked {
+    background: #2563eb;
+    border-color: #2563eb;
+}
+
+/* 单选按钮勾选态：蓝色外环 + 中心蓝点，与未选的空白圆环明显区分。 */
+QRadioButton::indicator:checked {
+    border-color: #2563eb;
+    background: qradialgradient(
+        cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5,
+        stop: 0.0 #2563eb, stop: 0.35 #2563eb,
+        stop: 0.42 #ffffff, stop: 1.0 #ffffff
+    );
+}
+
+QCheckBox::indicator:disabled,
+QRadioButton::indicator:disabled {
+    border-color: #c8d4e0;
+    background: #eef4fa;
+}
+
+QCheckBox::indicator:checked:disabled {
+    background: #9eb5ca;
+    border-color: #9eb5ca;
+}
+
 QDialog QGroupBox {
     border: 1px solid #d9e1ea;
     border-radius: 6px;
