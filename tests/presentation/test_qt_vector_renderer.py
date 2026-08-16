@@ -250,3 +250,62 @@ def test_renderer_repairs_light_text_with_light_halo_for_readability() -> None:
 
     assert dark_pixels >= 10
     assert application is not None
+
+
+def test_label_stays_near_feature_when_map_units_are_geographic_degrees() -> None:
+    """地理坐标系下每像素对应远小于 1 的地图单位时，标注应仍贴在要素锚点附近。
+
+    标注文本尺寸来自屏幕像素。若把像素宽高直接当成场景坐标去偏移，
+    在 EPSG:4490 这类以度为单位的显示坐标系中，标签会被整块平移出图斑。
+    """
+    application: QApplication = QApplication.instance() or QApplication([])
+    geometry = Polygon(
+        [
+            (115.0, 28.0),
+            (122.0, 28.0),
+            (122.0, 35.0),
+            (115.0, 35.0),
+            (115.0, 28.0),
+        ]
+    )
+    anchor = geometry.representative_point()
+    map_units_per_pixel = 0.02
+    layer = VectorLayer.create(
+        layer_id="east-china",
+        name="华东行政区",
+        features=(
+            Feature(
+                fid=1,
+                geometry=geometry,
+                attributes={"name": "安徽"},
+            ),
+        ),
+        crs=CRS.from_epsg(4490),
+        labeling=LabelingConfig(
+            enabled=True,
+            classes=(
+                LabelClass(
+                    name="省名",
+                    field_name="name",
+                    placement=LabelPlacement.CENTER,
+                    font_size=18.0,
+                ),
+            ),
+        ),
+    )
+    scene: QGraphicsScene = QGraphicsScene()
+
+    items = QtVectorRenderer().render_layer(
+        scene,
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),
+        z_value=1.0,
+        map_units_per_pixel=map_units_per_pixel,
+    )
+
+    label_item = next(item for item in items if item.data(2) == "label")
+    # 场景纵轴向下，地图纵轴向上；居中标注的图元原点应落在锚点附近，
+    # 偏移不得超过半个文字盒换算成的地图单位再加少量空隙。
+    max_offset = 40.0 * map_units_per_pixel
+    assert abs(label_item.pos().x() - float(anchor.x)) < max_offset
+    assert abs(label_item.pos().y() - (-float(anchor.y))) < max_offset
+    assert application is not None

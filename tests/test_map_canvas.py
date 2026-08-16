@@ -774,6 +774,70 @@ def test_map_canvas_declutters_labels_when_zoomed_out() -> None:
     assert application is not None
 
 
+def test_map_canvas_places_labels_on_polygons_in_geographic_display_crs() -> None:
+    """显示坐标系为经纬度时，标注屏幕位置应落在对应面要素范围内。"""
+    application = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    geometry = Polygon(
+        [
+            (115.0, 28.0),
+            (122.0, 28.0),
+            (122.0, 35.0),
+            (115.0, 35.0),
+            (115.0, 28.0),
+        ]
+    )
+    layer = VectorLayer.create(
+        layer_id="east-china-4490",
+        name="华东行政区",
+        features=(
+            Feature(
+                fid=1,
+                geometry=geometry,
+                attributes={"name": "安徽"},
+            ),
+        ),
+        crs=CRS.from_epsg(4490),
+        labeling=LabelingConfig(
+            enabled=True,
+            classes=(
+                LabelClass(
+                    name="省名",
+                    field_name="name",
+                    placement=LabelPlacement.CENTER,
+                    font_size=18.0,
+                ),
+            ),
+        ),
+    )
+    canvas.set_snapshot(
+        WorkspaceSnapshot(
+            layers=(LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),),
+            active_layer_id=layer.layer_id,
+            display_crs=layer.crs,
+        )
+    )
+    application.processEvents()
+
+    polygon_item = next(
+        item
+        for item in canvas.scene().items()
+        if isinstance(item, QGraphicsPathItem) and item.data(1) == 1
+    )
+    label_item = next(
+        item for item in canvas.scene().items() if item.data(2) == "label"
+    )
+    polygon_rect = canvas.mapFromScene(polygon_item.sceneBoundingRect()).boundingRect()
+    # ItemIgnoresTransformations 下 sceneBoundingRect 会混用像素与地图单位，
+    # 不能用来判断视觉位置；标注原点才是贴在要素上的场景锚点。
+    label_origin = canvas.mapFromScene(label_item.pos())
+
+    assert polygon_rect.contains(label_origin)
+    assert application is not None
+
+
 def test_measurement_tools_emit_temporary_geometry_without_editing_layers() -> None:
     """长度/面积工具应只发出临时几何，不触发要素写回信号。"""
     application = QApplication.instance() or QApplication([])

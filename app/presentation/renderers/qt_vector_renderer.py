@@ -251,20 +251,25 @@ class _LabelItem(QGraphicsItem):
     ) -> None:
         """按九宫格位置把标签左上角放到要素锚点附近。"""
         horizontal, vertical = self._ALIGNMENT[placement]
+        # 文本包围盒来自屏幕像素字号。ItemIgnoresTransformations 只保持绘制
+        # 尺寸不受视图缩放影响，setPos 仍使用场景坐标，因此像素必须先换成
+        # 地图单位。地理坐标系下 1 像素远小于 1 度，漏乘会把标注整块平移出图斑。
+        text_width: float = self._text_bounds.width() * map_units_per_pixel
+        text_height: float = self._text_bounds.height() * map_units_per_pixel
         gap_x: float = 4.0 * map_units_per_pixel
         gap_y: float = 4.0 * map_units_per_pixel
         if horizontal < 0:
-            x = anchor.x() - self._text_bounds.width() - gap_x
+            x = anchor.x() - text_width - gap_x
         elif horizontal > 0:
             x = anchor.x() + gap_x
         else:
-            x = anchor.x() - self._text_bounds.width() / 2.0
+            x = anchor.x() - text_width / 2.0
         if vertical < 0:
-            y = anchor.y() - self._text_bounds.height() - gap_y
+            y = anchor.y() - text_height - gap_y
         elif vertical > 0:
             y = anchor.y() + gap_y
         else:
-            y = anchor.y() - self._text_bounds.height() / 2.0
+            y = anchor.y() - text_height / 2.0
         # 显式偏移允许用户微调位置；scene Y 轴向下，与屏幕坐标一致。
         self.setPos(
             QPointF(
