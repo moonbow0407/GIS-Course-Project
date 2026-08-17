@@ -231,19 +231,20 @@ class MainWindow(QMainWindow):
         self._layout_toolbar.page_setup.connect(self._on_page_setup)
         self._layout_toolbar.zoom_in.connect(self._layout_view.zoom_in)
         self._layout_toolbar.zoom_out.connect(self._layout_view.zoom_out)
-        self._layout_toolbar.zoom_fit.connect(self._layout_view.fit_page)
+        self._layout_toolbar.zoom_fit.connect(
+            self._layout_view.fit_selected_or_page
+        )
         self._layout_toolbar.edit_properties.connect(self._on_edit_properties)
         self._layout_toolbar.export_layout.connect(self._export_layout)
         self._layout_toolbar.delete_selected.connect(self._layout_view._delete_selected)
         self._layout_toolbar.undo.connect(self._layout_view._undo)
-        self._layout_toolbar.redo.connect(self._layout_view._redo)
+        self._layout_toolbar.clear_all.connect(self._layout_view.clear_all_elements)
         self._layout_toolbar.close_requested.connect(self._exit_layout_mode)
-        self._layout_view.element_selected.connect(
-            lambda eid: self._layout_toolbar.set_delete_enabled(eid is not None)
-        )
-        self._layout_view.undo_state_changed.connect(
-            self._on_layout_undo_state_changed
-        )
+        self._layout_toolbar.shortcut_help.connect(self._show_layout_shortcuts)
+        # 布局视图状态变化（元素增删 / 选中 / 撤销栈）统一同步工具栏按钮。
+        self._layout_view.element_selected.connect(self._sync_layout_toolbar_states)
+        self._layout_view.elements_changed.connect(self._sync_layout_toolbar_states)
+        self._layout_view.undo_state_changed.connect(self._sync_layout_toolbar_states)
         self._layout_toolbar.hide()  # 初始隐藏，进入布局视图时才显示
         # 视图栈：在数据视图和布局视图之间切换。
         self._view_stack: QStackedWidget = QStackedWidget()
@@ -4743,10 +4744,19 @@ class MainWindow(QMainWindow):
         self._view_stack.setCurrentWidget(self._map_canvas)
         self._ribbon.set_action_checked("toggle_layout_view", False)
 
-    def _on_layout_undo_state_changed(self, can_undo: bool, can_redo: bool) -> None:
-        """根据布局视图的撤销栈状态刷新工具栏按钮。"""
-        self._layout_toolbar.set_undo_enabled(can_undo)
-        self._layout_toolbar.set_redo_enabled(can_redo)
+    def _sync_layout_toolbar_states(self) -> None:
+        """同步布局工具栏各按钮状态（元素存在性、选中、撤销、清空）。"""
+        document = self._layout_view.document()
+        present = (
+            {type(e).__name__ for e in document.elements}
+            if document is not None else set()
+        )
+        self._layout_toolbar.sync_add_buttons(present)
+        self._layout_toolbar.set_delete_enabled(
+            self._layout_view.selected_element_id is not None
+        )
+        self._layout_toolbar.set_undo_enabled(self._layout_view.can_undo())
+        self._layout_toolbar.set_clear_enabled(self._layout_view.has_elements())
 
     def _restore_layout(
         self, layout_state: "Mapping[str, object] | None"
@@ -4759,6 +4769,15 @@ class MainWindow(QMainWindow):
             self._layout_view.set_document(document)
         except Exception:
             pass
+
+    def _show_layout_shortcuts(self) -> None:
+        """打开布局视图快捷键一览对话框。"""
+        from app.presentation.widgets.layout_shortcut_dialog import (
+            LayoutShortcutDialog,
+        )
+
+        dialog = LayoutShortcutDialog(self)
+        dialog.exec()
 
     def _on_page_setup(self) -> None:
         """打开页面设置对话框并应用新纸张规格。"""
@@ -4804,8 +4823,6 @@ class MainWindow(QMainWindow):
         changes = dialog.changes()
         if changes:
             self._layout_view.apply_element_changes(element_id, changes)
-            self._layout_toolbar.set_undo_enabled(self._layout_view.can_undo())
-            self._layout_toolbar.set_redo_enabled(self._layout_view.can_redo())
 
     def _export_layout(self) -> None:
         """导出布局为 PDF 或图片文件。"""
@@ -4917,11 +4934,7 @@ class MainWindow(QMainWindow):
         self._view_stack.setCurrentWidget(self._layout_view)
         self._layout_toolbar.show()
         self._layout_toolbar.raise_()
-        self._layout_toolbar.set_delete_enabled(
-            self._layout_view.selected_element_id is not None
-        )
-        self._layout_toolbar.set_undo_enabled(self._layout_view.can_undo())
-        self._layout_toolbar.set_redo_enabled(self._layout_view.can_redo())
+        self._sync_layout_toolbar_states()
         self._position_layout_toolbar()
         self._ribbon.set_action_checked("toggle_layout_view", True)
 

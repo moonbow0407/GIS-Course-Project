@@ -1,4 +1,4 @@
-"""布局视图浮动工具栏 —— 添加制图元素、撤销重做和导出操作。"""
+"""布局视图浮动工具栏 —— 添加制图元素、撤销清空和导出操作。"""
 
 from PySide6.QtCore import Signal, SignalInstance
 from PySide6.QtWidgets import (
@@ -17,9 +17,10 @@ class LayoutToolbar(QFrame):
         add_scale_bar: 添加比例尺。
         add_legend: 添加图例。
         add_north_arrow: 添加指北针。
+        add_text: 添加一个文本（支持多实例）。
+        clear_all: 清空图幅中的全部元素。
         delete_selected: 删除选中元素。
         undo: 撤销。
-        redo: 重做。
     """
 
     add_map_frame = Signal()
@@ -36,7 +37,8 @@ class LayoutToolbar(QFrame):
     close_requested = Signal()
     delete_selected = Signal()
     undo = Signal()
-    redo = Signal()
+    clear_all = Signal()
+    shortcut_help = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -48,8 +50,6 @@ class LayoutToolbar(QFrame):
         layout: QHBoxLayout = QHBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(6)
-
-        self._add_buttons: list[QPushButton] = []
 
         # 添加地图框
         self._btn_frame: QPushButton = self._make_add_button("▣ 地图框")
@@ -79,11 +79,10 @@ class LayoutToolbar(QFrame):
         )
         layout.addWidget(self._btn_north)
 
-        # 添加文本
-        self._btn_text: QPushButton = self._make_add_button("T 文本")
-        self._btn_text.clicked.connect(
-            lambda: self._on_add_clicked(self._btn_text, self.add_text)
-        )
+        # 添加文本（普通按钮：点一次加一个，不做高亮切换）
+        self._btn_text: QPushButton = QPushButton("T 文本")
+        self._btn_text.setObjectName("layoutEditBtn")
+        self._btn_text.clicked.connect(self.add_text.emit)
         layout.addWidget(self._btn_text)
 
         # 缩放分隔
@@ -130,12 +129,12 @@ class LayoutToolbar(QFrame):
         self._undo_btn.setEnabled(False)
         layout.addWidget(self._undo_btn)
 
-        # 重做
-        self._redo_btn: QPushButton = QPushButton("↷ 重做")
-        self._redo_btn.setObjectName("layoutEditBtn")
-        self._redo_btn.clicked.connect(self.redo.emit)
-        self._redo_btn.setEnabled(False)
-        layout.addWidget(self._redo_btn)
+        # 清空图幅
+        self._clear_btn: QPushButton = QPushButton("⌫ 清空")
+        self._clear_btn.setObjectName("layoutDeleteBtn")
+        self._clear_btn.clicked.connect(self.clear_all.emit)
+        self._clear_btn.setEnabled(False)
+        layout.addWidget(self._clear_btn)
 
         # 页面设置
         btn_page: QPushButton = QPushButton("⚙ 页面设置")
@@ -154,6 +153,17 @@ class LayoutToolbar(QFrame):
         btn_export.setObjectName("layoutEditBtn")
         btn_export.clicked.connect(self.export_layout.emit)
         layout.addWidget(btn_export)
+
+        # 快捷键一览（独立一栏，分隔线隔开）
+        sep_shortcut: QFrame = QFrame()
+        sep_shortcut.setFrameShape(QFrame.Shape.VLine)
+        sep_shortcut.setStyleSheet("background: #d1d5db; max-width: 1px; min-width: 1px;")
+        layout.addWidget(sep_shortcut)
+
+        btn_shortcut: QPushButton = QPushButton("⌨ 快捷键")
+        btn_shortcut.setObjectName("layoutEditBtn")
+        btn_shortcut.clicked.connect(self.shortcut_help.emit)
+        layout.addWidget(btn_shortcut)
 
         layout.addStretch()
 
@@ -230,22 +240,41 @@ class LayoutToolbar(QFrame):
         """)
 
     def _make_add_button(self, text: str) -> QPushButton:
-        """创建可切换的添加按钮。"""
+        """创建可切换的添加按钮。
+
+        按钮的选中（高亮）状态反映对应元素是否已存在于图幅中，
+        由 sync_add_buttons 根据布局文档状态统一同步。
+        """
         btn: QPushButton = QPushButton(text)
         btn.setObjectName("layoutAddBtn")
         btn.setCheckable(True)
-        self._add_buttons.append(btn)
         return btn
 
     def _on_add_clicked(self, btn: QPushButton, signal: SignalInstance) -> None:
-        """处理添加按钮点击：互斥切换 + 允许取消选中。"""
-        if btn.isChecked():
-            # 刚被选中 → 取消其他按钮，保持当前选中
-            for other in self._add_buttons:
-                if other is not btn:
-                    other.setChecked(False)
-            signal.emit()
-        # 已选中的按钮再次点击变成未选中 → 不做任何操作
+        """处理添加按钮点击：切换对应元素在布局中的显示状态。
+
+        按钮的选中（高亮）状态由布局视图通过 sync_add_buttons 同步，
+        此处只负责转发点击，具体的添加/选中/删除切换在 LayoutView 中完成。
+        """
+        signal.emit()
+
+    def sync_add_buttons(self, present_types: set[str]) -> None:
+        """根据图幅中已存在的元素类型同步添加按钮的高亮状态。
+
+        文本按钮为普通添加按钮（支持多实例），不参与高亮同步，故不在
+        此映射中。
+
+        参数:
+            present_types: 布局文档中已存在元素类型的名称集合。
+        """
+        mapping = {
+            "MapFrameElement": self._btn_frame,
+            "ScaleBarElement": self._btn_scale,
+            "LegendElement": self._btn_legend,
+            "NorthArrowElement": self._btn_north,
+        }
+        for type_name, btn in mapping.items():
+            btn.setChecked(type_name in present_types)
 
     def set_delete_enabled(self, enabled: bool) -> None:
         """启用/禁用删除按钮。"""
@@ -255,6 +284,6 @@ class LayoutToolbar(QFrame):
         """启用/禁用撤销按钮。"""
         self._undo_btn.setEnabled(enabled)
 
-    def set_redo_enabled(self, enabled: bool) -> None:
-        """启用/禁用重做按钮。"""
-        self._redo_btn.setEnabled(enabled)
+    def set_clear_enabled(self, enabled: bool) -> None:
+        """启用/禁用清空按钮。"""
+        self._clear_btn.setEnabled(enabled)
