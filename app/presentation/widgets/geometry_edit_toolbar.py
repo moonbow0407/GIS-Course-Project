@@ -21,6 +21,10 @@ class GeometryEditToolbar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("geometryEditToolbar")
+        # 独立顶层 QWidget 在深色系统主题下不会自动绘制 QSS 背景；显式
+        # 启用样式背景，保证与应用内浅色对话框保持一致。
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setWindowTitle("编辑几何要素")
         self.setWindowFlags(
             Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint
         )

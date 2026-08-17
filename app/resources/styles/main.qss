@@ -630,6 +630,58 @@ QMenu::separator {
     background: #d9e1ea;
 }
 
+/* 几何编辑工具条是独立顶层 QWidget，不会命中下方的 QDialog 规则。
+   显式定义完整状态，避免 Windows 深色主题把窗口和按钮回退为黑色。 */
+QWidget#geometryEditToolbar {
+    background: #ffffff;
+    color: #263548;
+    border: 1px solid #cbd6e2;
+    border-radius: 6px;
+}
+
+QWidget#geometryEditToolbar QPushButton {
+    min-width: 84px;
+    min-height: 30px;
+    padding: 0 12px;
+    border: 1px solid #bfcbd8;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #263548;
+}
+
+QWidget#geometryEditToolbar QPushButton:hover {
+    border-color: #0f6cbd;
+    background: #edf5fc;
+    color: #0f5f9f;
+}
+
+QWidget#geometryEditToolbar QPushButton:pressed {
+    border-color: #0f5f9f;
+    background: #dcecf9;
+    color: #0f4f86;
+}
+
+QWidget#geometryEditToolbar QPushButton:checked,
+QWidget#geometryEditToolbar QPushButton#commitButton {
+    border-color: #0f6cbd;
+    background: #0f6cbd;
+    color: #ffffff;
+}
+
+QWidget#geometryEditToolbar QPushButton:checked:hover,
+QWidget#geometryEditToolbar QPushButton#commitButton:hover {
+    border-color: #0f5f9f;
+    background: #0f5f9f;
+    color: #ffffff;
+}
+
+QWidget#geometryEditToolbar QPushButton:disabled,
+QWidget#geometryEditToolbar QPushButton#commitButton:disabled {
+    border-color: #d9e1ea;
+    background: #f3f6f9;
+    color: #8a99aa;
+}
+
 QDialog,
 QMessageBox {
     background: #ffffff;

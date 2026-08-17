@@ -197,6 +197,13 @@ def test_buffer_analysis_writes_and_activates_new_result_layer(tmp_path: Path) -
     output_layer = cast(VectorLayer, writer.layer)
     assert output_layer.features[0].attributes["名称"] == "甲"
     assert output_layer.features[0].geometry.area == pytest.approx(312.1445, rel=1e-3)
+    # 缓冲面需要保留源要素作为空间参照：仅填充默认 60% 不透明，边界仍保持清晰。
+    assert output_layer.style is not None
+    assert len(output_layer.style.fill_color) == 9
+    assert int(output_layer.style.fill_color[1:3], 16) / 255 == pytest.approx(
+        0.6, abs=1 / 255
+    )
+    assert output_layer.style.opacity == 1.0
     assert len(application.analysis_runs) == 1
     run = application.analysis_runs[0]
     assert run.status == "completed"

@@ -127,13 +127,18 @@ from app.application.symbology_service import (
 )
 from app.domain.feature import AttributeValue, Feature, FeatureId
 from app.domain.labeling import LabelingConfig
-from app.domain.layer_style import GeometryFamily
+from app.domain.layer_style import GeometryFamily, LayerStyle
 from app.domain.layout import LayoutDocument
 from app.domain.lod import LodPyramid
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
-from app.domain.symbology import RasterRendererType, RasterSymbology, VectorSymbology
+from app.domain.symbology import (
+    RasterRendererType,
+    RasterSymbology,
+    VectorRendererType,
+    VectorSymbology,
+)
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.lod.vector_lod_service import VectorLodService
 
@@ -2055,12 +2060,24 @@ class GisApplication:
         source_layer_name: str | None = (
             output_name if output_path.suffix.lower() == ".gpkg" else None
         )
+        buffer_style: LayerStyle = LayerStyle.for_geometry_family(GeometryFamily.POLYGON)
+        # 缓冲结果通常叠放在输入要素上方，仅降低填充透明度以保留原始要素
+        # 作为空间参照；描边继续完全不透明，确保缓冲范围仍然清晰。
+        fill_alpha: int = round(255 * 0.6)
+        buffer_style = replace(
+            buffer_style,
+            fill_color=f"#{fill_alpha:02x}{buffer_style.fill_color.removeprefix('#')}",
+        )
         output_layer: VectorLayer = VectorLayer.create(
             name=output_name,
             features=output_features,
             crs=calculation_crs,
             source_path=output_path,
             source_layer_name=source_layer_name,
+            symbology=VectorSymbology(
+                renderer_type=VectorRendererType.SIMPLE,
+                base_symbol=buffer_style,
+            ),
         )
         self.data_writer.write(output_layer, output_path, (), output_name)
         self._document.add_layer(output_layer)

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QPushButton,
     QRadioButton,
     QStyle,
     QStyleOptionButton,
@@ -34,6 +35,7 @@ from app.domain.feature import Feature
 from app.domain.vector_layer import VectorLayer
 from app.presentation.main_window import MainWindow
 from app.presentation.widgets.attribute_table import AttributeTablePanel
+from app.presentation.widgets.geometry_edit_toolbar import GeometryEditToolbar
 from main import load_style
 
 
@@ -99,6 +101,43 @@ def test_layer_context_menu_keeps_light_readable_background_with_dark_system_pal
     assert _pixel_is_light(menu, QPoint(8, 8))
 
     menu.close()
+    application.setPalette(original_palette)
+
+
+def test_geometry_edit_toolbar_keeps_light_dialog_style_with_dark_system_palette() -> None:
+    """几何编辑浮动工具条在深色系统主题下仍应使用统一的浅色弹窗样式。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    original_palette: QPalette = application.palette()
+    dark_palette: QPalette = QPalette(original_palette)
+    dark_palette.setColor(QPalette.ColorRole.Window, QColor("#202020"))
+    dark_palette.setColor(QPalette.ColorRole.WindowText, QColor("#eeeeee"))
+    dark_palette.setColor(QPalette.ColorRole.Button, QColor("#202020"))
+    dark_palette.setColor(QPalette.ColorRole.ButtonText, QColor("#eeeeee"))
+    application.setPalette(dark_palette)
+    load_style(application)
+
+    toolbar = GeometryEditToolbar()
+    disabled_buttons: tuple[QPushButton, ...] = (
+        toolbar._delete_btn,
+        toolbar._commit_btn,
+    )
+    for button in disabled_buttons:
+        button.setEnabled(False)
+    toolbar.show()
+    application.processEvents()
+
+    style_sheet: str = application.styleSheet()
+    assert "QWidget#geometryEditToolbar" in style_sheet
+    assert "QWidget#geometryEditToolbar QPushButton:checked" in style_sheet
+    assert "QWidget#geometryEditToolbar QPushButton:disabled" in style_sheet
+    # 顶部内边距属于工具条背景；按钮区域另行检查禁用态。
+    assert _pixel_is_light(toolbar, QPoint(toolbar.width() // 2, 2))
+    assert all(
+        _pixel_is_light(button, QPoint(5, button.height() // 2))
+        for button in disabled_buttons
+    )
+
+    toolbar.close()
     application.setPalette(original_palette)
 
 

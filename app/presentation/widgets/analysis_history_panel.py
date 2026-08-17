@@ -1,5 +1,6 @@
 """工程分析历史面板。"""
 
+import html
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 
@@ -21,6 +22,11 @@ class AnalysisHistoryPanel(QWidget):
     """展示空间分析执行历史，并提供记录详情和清除入口。"""
 
     clear_requested = Signal()
+
+    # 原生纯文本提示会被 CRS/WKT 等长字段撑到接近屏幕宽度。富文本表格给 Qt
+    # 一个稳定的换行宽度，长内容则通过零宽空格提供自然的折行位置。
+    _DETAIL_TOOLTIP_WIDTH = 420
+    _DETAIL_WRAP_CHARACTERS = frozenset("\\/,;:[]{}()")
 
     _OPERATION_NAMES: dict[str, str] = {
         "buffer": "缓冲区分析",
@@ -193,24 +199,51 @@ class AnalysisHistoryPanel(QWidget):
             else "未记录"
         )
         lines: list[str] = [
-            f"操作名称：{self._operation_name(run)}",
-            f"状态：{self._status_name(run.status)}",
-            f"开始时间：{self._format_time(run.created_at)}",
-            f"完成时间：{self._format_time(run.completed_at) if run.completed_at else '未完成'}",
-            f"耗时：{duration}",
-            f"输入图层：{input_names}",
-            f"输出结果：{output_names}",
+            self._format_detail_line("操作名称", self._operation_name(run)),
+            self._format_detail_line("状态", self._status_name(run.status)),
+            self._format_detail_line("开始时间", self._format_time(run.created_at)),
+            self._format_detail_line(
+                "完成时间",
+                self._format_time(run.completed_at) if run.completed_at else "未完成",
+            ),
+            self._format_detail_line("耗时", duration),
+            self._format_detail_line("输入图层", input_names),
+            self._format_detail_line("输出结果", output_names),
         ]
         if run.message:
-            lines.extend(("", f"消息：{run.message}"))
+            lines.extend(("", self._format_detail_line("消息", run.message)))
         if run.parameters:
             lines.append("")
-            lines.append("参数：")
+            lines.append("<b>参数：</b>")
             lines.extend(
-                f"  {self._PARAMETER_NAMES.get(key, key)}：{self._format_value(value)}"
+                self._format_detail_line(
+                    self._PARAMETER_NAMES.get(key, key),
+                    self._format_value(value),
+                    indent=True,
+                )
                 for key, value in run.parameters.items()
             )
-        return "\n".join(lines)
+        content: str = "<br>".join(lines)
+        return (
+            f'<table width="{self._DETAIL_TOOLTIP_WIDTH}" cellspacing="0" cellpadding="2">'
+            f'<tr><td style="white-space: normal;">{content}</td></tr></table>'
+        )
+
+    @classmethod
+    def _format_detail_line(cls, label: str, value: object, *, indent: bool = False) -> str:
+        """格式化详情字段，并为超长值提供不会显示出来的换行点。"""
+        prefix: str = "&nbsp;&nbsp;" if indent else ""
+        safe_label: str = html.escape(label)
+        safe_value: str = html.escape(cls._add_wrap_opportunities(str(value)), quote=False)
+        return f"{prefix}<b>{safe_label}：</b>{safe_value}"
+
+    @classmethod
+    def _add_wrap_opportunities(cls, value: str) -> str:
+        """在路径和结构化文本分隔符后插入零宽空格，避免提示框横向膨胀。"""
+        return "".join(
+            f"{character}\u200b" if character in cls._DETAIL_WRAP_CHARACTERS else character
+            for character in value
+        )
 
     def _format_layer_names(self, layer_ids: Sequence[str]) -> str:
         """把图层编号转换为用户可读名称。"""

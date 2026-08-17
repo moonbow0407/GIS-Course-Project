@@ -5,7 +5,8 @@ import os
 # 必须在导入 Qt 前启用无界面平台，测试才能在 CI 中创建原生控件。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QDockWidget, QLabel
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QApplication, QDockWidget, QLabel, QToolTip
 
 from app.application.project_models import AnalysisOutputReference, AnalysisRun
 from app.presentation.main_window import MainWindow
@@ -150,6 +151,46 @@ def test_history_panel_shows_chinese_names_for_raster_runs() -> None:
     tooltip = panel._history_list.item(0).toolTip()
     assert "波段序号" in tooltip
     assert "band_index" not in tooltip
+
+
+def test_history_tooltip_wraps_long_details_with_a_limited_width() -> None:
+    """超长路径和 CRS 应在窄提示框中换行，同时保留完整详情。"""
+    qt_application: QApplication = QApplication.instance() or QApplication([])
+    panel = AnalysisHistoryPanel()
+    long_crs = (
+        'PROJCS["NAD83 / Vermont",GEOGCS["NAD83"],DATUM["North_American_Datum_1983"],'
+        'PROJECTION["Transverse_Mercator"],PARAMETER["central_meridian",-72.5]]'
+    )
+    output_path = r"D:\workspace\gis_lab\sample_data\缓冲区分析\road_impact.geojson"
+    run = make_run(
+        "long-detail",
+        "2026-07-29T10:00:00+00:00",
+        parameters={"calculation_crs": long_crs, "output_path": output_path},
+    )
+
+    panel.set_history((run,), {"roads": "道路", "result-long-detail": "道路缓冲区"})
+    qt_application.processEvents()
+
+    tooltip = panel._history_list.item(0).toolTip()
+    assert f'width="{panel._DETAIL_TOOLTIP_WIDTH}"' in tooltip
+    assert "<br>" in tooltip
+    assert "\u200b" in tooltip
+    tooltip_without_wrap_hints = tooltip.replace("\u200b", "")
+    assert long_crs in tooltip_without_wrap_hints
+    assert output_path in tooltip_without_wrap_hints
+    assert ",\u200b" in tooltip
+    assert "\\\u200b" in tooltip
+
+    panel.show()
+    QToolTip.showText(QPoint(20, 20), tooltip, panel)
+    qt_application.processEvents()
+    tooltip_widgets = [
+        widget for widget in QApplication.topLevelWidgets() if widget.inherits("QTipLabel")
+    ]
+    assert tooltip_widgets
+    assert tooltip_widgets[0].width() <= panel._DETAIL_TOOLTIP_WIDTH + 40
+    QToolTip.hideText()
+    panel.close()
 
 
 def test_history_operation_names_match_ribbon_analysis_actions() -> None:
