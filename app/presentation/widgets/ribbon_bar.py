@@ -285,7 +285,19 @@ class RibbonBar(QWidget):
                         RibbonActionSpec("zoom_rect", "框选放大", "▭", "#0f766e"),
                         RibbonActionSpec("full_extent", "全图显示", "⌗", "#0f766e"),
                     )),
-                    RibbonGroupSpec("查询", (
+                    RibbonGroupSpec("地图", (
+                        RibbonActionSpec("refresh_map", "刷新地图", "↻", "#0f766e"),
+                    )),
+                    RibbonGroupSpec("测量", (
+                        RibbonActionSpec("measure_length", "测量长度", "↔", "#0891b2"),
+                        RibbonActionSpec("measure_area", "测量面积", "▱", "#0891b2"),
+                    )),
+                ),
+            ),
+            (
+                "编辑",
+                (
+                    RibbonGroupSpec("要素查询", (
                         RibbonActionSpec(
                             "point_query",
                             "点选查询",
@@ -303,20 +315,8 @@ class RibbonBar(QWidget):
                         RibbonActionSpec(
                             "attribute_query", "属性查询", "≣", "#7c3aed", checkable=True
                         ),
-                    )),
-                    RibbonGroupSpec("地图", (
                         RibbonActionSpec("clear_selection", "清除选择", "×", "#dc2626"),
-                        RibbonActionSpec("refresh_map", "刷新地图", "↻", "#0f766e"),
                     )),
-                    RibbonGroupSpec("测量", (
-                        RibbonActionSpec("measure_length", "测量长度", "↔", "#0891b2"),
-                        RibbonActionSpec("measure_area", "测量面积", "▱", "#0891b2"),
-                    )),
-                ),
-            ),
-            (
-                "编辑",
-                (
                     RibbonGroupSpec("要素编辑", (
                         RibbonActionSpec(
                             "add_feature",
@@ -446,7 +446,9 @@ class RibbonBar(QWidget):
         btn: QToolButton | None = self._checkable_buttons.get(action_id)
         return btn.isChecked() if btn is not None else False
 
-    def set_action_enabled(self, action_id: str, enabled: bool) -> None:
+    def set_action_enabled(
+        self, action_id: str, enabled: bool, reason: str = ""
+    ) -> None:
         """设置操作按钮的可用状态；禁用后不再响应点击并显示弱化样式。
 
         参数:
@@ -456,6 +458,8 @@ class RibbonBar(QWidget):
         button: QToolButton | None = self._all_buttons.get(action_id)
         if button is not None:
             button.setEnabled(enabled)
+            title = self.action_title(action_id) or action_id
+            button.setToolTip(title if enabled or not reason else f"{title}：{reason}")
 
     @classmethod
     def action_title(cls, action_id: str) -> str | None:

@@ -459,21 +459,29 @@ def test_batch_delete_writes_back_once_per_layer_and_supports_undo(
     )
 
     replace_calls: list[tuple[str, int]] = []
+    patch_calls: list[tuple[str, int]] = []
     delete_calls: list[object] = []
     original_replace = application.replace_layer_features
+    original_apply = application.apply_feature_edit
 
     def _counting_replace(layer_id: str, features: tuple) -> object:
         replace_calls.append((layer_id, len(features)))
         return original_replace(layer_id, features)
 
+    def _counting_apply(layer_id: str, revision: int, patch) -> object:
+        patch_calls.append((layer_id, len(patch.deletions)))
+        return original_apply(layer_id, revision, patch)
+
     application.replace_layer_features = _counting_replace  # type: ignore[method-assign]
+    application.apply_feature_edit = _counting_apply  # type: ignore[method-assign]
     application.delete_feature = (  # type: ignore[method-assign]
         lambda layer_id, fid: delete_calls.append(fid)
     )
 
     window._delete_selected_features()
 
-    assert replace_calls == [("a", 1)]
+    assert patch_calls == [("a", 2)]
+    assert replace_calls == []
     assert delete_calls == []
     remaining = window._application.snapshot().layers[0].layer.features
     assert [f.attributes["名称"] for f in remaining] == ["丙"]
@@ -485,6 +493,7 @@ def test_batch_delete_writes_back_once_per_layer_and_supports_undo(
     window._redo()
     after_redo = window._application.snapshot().layers[0].layer.features
     assert [f.attributes["名称"] for f in after_redo] == ["丙"]
+    assert replace_calls == [("a", 3), ("a", 1)]
     window.close()
 
 

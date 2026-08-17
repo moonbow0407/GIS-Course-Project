@@ -10,7 +10,7 @@ from uuid import uuid4
 import numpy as np
 from affine import Affine
 from pyproj import CRS
-from shapely import STRtree
+from shapely import STRtree, get_coordinates
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import split as split_geometry
@@ -58,6 +58,11 @@ from app.application.errors import (
     UnsupportedBufferInput,
     UnsupportedOverlayInput,
     WorkspaceOperationCancelled,
+)
+from app.application.feature_editing import (
+    FeatureEditPatch,
+    FeatureEditResult,
+    FeatureGeometryReplacement,
 )
 from app.application.measurement import MeasurementResult, measure_area, measure_length
 from app.application.overlay_analysis import (
@@ -1464,23 +1469,12 @@ class GisApplication:
             geometry=geometry,
             attributes=dict(attributes),
         )
-        updated: VectorLayer = VectorLayer.create(
-            layer_id=layer.layer_id,
-            name=layer.name,
-            features=layer.features + (feature,),
-            crs=layer.crs,
-            source_path=layer.source_path,
-            source_layer_name=layer.source_layer_name,
-            database_layer_id=layer.database_layer_id,
-            symbology=layer.symbology,
-            labeling=layer.labeling,
-            crs_override=layer.crs_override,
+        result = self.apply_feature_edit(
+            layer_id,
+            self._document.layer_revision(layer_id),
+            FeatureEditPatch(additions=(feature,)),
         )
-        # 先写盘后提交内存：写回失败时文档要素、选择集和修改状态保持不变。
-        self._write_layer_to_source(updated)
-        self._document.replace_layer(updated)
-        self._modified = True
-        return self.snapshot()
+        return result.snapshot
 
     def delete_feature(self, layer_id: str, fid: FeatureId) -> WorkspaceSnapshot:
         """从图层中删除指定要素并写回磁盘。
@@ -1495,31 +1489,12 @@ class GisApplication:
         if not isinstance(layer, VectorLayer):
             raise ApplicationError("只能删除矢量图层中的要素。")
         self._ensure_editable_layer(layer)
-        remaining: tuple[Feature, ...] = tuple(
-            f for f in layer.features if f.fid != fid
+        self.apply_feature_edit(
+            layer_id,
+            self._document.layer_revision(layer_id),
+            FeatureEditPatch(deletions=(fid,)),
         )
-        if not remaining:
-            raise ApplicationError(
-                "暂不支持删除图层中的最后一个要素；如需移除数据，请删除整个图层。"
-            )
-        updated: VectorLayer = VectorLayer.create(
-            layer_id=layer.layer_id,
-            name=layer.name,
-            features=remaining,
-            crs=layer.crs,
-            source_path=layer.source_path,
-            source_layer_name=layer.source_layer_name,
-            database_layer_id=layer.database_layer_id,
-            symbology=layer.symbology,
-            labeling=layer.labeling,
-            crs_override=layer.crs_override,
-        )
-        # 先写盘后提交内存：写回失败时文档要素、选择集、revision
-        # 和修改状态保持不变，异常继续上抛由界面显示中文提示。
-        self._write_layer_to_source(updated)
-        self._document.replace_layer(updated)
         self._document.clear_selection()
-        self._modified = True
         return self.snapshot()
 
     def update_feature_attributes(
@@ -1558,23 +1533,94 @@ class GisApplication:
         return self.snapshot()
 
     def update_feature_geometry(
-        self, layer_id: str, fid: FeatureId, geometry: object
+        self, layer_id: str, fid: FeatureId, geometry: BaseGeometry
     ) -> WorkspaceSnapshot:
         """修改指定要素的几何形状并写回磁盘。"""
-        layer: SpatialLayer = self._find_layer(layer_id)
-        if not isinstance(layer, VectorLayer):
-            raise ApplicationError("只能修改矢量图层中的要素几何。")
-        self._ensure_editable_layer(layer)
-        updated_features: tuple[Feature, ...] = tuple(
-            Feature(fid=f.fid, geometry=geometry, attributes=f.attributes)
-            if f.fid == fid
-            else f
-            for f in layer.features
+        result = self.apply_feature_edit(
+            layer_id,
+            self._document.layer_revision(layer_id),
+            FeatureEditPatch(
+                replacements=(FeatureGeometryReplacement(fid, geometry),)
+            ),
         )
-        updated_layer: VectorLayer = VectorLayer.create(
+        return result.snapshot
+
+    def feature_edit_revision(self, layer_id: str) -> int:
+        """返回启动要素编辑会话时应锁定的图层修订号。"""
+        layer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ApplicationError("只能编辑矢量图层中的要素。")
+        return self._document.layer_revision(layer_id)
+
+    def apply_feature_edit(
+        self,
+        layer_id: str,
+        expected_revision: int,
+        patch: FeatureEditPatch,
+    ) -> FeatureEditResult:
+        """校验并原子应用同一图层的一组要素编辑。
+
+        写回顺序固定为“构造最终集合 → 一次写盘 → 一次替换内存”。
+        revision 冲突或写盘失败时，内存图层、选择集和修改标记均保持不变。
+        """
+        layer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ApplicationError("只能编辑矢量图层中的要素。")
+        self._ensure_editable_layer(layer)
+        if self._document.layer_revision(layer_id) != expected_revision:
+            raise ApplicationError(
+                f"图层「{layer.name}」已被其他操作修改，请取消当前预览后重新编辑。"
+            )
+        if patch.is_empty:
+            raise ApplicationError("编辑补丁不包含任何变更。")
+
+        before_features = layer.features
+        existing_by_fid = {feature.fid: feature for feature in before_features}
+        replacement_by_fid: dict[FeatureId, BaseGeometry] = {}
+        for replacement in patch.replacements:
+            if replacement.fid in replacement_by_fid:
+                raise ApplicationError(f"要素 FID {replacement.fid} 被重复替换。")
+            if replacement.fid not in existing_by_fid:
+                raise ApplicationError(f"未找到待替换要素 FID {replacement.fid}。")
+            self._validate_edit_geometry(layer, replacement.geometry)
+            replacement_by_fid[replacement.fid] = replacement.geometry
+
+        deletion_set = set(patch.deletions)
+        if len(deletion_set) != len(patch.deletions):
+            raise ApplicationError("删除集合包含重复的 FID。")
+        missing_deletions = deletion_set.difference(existing_by_fid)
+        if missing_deletions:
+            raise ApplicationError(f"未找到待删除要素 FID {next(iter(missing_deletions))}。")
+        conflict = deletion_set.intersection(replacement_by_fid)
+        if conflict:
+            raise ApplicationError(f"要素 FID {next(iter(conflict))} 不能同时替换和删除。")
+
+        addition_fids = [feature.fid for feature in patch.additions]
+        if len(set(addition_fids)) != len(addition_fids):
+            raise ApplicationError("新增集合包含重复的 FID。")
+        if set(addition_fids).intersection(existing_by_fid):
+            raise ApplicationError("新增要素 FID 与图层中的已有要素冲突。")
+        for feature in patch.additions:
+            self._validate_edit_geometry(layer, feature.geometry)
+
+        after_features = tuple(
+            Feature(
+                fid=feature.fid,
+                geometry=replacement_by_fid.get(feature.fid, feature.geometry),
+                attributes=feature.attributes,
+            )
+            for feature in before_features
+            if feature.fid not in deletion_set
+        ) + patch.additions
+        if not after_features:
+            raise ApplicationError(
+                "暂不支持删除图层中的最后一个要素；如需移除数据，请删除整个图层。"
+            )
+
+        updated = VectorLayer.create(
             layer_id=layer.layer_id,
             name=layer.name,
-            features=updated_features,
+            features=after_features,
             crs=layer.crs,
             source_path=layer.source_path,
             source_layer_name=layer.source_layer_name,
@@ -1583,11 +1629,21 @@ class GisApplication:
             labeling=layer.labeling,
             crs_override=layer.crs_override,
         )
-        # 先写盘后提交内存：写回失败时文档要素、选择集和修改状态保持不变。
-        self._write_layer_to_source(updated_layer)
-        self._document.replace_layer(updated_layer)
+        self._write_layer_to_source(updated)
+        selected_before = self._document.selected_feature_ids(layer_id)
+        self._document.replace_layer(updated)
+        remaining_fids = {feature.fid for feature in after_features}
+        self._document.set_selection(
+            layer_id,
+            tuple(fid for fid in selected_before if fid in remaining_fids),
+        )
         self._modified = True
-        return self.snapshot()
+        return FeatureEditResult(
+            layer_id=layer_id,
+            before_features=before_features,
+            after_features=after_features,
+            snapshot=self.snapshot(),
+        )
 
     def simplify_feature_geometry(
         self, layer_id: str, fid: FeatureId, tolerance: float
@@ -1665,7 +1721,7 @@ class GisApplication:
     def split_feature(
         self, layer_id: str, fid: FeatureId, cutting_line: BaseGeometry,
     ) -> list[BaseGeometry]:
-        """用切割线拆分一个面要素。
+        """用切割线拆分一个线或面要素。
 
         参数:
             layer_id: 图层编号。
@@ -1676,7 +1732,7 @@ class GisApplication:
             拆分后的几何列表，至少包含 2 个部分。
 
         异常:
-            ApplicationError: 拆分失败或要素不是面类型。
+            ApplicationError: 拆分失败或要素不是线、面类型。
         """
         layer: SpatialLayer = self._find_layer(layer_id)
         if not isinstance(layer, VectorLayer):
@@ -1688,9 +1744,14 @@ class GisApplication:
         if target is None:
             raise ApplicationError("未找到目标要素。")
         geom_type: str = target.geometry.geom_type
-        if geom_type not in ("Polygon", "MultiPolygon"):
+        if geom_type not in (
+            "LineString",
+            "MultiLineString",
+            "Polygon",
+            "MultiPolygon",
+        ):
             raise ApplicationError(
-                f"只能拆分面要素，当前要素类型为 {geom_type}。"
+                f"只能拆分线或面要素，当前要素类型为 {geom_type}。"
             )
         result = split_geometry(target.geometry, cutting_line)
         if result is None or len(result.geoms) < 2:
@@ -1774,8 +1835,26 @@ class GisApplication:
         family: GeometryFamily | None = family_by_type.get(geometry.geom_type)
         if family is None or family != layer.geometry_family:
             raise ApplicationError(
-                f"几何类型与图层「{layer.name}」不符，无法追加要素。"
+                f"几何类型与图层「{layer.name}」的几何类别不符，无法追加要素。"
             )
+
+    @classmethod
+    def _validate_edit_geometry(
+        cls, layer: VectorLayer, geometry: BaseGeometry
+    ) -> None:
+        """校验补丁几何不会造成空值、降维或不可写坐标。"""
+        if not isinstance(geometry, BaseGeometry):
+            raise ApplicationError("编辑结果不是有效的 Shapely 几何对象。")
+        if geometry.is_empty:
+            raise ApplicationError("编辑结果不能为空几何。")
+        if geometry.geom_type == "GeometryCollection":
+            raise ApplicationError("GeometryCollection 暂不支持要素编辑。")
+        coordinates = get_coordinates(geometry)
+        if coordinates.size == 0 or not bool(np.isfinite(coordinates).all()):
+            raise ApplicationError("几何坐标必须全部为有限数值。")
+        if geometry.geom_type in ("Polygon", "MultiPolygon") and not geometry.is_valid:
+            raise ApplicationError("编辑结果包含无效面几何，请修正自相交或环结构。")
+        cls._validate_append_geometry(layer, geometry)
 
     @staticmethod
     def _next_feature_id(layer: VectorLayer) -> FeatureId:

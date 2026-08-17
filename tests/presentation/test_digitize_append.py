@@ -500,6 +500,9 @@ def test_digitize_line_finishes_with_double_click(
     QTest.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, second)
     QTest.mouseDClick(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, second)
 
+    assert window._feature_edit_controller.active
+    assert len(window._application.snapshot().layers[0].layer.features) == 1
+    window._on_geom_edit_commit()
     features = window._application.snapshot().layers[0].layer.features
     assert len(features) == 2
     added = features[1].geometry
@@ -537,6 +540,9 @@ def test_digitize_polygon_finishes_with_double_click(
     QTest.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, third)
     QTest.mouseDClick(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, third)
 
+    assert window._feature_edit_controller.active
+    assert len(window._application.snapshot().layers[0].layer.features) == 1
+    window._on_geom_edit_commit()
     features = window._application.snapshot().layers[0].layer.features
     assert len(features) == 2
     assert features[1].geometry.geom_type == "Polygon"

@@ -26,6 +26,7 @@ from app.domain.labeling import LabelClass, LabelingConfig, LabelPlacement
 from app.domain.raster_layer import RasterLayer
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.file_io.auto_reader import AutoDataReader
+from app.presentation.widgets.geometry_edit_toolbar import GeometryEditToolbar
 from app.presentation.widgets.map_canvas import MapCanvas
 
 
@@ -36,7 +37,55 @@ def test_canvas_starts_without_mock_map_items() -> None:
 
     assert application is not None
     assert canvas.scene().items() == []
-    assert canvas.scene().items() == []
+
+
+def test_edit_context_toolbar_is_embedded_at_canvas_top() -> None:
+    """编辑上下文栏应作为画布子控件显示，不能成为脱离地图的顶层浮窗。"""
+    application = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(900, 600)
+    canvas.show()
+    toolbar = GeometryEditToolbar(canvas.viewport())
+
+    toolbar.configure(
+        operation="move", layer_name="道路", fid=7, hint="松开仅预览"
+    )
+    toolbar.show_at(0, 0)
+    application.processEvents()
+
+    assert toolbar.parentWidget() is canvas.viewport()
+    assert not toolbar.isWindow()
+    assert toolbar.geometry().top() >= 0
+    assert toolbar.geometry().right() <= canvas.viewport().width()
+    canvas.close()
+
+
+def test_move_mouse_release_keeps_preview_without_commit() -> None:
+    """移动手势松开只结束拖动，不能发射应用或旧几何提交信号。"""
+    application = QApplication.instance() or QApplication([])
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    geometry = LineString([(400, -300), (500, -300)])
+    committed: list[BaseGeometry] = []
+    apply_requests: list[bool] = []
+    canvas.geometry_edited.connect(committed.append)
+    canvas.edit_apply_requested.connect(lambda: apply_requests.append(True))
+    canvas.set_move_feature_tool(geometry, "roads", 1)
+    application.processEvents()
+    start = canvas.mapFromScene(QPointF(450, 300))
+    end = start + QPoint(40, 20)
+
+    QTest.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=start)
+    QTest.mouseMove(canvas.viewport(), end, delay=10)
+    QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=end)
+
+    assert canvas._move_active
+    assert canvas._move_geometry is not None
+    assert not canvas._move_geometry.equals(geometry)
+    assert committed == []
+    assert apply_requests == []
+    canvas.close()
 
 
 def test_canvas_can_pan_when_imported_layer_does_not_fill_viewport() -> None:

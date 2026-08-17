@@ -630,13 +630,40 @@ QMenu::separator {
     background: #d9e1ea;
 }
 
-/* 几何编辑工具条是独立顶层 QWidget，不会命中下方的 QDialog 规则。
-   显式定义完整状态，避免 Windows 深色主题把窗口和按钮回退为黑色。 */
+/* 地图画布内顶部的编辑上下文栏。显式定义完整状态，避免 Windows
+   深色主题把标签、输入框和按钮回退为黑底黑框。 */
 QWidget#geometryEditToolbar {
     background: #ffffff;
     color: #263548;
     border: 1px solid #cbd6e2;
     border-radius: 6px;
+}
+
+QWidget#geometryEditToolbar QLabel,
+QWidget#geometryEditToolbar QCheckBox {
+    background: transparent;
+    color: #263548;
+}
+
+QWidget#geometryEditToolbar QLabel#editContextTitle {
+    color: #0f5f9f;
+    font-weight: 700;
+}
+
+QWidget#geometryEditToolbar QLabel#editContextHint {
+    color: #5d6d7e;
+}
+
+QWidget#geometryEditToolbar QDoubleSpinBox {
+    min-height: 28px;
+    min-width: 112px;
+    padding: 0 6px;
+    border: 1px solid #bfcbd8;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #263548;
+    selection-background-color: #0f6cbd;
+    selection-color: #ffffff;
 }
 
 QWidget#geometryEditToolbar QPushButton {
