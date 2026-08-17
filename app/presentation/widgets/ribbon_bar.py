@@ -365,8 +365,6 @@ class RibbonBar(QWidget):
                     RibbonGroupSpec("空间分析", (
                         RibbonActionSpec("buffer_analysis", "缓冲区分析", "◌", "#16a34a"),
                         RibbonActionSpec("overlay_analysis", "叠加分析", "▧", "#7c3aed"),
-                    )),
-                    RibbonGroupSpec("栅格分析", (
                         RibbonActionSpec("raster_calculator", "栅格计算器", "∱", "#d97706"),
                         RibbonActionSpec("raster_reclassify", "重分类", "⊞", "#0891b2"),
                         RibbonActionSpec("dem_analysis", "DEM 地形分析", "△", "#0891b2"),

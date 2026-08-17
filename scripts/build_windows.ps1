@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$SkipSmoke,
     [switch]$SkipInstaller
@@ -41,6 +41,70 @@ function Remove-PreviousApplicationDirectory {
     }
 }
 
+function Set-MinimalBuildPath {
+    # PyInstaller 做二进制依赖分析时会搜索 PATH 上的每个目录。JDK、conda、
+    # Git 等软件的 bin 目录里带有旧版 UCRT 存根（api-ms-win-*.dll、
+    # ucrtbase.dll）和同名 OpenSSL，一旦被收进发布包，冻结程序启动时会按
+    # 目录优先级先加载这些过期 DLL，因缺少新版导出函数导致 Qt 报
+    # “找不到指定的程序”。黑名单逐个排除不可靠，改为白名单：依赖解析只需
+    # 要系统目录和 venv。原 PATH 保存到 $script:originalPath 供后续恢复。
+    $script:originalPath = $env:PATH
+    $allowedRoots = @(
+        (Join-Path $env:SystemRoot "System32"),
+        $env:SystemRoot,
+        (Join-Path $env:SystemRoot "System32\Wbem"),
+        (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0"),
+        (Join-Path $projectRoot ".venv\Scripts")
+    )
+
+    $keptEntries = @()
+    foreach ($entry in ($env:PATH -split ';')) {
+        if (-not $entry) {
+            continue
+        }
+        try {
+            $fullEntry = [IO.Path]::GetFullPath($entry).TrimEnd('\')
+        } catch {
+            $fullEntry = $entry
+        }
+
+        $allowed = $false
+        foreach ($root in $allowedRoots) {
+            $normalizedRoot = $root.TrimEnd('\')
+            if (
+                $fullEntry.Equals($normalizedRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                $fullEntry.StartsWith($normalizedRoot + '\', [StringComparison]::OrdinalIgnoreCase)
+            ) {
+                $allowed = $true
+                break
+            }
+        }
+        if ($allowed) {
+            $keptEntries += $entry
+        } else {
+            Write-Host "构建期间已从 PATH 移除：$fullEntry"
+        }
+    }
+    $env:PATH = ($keptEntries | Select-Object -Unique) -join ';'
+}
+
+function Assert-NoForeignUcrtInPackage {
+    # Win10+ 的 API-Set 与 UCRT 是系统内存中的虚拟 DLL，正常打包不会以实体
+    # 文件出现；一旦出现说明外部目录（JDK、conda 等）经 PATH 污染了依赖分析。
+    $internalDirectory = Join-Path $applicationDirectory "_internal"
+    $foreignFiles = @()
+    if (Test-Path -LiteralPath $internalDirectory) {
+        $foreignFiles = @(
+            Get-ChildItem -LiteralPath $internalDirectory -Recurse -Filter "api-ms-win-*.dll"
+            Get-ChildItem -LiteralPath $internalDirectory -Recurse -Filter "ucrtbase.dll"
+        )
+    }
+    if ($foreignFiles.Count -gt 0) {
+        $sampleNames = ($foreignFiles | Select-Object -First 3 | ForEach-Object { $_.Name }) -join "、"
+        throw "发布包混入了 $sampleNames 等 $($foreignFiles.Count) 个 UCRT 存根文件，冻结程序将无法启动；请检查构建期间的 PATH 白名单。"
+    }
+}
+
 if (-not (Test-Path -LiteralPath $pyInstallerExe)) {
     throw "未找到 $pyInstallerExe，请先在项目根目录执行 uv sync。"
 }
@@ -53,6 +117,7 @@ if (-not $versionMatch.Success) {
 $applicationVersion = $versionMatch.Groups[1].Value
 
 Write-Host "[1/3] 构建 PyInstaller onedir 发布目录..."
+Set-MinimalBuildPath
 Remove-PreviousApplicationDirectory
 & $pyInstallerExe `
     --noconfirm `
@@ -63,6 +128,8 @@ Remove-PreviousApplicationDirectory
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $applicationExe)) {
     throw "PyInstaller 构建失败。"
 }
+Assert-NoForeignUcrtInPackage
+$env:PATH = $script:originalPath
 
 if (-not $SkipSmoke) {
     Write-Host "[2/3] 运行冻结程序 GIS 原生依赖自检..."

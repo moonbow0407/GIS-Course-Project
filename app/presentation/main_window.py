@@ -53,7 +53,11 @@ from app.application.database_service import DatabaseService
 from app.application.display_models import RasterDisplayPayload
 from app.application.display_projection_service import DisplayProjectionService
 from app.application.errors import ApplicationError, CoordinateReferenceSystemRequired
-from app.application.gis_application import GisApplication, _chaikin_smooth
+from app.application.gis_application import (
+    EDITABLE_VECTOR_SUFFIXES,
+    GisApplication,
+    _chaikin_smooth,
+)
 from app.application.measurement import MeasurementResult
 from app.application.project_models import MapViewState
 from app.application.raster_analysis import (
@@ -1297,6 +1301,9 @@ class MainWindow(QMainWindow):
         self._map_canvas.set_pan_tool()
         self._set_active_query_action(None)
         self._set_active_digitize_action(None)
+        self._digitize_target_layer_id = None
+        self._editing_layer_id = None
+        self._editing_fid = None
         # 清空所有图层的要素选择（不推入撤销栈，避免在切换工程时
         # 残留的撤销记录引用已销毁的领域对象）。
         self._application.clear_selection()
@@ -2452,6 +2459,18 @@ class MainWindow(QMainWindow):
             "digitize_polygon": "add_polygon_feature",
         }.get(tool_id)
         self._set_active_digitize_action(digitize_action)
+        # 离开数字化后必须清掉目标图层，否则保存工程后仍会被当成未提交编辑。
+        if tool_id not in ("digitize_point", "digitize_line", "digitize_polygon"):
+            self._digitize_target_layer_id = None
+        if tool_id not in (
+            "vertex_edit",
+            "move_feature",
+            "rotate_feature",
+            "scale_feature",
+            "split_feature",
+        ):
+            self._editing_layer_id = None
+            self._editing_fid = None
         # 移动/变换/拆分工具时清除数字化按钮高亮。
         if tool_id in ("move_feature", "rotate_feature", "scale_feature", "split_feature"):
             self._set_active_digitize_action(None)
@@ -2635,10 +2654,9 @@ class MainWindow(QMainWindow):
             if family != GeometryFamily.MIXED and family != expected_family:
                 continue
             source_path: Path | None = layer.layer.source_path
-            if source_path is None or source_path.suffix.lower() not in {
-                ".shp",
-                ".geojson",
-            }:
+            if source_path is None or (
+                source_path.suffix.lower() not in EDITABLE_VECTOR_SUFFIXES
+            ):
                 continue
             if not self._application.can_edit_layer(layer.layer_id):
                 layer_crs = layer.layer.crs
@@ -2672,7 +2690,7 @@ class MainWindow(QMainWindow):
                         self,
                         "新增要素",
                         f"没有可用于添加{label}要素的图层。\n"
-                        "请先打开一个 Shapefile 或 GeoJSON 矢量图层。",
+                        "请先打开一个 Shapefile、GeoJSON 或 GeoPackage 矢量图层。",
                     )
                 return
             dialog: TargetLayerDialog = TargetLayerDialog(
@@ -2869,7 +2887,8 @@ class MainWindow(QMainWindow):
     def _delete_selected_features(self) -> None:
         """删除当前所有选中的要素，删除前弹出确认。
 
-        撤销操作会完整恢复被删要素的几何和属性。
+        同一图层的一次批量删除只整层写回一次；撤销操作会完整恢复
+        被删要素的几何和属性。
         """
         snapshot: WorkspaceSnapshot = self._application.snapshot()
         # 收集待删要素的完整信息，用于撤销恢复。
@@ -2888,6 +2907,23 @@ class MainWindow(QMainWindow):
                 "当前没有选中的要素。\n请先使用点选/框选查询选中一个要素。",
             )
             return
+        # 选中了图层全部要素等价于清空图层；空图层 schema 无法可靠持久化，
+        # 在入口直接拒绝，避免逐要素提交后最后一个要素才失败。
+        # 按要素是否全部被选中判断，容忍选择集中残留的失效编号。
+        for layer in snapshot.layers:
+            if not isinstance(layer.layer, VectorLayer):
+                continue
+            selected_fids: set[FeatureId] = set(layer.selected_feature_ids)
+            if layer.layer.features and selected_fids and all(
+                feature.fid in selected_fids
+                for feature in layer.layer.features
+            ):
+                QMessageBox.warning(
+                    self,
+                    "删除要素",
+                    "暂不支持删除图层中的最后一个要素；如需移除数据，请删除整个图层。",
+                )
+                return
         count: int = len(to_delete)
         answer = QMessageBox.question(
             self,
@@ -2917,11 +2953,14 @@ class MainWindow(QMainWindow):
                     break
 
         try:
-            for layer_id, fid, _feature in to_delete:
-                self._application.delete_feature(layer_id, fid)
+            # 每个受影响图层只整层写回一次；涉及多个图层时按图层分别提交。
+            for layer_id, (_before, after) in affected.items():
+                self._application.replace_layer_features(layer_id, after)
         except ApplicationError as error:
             QMessageBox.warning(self, "删除失败", str(error))
             return
+        # 被删要素已不存在，清除仍指向它们的选择集。
+        self._application.clear_selection()
 
         self._push_undo(
             "删除要素",
@@ -2946,15 +2985,16 @@ class MainWindow(QMainWindow):
         参数:
             affected: {layer_id: (before_features, after_features)}。
             undo: True 时恢复删除前状态，False 时恢复删除后状态。
+
+        异常:
+            ApplicationError: 写回失败时上抛，由 ``_undo``/``_redo``
+            统一提示用户并丢弃该条撤销记录。
         """
         for layer_id, (before_features, after_features) in affected.items():
             features: tuple[Feature, ...] = (
                 before_features if undo else after_features
             )
-            try:
-                self._application.replace_layer_features(layer_id, features)
-            except ApplicationError:
-                continue
+            self._application.replace_layer_features(layer_id, features)
 
     def _edit_selected_feature(self) -> None:
         """编辑当前选中要素的属性（仅支持单选）。"""
@@ -3542,6 +3582,8 @@ class MainWindow(QMainWindow):
     def _on_geom_edit_cancel(self) -> None:
         """取消几何编辑。"""
         self._geom_edit_toolbar.hide()
+        self._editing_layer_id = None
+        self._editing_fid = None
         self._map_canvas.set_pan_tool()
         self._ready_label.setText("编辑几何要素：已取消")
 
@@ -3838,22 +3880,21 @@ class MainWindow(QMainWindow):
         if layer_id is None or not updates:
             return
         try:
-            # 逐个更新每个受影响要素的几何。
-            for fid, new_geom in updates.items():
-                self._application.update_feature_geometry(
-                    layer_id, fid, new_geom
+            # 从编辑前快照构造最终要素集合，同图层拓扑编辑只整层写回一次。
+            after_features: tuple[Feature, ...] = tuple(
+                Feature(
+                    fid=f.fid,
+                    geometry=updates[f.fid],
+                    attributes=f.attributes,
                 )
+                if f.fid in updates
+                else f
+                for f in before_features
+            )
+            self._application.replace_layer_features(layer_id, after_features)
         except ApplicationError as error:
             QMessageBox.warning(self, "修改几何失败", str(error))
             return
-        after_snapshot = self._application.snapshot()
-        after_features: tuple[Feature, ...] = ()
-        for layer in after_snapshot.layers:
-            if layer.layer_id == layer_id and isinstance(
-                layer.layer, VectorLayer
-            ):
-                after_features = layer.layer.features
-                break
         self._push_undo(
             f"拓扑编辑 ({len(updates)} 个要素)",
             undo_action=partial(
@@ -4072,11 +4113,36 @@ class MainWindow(QMainWindow):
             self._push_selection_undo("清除选择", before_selections, {})
         self._refresh_workspace()
 
+    def _display_crs_block_reason(self) -> str | None:
+        """返回阻止切换显示坐标系的原因；没有未提交草稿时返回 None。
+
+        保存工程、数字化追加到图层都不算未提交编辑。只有画布上仍有
+        未提交的几何编辑，或未完成的线/面数字化草图时才拦截。
+        """
+        canvas = self._map_canvas
+        if (
+            canvas._vertex_edit_active
+            or canvas._move_active
+            or canvas._transform_active
+            or canvas._split_active
+        ):
+            return "请先提交或取消当前编辑。"
+        if (
+            canvas._digitize_mode in ("line", "polygon")
+            and canvas._digitize_vertices
+        ):
+            return "请先完成或按 Esc 取消当前数字化草图。"
+        return None
+
     def _set_display_crs(self) -> None:
         """弹出坐标系选择对话框，并后台重建已有图层的显示坐标系。"""
-        if self._editing_layer_id is not None or self._digitize_target_layer_id is not None:
-            QMessageBox.warning(self, "无法切换 CRS", "请先提交或取消当前编辑。")
+        block_reason: str | None = self._display_crs_block_reason()
+        if block_reason is not None:
+            QMessageBox.warning(self, "无法切换 CRS", block_reason)
             return
+        # 数字化工具没有未提交草稿；切 CRS 前先退出，避免重投影后工具状态错位。
+        if self._map_canvas._digitize_mode in ("point", "line", "polygon"):
+            self._map_canvas.set_pan_tool()
         snapshot: WorkspaceSnapshot = self._application.snapshot()
 
         dialog: QDialog = QDialog(self)

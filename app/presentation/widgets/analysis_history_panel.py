@@ -25,6 +25,11 @@ class AnalysisHistoryPanel(QWidget):
     _OPERATION_NAMES: dict[str, str] = {
         "buffer": "缓冲区分析",
         "overlay": "叠加分析",
+        "raster_calculator": "栅格计算器",
+        "raster_reclassify": "重分类",
+        "dem_analysis": "DEM 地形分析",
+        "raster_clip": "掩膜裁剪",
+        "reproject": "图层重投影",
     }
     _PARAMETER_NAMES: dict[str, str] = {
         "geometry_family": "几何类型",
@@ -49,6 +54,27 @@ class AnalysisHistoryPanel(QWidget):
         "make_valid": "自动修复几何",
         "sjoin_predicate": "空间连接谓词",
         "sjoin_how": "连接方式",
+        "expression": "表达式",
+        "variable_count": "变量数量",
+        "aliases": "变量别名",
+        "nodata": "NoData 值",
+        "reference_layer_id": "参考图层",
+        "band_index": "波段序号",
+        "rule_count": "规则数量",
+        "unmatched_policy": "未匹配像元策略",
+        "output_dtype": "输出数据类型",
+        "output_nodata": "输出 NoData",
+        "mode": "分析模式",
+        "elevation_unit": "高程单位",
+        "z_factor": "高程缩放系数",
+        "azimuth": "方位角",
+        "altitude": "高度角",
+        "crop": "裁剪至掩膜范围",
+        "all_touched": "全像元匹配",
+        "invert": "反选掩膜",
+        "source_crs": "源坐标系",
+        "target_crs": "目标坐标系",
+        "resampling": "重采样方法",
     }
 
     def __init__(self, parent: QWidget | None = None) -> None:

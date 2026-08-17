@@ -21,6 +21,7 @@ from app.domain.symbology import VectorRendererType, VectorSymbology
 from app.domain.vector_layer import VectorLayer
 from app.infrastructure.file_io.auto_reader import AutoDataReader
 from app.infrastructure.file_io.auto_writer import AutoDataWriter
+from app.infrastructure.file_io.geopandas_vector_writer import GeoPandasVectorWriter
 from app.presentation.main_window import MainWindow
 
 CRS_4549: CRS = CRS.from_epsg(4549)
@@ -418,4 +419,110 @@ def test_digitize_append_undo_redo_restores_feature_set(
 
     window._redo()
     assert len(window._application.snapshot().layers[0].layer.features) == 2
+    window.close()
+
+
+def _make_batch_delete_source(tmp_path: Path) -> VectorLayer:
+    """创建带三个点要素的真实 GeoPackage 图层用于批量删除测试。"""
+    source: Path = tmp_path / "batch.gpkg"
+    layer: VectorLayer = VectorLayer.create(
+        layer_id="a",
+        name="批量删除",
+        features=(
+            Feature(fid=1, geometry=Point(0, 0), attributes={"名称": "甲"}),
+            Feature(fid=2, geometry=Point(1, 1), attributes={"名称": "乙"}),
+            Feature(fid=3, geometry=Point(2, 2), attributes={"名称": "丙"}),
+        ),
+        crs=CRS_4549,
+        source_path=source,
+        source_layer_name="批量删除",
+    )
+    GeoPandasVectorWriter().write(layer, source, layer_name="批量删除")
+    return layer
+
+
+def test_batch_delete_writes_back_once_per_layer_and_supports_undo(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """同图层批量删除应只整层写回一次，不逐要素写盘，且可撤销/重做。"""
+    layer: VectorLayer = _make_batch_delete_source(tmp_path)
+    document: MapDocument = MapDocument()
+    document.add_layer(layer)
+    document.set_active_layer("a")
+    document.set_selection("a", (1, 2))
+    window: MainWindow = _make_window(document)
+    application: GisApplication = window._application
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *args: QMessageBox.StandardButton.Yes),
+    )
+
+    replace_calls: list[tuple[str, int]] = []
+    delete_calls: list[object] = []
+    original_replace = application.replace_layer_features
+
+    def _counting_replace(layer_id: str, features: tuple) -> object:
+        replace_calls.append((layer_id, len(features)))
+        return original_replace(layer_id, features)
+
+    application.replace_layer_features = _counting_replace  # type: ignore[method-assign]
+    application.delete_feature = (  # type: ignore[method-assign]
+        lambda layer_id, fid: delete_calls.append(fid)
+    )
+
+    window._delete_selected_features()
+
+    assert replace_calls == [("a", 1)]
+    assert delete_calls == []
+    remaining = window._application.snapshot().layers[0].layer.features
+    assert [f.attributes["名称"] for f in remaining] == ["丙"]
+
+    window._undo()
+    restored = window._application.snapshot().layers[0].layer.features
+    assert [f.attributes["名称"] for f in restored] == ["甲", "乙", "丙"]
+
+    window._redo()
+    after_redo = window._application.snapshot().layers[0].layer.features
+    assert [f.attributes["名称"] for f in after_redo] == ["丙"]
+    window.close()
+
+
+def test_batch_delete_rejects_selecting_all_features(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """选中图层全部要素时批量删除应在入口被拒绝，不产生任何写回。"""
+    layer: VectorLayer = _make_batch_delete_source(tmp_path)
+    document: MapDocument = MapDocument()
+    document.add_layer(layer)
+    document.set_active_layer("a")
+    document.set_selection("a", (1, 2, 3))
+    window: MainWindow = _make_window(document)
+    application: GisApplication = window._application
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda parent, title, text: messages.append(text)),
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *args: QMessageBox.StandardButton.Yes),
+    )
+    replace_calls: list[str] = []
+    original_replace = application.replace_layer_features
+
+    def _counting_replace(layer_id: str, features: tuple) -> object:
+        replace_calls.append(layer_id)
+        return original_replace(layer_id, features)
+
+    application.replace_layer_features = _counting_replace  # type: ignore[method-assign]
+
+    window._delete_selected_features()
+
+    assert any("暂不支持删除图层中的最后一个要素" in message for message in messages)
+    assert replace_calls == []
+    features = window._application.snapshot().layers[0].layer.features
+    assert len(features) == 3
     window.close()

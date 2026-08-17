@@ -17,13 +17,16 @@ def make_run(
     run_id: str,
     created_at: str,
     status: str = "completed",
+    algorithm_id: str = "buffer",
+    parameters: dict[str, object] | None = None,
 ) -> AnalysisRun:
     """创建一条包含缓冲距离和输出引用的测试记录。"""
     return AnalysisRun(
         run_id=run_id,
-        algorithm_id="buffer",
+        algorithm_id=algorithm_id,
         input_layer_ids=("roads",),
-        parameters={
+        parameters=parameters
+        or {
             "distance": 500.0,
             "distance_unit": "meter",
             "dissolve": False,
@@ -118,3 +121,71 @@ def test_history_panel_emits_clear_request_and_ribbon_has_no_result_export() -> 
     assert received == [True]
     assert RibbonBar.action_title("analysis_history") == "分析记录"
     assert RibbonBar.action_title("export_result") is None
+
+
+def test_history_panel_shows_chinese_names_for_raster_runs() -> None:
+    """栅格分析记录应显示中文操作名和中文参数名，而不是算法编号。"""
+    qt_application: QApplication = QApplication.instance() or QApplication([])
+    panel = AnalysisHistoryPanel()
+    run = make_run(
+        "clip",
+        "2026-07-29T10:00:00+00:00",
+        algorithm_id="raster_clip",
+        parameters={
+            "crop": True,
+            "all_touched": False,
+            "invert": False,
+            "band_index": 1,
+        },
+    )
+
+    panel.set_history((run,), {"roads": "边界", "result-clip": "裁剪结果"})
+    qt_application.processEvents()
+
+    row = panel._history_list.itemWidget(panel._history_list.item(0))
+    assert row is not None
+    operation = row.findChild(QLabel, "analysisHistoryOperation")
+    assert operation is not None
+    assert operation.text() == "掩膜裁剪"
+    tooltip = panel._history_list.item(0).toolTip()
+    assert "波段序号" in tooltip
+    assert "band_index" not in tooltip
+
+
+def test_history_operation_names_match_ribbon_analysis_actions() -> None:
+    """历史操作名应与分析功能区按钮的中文名一一对应，不残留英文编号。"""
+    # buffer/overlay 的功能区编号带 _analysis 后缀，栅格四项两侧编号一致。
+    pairs: tuple[tuple[str, str], ...] = (
+        ("buffer", "buffer_analysis"),
+        ("overlay", "overlay_analysis"),
+        ("raster_calculator", "raster_calculator"),
+        ("raster_reclassify", "raster_reclassify"),
+        ("dem_analysis", "dem_analysis"),
+        ("raster_clip", "raster_clip"),
+    )
+
+    for algorithm_id, action_id in pairs:
+        title: str | None = RibbonBar.action_title(action_id)
+        assert title is not None, f"功能区缺少操作 {action_id}"
+        assert AnalysisHistoryPanel._OPERATION_NAMES.get(algorithm_id) == title
+
+    # 图层重投影不对应功能区按钮，但也必须有中文显示名。
+    assert AnalysisHistoryPanel._OPERATION_NAMES["reproject"] == "图层重投影"
+    for name in AnalysisHistoryPanel._OPERATION_NAMES.values():
+        assert name and not name.isascii(), f"操作名 {name} 不是中文"
+
+
+def test_ribbon_analysis_tab_has_single_merged_group() -> None:
+    """分析标签页应只保留合并后的空间分析分组，不再有栅格分析分组。"""
+    analysis_groups = dict(RibbonBar._tab_specs())["分析"]
+
+    assert tuple(group.title for group in analysis_groups) == ("空间分析", "结果")
+    spatial_actions = analysis_groups[0].actions
+    assert tuple(action.action_id for action in spatial_actions) == (
+        "buffer_analysis",
+        "overlay_analysis",
+        "raster_calculator",
+        "raster_reclassify",
+        "dem_analysis",
+        "raster_clip",
+    )

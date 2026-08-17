@@ -135,6 +135,10 @@ from app.domain.spatial_layer import SpatialLayer
 from app.domain.symbology import RasterRendererType, RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
 
+# 支持要素编辑写回的本地矢量源文件后缀：应用层入口过滤与主窗口
+# 数字化候选过滤共用，避免两处维护重复的格式字面量。
+EDITABLE_VECTOR_SUFFIXES: frozenset[str] = frozenset({".shp", ".geojson", ".gpkg"})
+
 
 def _chaikin_smooth(geometry: BaseGeometry, iterations: int) -> BaseGeometry:
     """Chaikin 角切算法：每轮在每条边的 1/4 和 3/4 处插入新顶点。
@@ -280,9 +284,6 @@ class GisApplication:
     data_reader: DataReader
     # 空间数据写入端口：为空时保留只读应用服务兼容能力。
     data_writer: DataWriter | None
-
-    # 支持原地写回的矢量后缀：覆盖写入器只能安全重建整文件的格式。
-    _APPENDABLE_SUFFIXES: frozenset[str] = frozenset({".shp", ".geojson"})
 
     def __init__(
         self,
@@ -1342,10 +1343,10 @@ class GisApplication:
             raise ApplicationError(
                 f"图层「{layer.name}」没有本地数据文件，暂不支持追加要素。"
             )
-        if layer.source_path.suffix.lower() not in self._APPENDABLE_SUFFIXES:
+        if layer.source_path.suffix.lower() not in EDITABLE_VECTOR_SUFFIXES:
             raise ApplicationError(
                 f"图层「{layer.name}」源文件格式 {layer.source_path.suffix} "
-                "暂不支持追加要素，请使用 Shapefile 或 GeoJSON 图层。"
+                "暂不支持追加要素，请使用 Shapefile、GeoJSON 或 GeoPackage 图层。"
             )
         if self.data_writer is None:
             raise DataWriteFailed("空间数据写出服务尚未配置。")
@@ -1367,15 +1368,20 @@ class GisApplication:
             labeling=layer.labeling,
             crs_override=layer.crs_override,
         )
-        self._document.replace_layer(updated)
+        # 先写盘后提交内存：写回失败时文档要素、选择集和修改状态保持不变。
         self._write_layer_to_source(updated)
+        self._document.replace_layer(updated)
         self._modified = True
         return self.snapshot()
 
     def delete_feature(self, layer_id: str, fid: FeatureId) -> WorkspaceSnapshot:
         """从图层中删除指定要素并写回磁盘。
 
-        若删除后图层无要素，则移除整个图层。
+        当前领域模型和写入器无法可靠保留空图层的字段 schema，
+        因此删除图层最后一个要素时在修改内存和磁盘前直接拒绝。
+
+        异常:
+            ApplicationError: 删除后图层为空时抛出，提示改用删除整个图层。
         """
         layer: SpatialLayer = self._find_layer(layer_id)
         if not isinstance(layer, VectorLayer):
@@ -1385,7 +1391,9 @@ class GisApplication:
             f for f in layer.features if f.fid != fid
         )
         if not remaining:
-            return self.remove_layer(layer_id)
+            raise ApplicationError(
+                "暂不支持删除图层中的最后一个要素；如需移除数据，请删除整个图层。"
+            )
         updated: VectorLayer = VectorLayer.create(
             layer_id=layer.layer_id,
             name=layer.name,
@@ -1398,9 +1406,11 @@ class GisApplication:
             labeling=layer.labeling,
             crs_override=layer.crs_override,
         )
+        # 先写盘后提交内存：写回失败时文档要素、选择集、revision
+        # 和修改状态保持不变，异常继续上抛由界面显示中文提示。
+        self._write_layer_to_source(updated)
         self._document.replace_layer(updated)
         self._document.clear_selection()
-        self._write_layer_to_source(updated)
         self._modified = True
         return self.snapshot()
 
@@ -1433,8 +1443,9 @@ class GisApplication:
             labeling=layer.labeling,
             crs_override=layer.crs_override,
         )
-        self._document.replace_layer(updated_layer)
+        # 先写盘后提交内存：写回失败时文档要素、选择集和修改状态保持不变。
         self._write_layer_to_source(updated_layer)
+        self._document.replace_layer(updated_layer)
         self._modified = True
         return self.snapshot()
 
@@ -1464,8 +1475,9 @@ class GisApplication:
             labeling=layer.labeling,
             crs_override=layer.crs_override,
         )
-        self._document.replace_layer(updated_layer)
+        # 先写盘后提交内存：写回失败时文档要素、选择集和修改状态保持不变。
         self._write_layer_to_source(updated_layer)
+        self._document.replace_layer(updated_layer)
         self._modified = True
         return self.snapshot()
 
@@ -1611,8 +1623,9 @@ class GisApplication:
             labeling=layer.labeling,
             crs_override=layer.crs_override,
         )
-        self._document.replace_layer(updated)
+        # 先写盘后提交内存：写回失败时文档要素、选择集和修改状态保持不变。
         self._write_layer_to_source(updated)
+        self._document.replace_layer(updated)
         self._modified = True
         return self.snapshot()
 

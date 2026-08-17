@@ -12,7 +12,7 @@ from affine import Affine
 from pyproj import CRS
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 from shapely.geometry import LineString, Point, Polygon
 
 import app.presentation.main_window as main_window_module
@@ -349,8 +349,8 @@ def test_start_digitize_filters_candidates_by_geometry(tmp_path: Path, monkeypat
 def test_start_digitize_filters_candidates_by_source_format(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """GeoPackage 等不可写回格式的图层不应进入候选列表。"""
-    source: Path = tmp_path / "zones.gpkg"
+    """KML 等不可写回格式的图层不应进入候选列表。"""
+    source: Path = tmp_path / "zones.kml"
     layer: VectorLayer = _make_point_layer("l1", source)
     document: MapDocument = MapDocument()
     document.add_layer(layer)
@@ -365,6 +365,44 @@ def test_start_digitize_filters_candidates_by_source_format(
     window.close()
 
 
+def test_start_digitize_includes_gpkg_layer_in_candidates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """几何类型和 CRS 合适的 GeoPackage 图层应进入数字化候选列表。"""
+    source: Path = tmp_path / "zones.gpkg"
+    layer: VectorLayer = _make_point_layer("l1", source)
+    document: MapDocument = MapDocument()
+    document.add_layer(layer)
+    document.set_active_layer(layer.layer_id)
+    window: MainWindow = _make_window(document)
+
+    class CapturingTargetDialog(FakeTargetLayerDialog):
+        instances: list[FakeTargetLayerDialog] = []
+
+        def __init__(
+            self,
+            options: tuple[object, ...],
+            geometry_label: str,
+            default_layer_id: str | None = None,
+            parent: object = None,
+        ) -> None:
+            super().__init__(options, geometry_label, default_layer_id, parent)
+            CapturingTargetDialog.instances.append(self)
+
+    monkeypatch.setattr(
+        main_window_module, "TargetLayerDialog", CapturingTargetDialog
+    )
+    _collect_messages(monkeypatch)
+
+    window._start_digitize("point", "点")
+
+    assert len(CapturingTargetDialog.instances) == 1
+    captured = CapturingTargetDialog.instances[0]
+    assert [option.layer_id for option in captured.received_options] == ["l1"]
+    assert window._map_canvas._digitize_mode == "point"
+    window.close()
+
+
 def test_start_digitize_passes_only_eligible_options(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -372,10 +410,12 @@ def test_start_digitize_passes_only_eligible_options(
     point_source: Path = tmp_path / "points.geojson"
     line_source: Path = tmp_path / "routes.geojson"
     gpkg_source: Path = tmp_path / "zones.gpkg"
+    kml_source: Path = tmp_path / "overlay.kml"
     document: MapDocument = MapDocument()
     document.add_layer(_make_point_layer("points", point_source))
     document.add_layer(_make_line_layer("routes", line_source))
     document.add_layer(_make_point_layer("gpkg", gpkg_source))
+    document.add_layer(_make_point_layer("kml", kml_source))
     document.add_layer(_make_raster_layer("raster"))
     document.set_active_layer("points")
     window: MainWindow = _make_window(document)
@@ -403,7 +443,8 @@ def test_start_digitize_passes_only_eligible_options(
     assert len(CapturingTargetDialog.instances) == 1
     captured_dialog = CapturingTargetDialog.instances[0]
     assert [option.layer_id for option in captured_dialog.received_options] == [
-        "points"
+        "points",
+        "gpkg",
     ]
     assert captured_dialog.received_default == "points"
     assert window._map_canvas._digitize_mode == "point"
@@ -552,7 +593,7 @@ def test_add_point_without_matching_layers_keeps_generic_hint(
     window._start_digitize("point", "点")
 
     assert len(messages) == 1
-    assert "Shapefile 或 GeoJSON" in messages[0]
+    assert "Shapefile、GeoJSON 或 GeoPackage" in messages[0]
     assert "坐标系" not in messages[0]
     window.close()
 
@@ -585,3 +626,147 @@ def test_specified_digitize_target_distinguishes_crs_and_geometry(
     assert "图层不支持新增点要素" in messages[-1]
     assert "坐标系" not in messages[-1]
     window_two.close()
+
+
+def test_leaving_digitize_tool_clears_target_and_allows_crs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """退出数字化后应清除目标图层标记，不再把已保存的要素当成未提交编辑。"""
+    source: Path = tmp_path / "points.geojson"
+    layer: VectorLayer = _make_point_layer("l1", source)
+    document: MapDocument = MapDocument()
+    document.add_layer(layer)
+    document.set_active_layer(layer.layer_id)
+    window: MainWindow = _make_window(document)
+    _patch_dialogs(monkeypatch)
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda _parent, title, text: warnings.append((title, text))),
+    )
+    monkeypatch.setattr(QDialog, "exec", lambda _self: QDialog.DialogCode.Rejected)
+
+    window._start_digitize("point", "点")
+    assert window._digitize_target_layer_id == layer.layer_id
+
+    window._map_canvas.set_pan_tool()
+
+    assert window._digitize_target_layer_id is None
+    window._set_display_crs()
+    assert warnings == []
+    window.close()
+
+
+def test_idle_digitize_does_not_block_display_crs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """数字化工具空闲（无未完成草图）时，已写入图层的要素不应阻止切换 CRS。"""
+    source: Path = tmp_path / "points.geojson"
+    layer: VectorLayer = _make_point_layer("l1", source)
+    document: MapDocument = MapDocument()
+    document.add_layer(layer)
+    document.set_active_layer(layer.layer_id)
+    window: MainWindow = _make_window(document)
+    _patch_dialogs(monkeypatch)
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda _parent, title, text: warnings.append((title, text))),
+    )
+    monkeypatch.setattr(QDialog, "exec", lambda _self: QDialog.DialogCode.Rejected)
+
+    window._start_digitize("point", "点")
+    window._on_feature_digitized(Point(10, 10))
+
+    window._set_display_crs()
+    assert warnings == []
+    window.close()
+
+
+def test_unfinished_digitize_sketch_blocks_display_crs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """线数字化已落下顶点但未完成时，应阻止切换显示坐标系。"""
+    source: Path = tmp_path / "routes.geojson"
+    layer: VectorLayer = _make_line_layer("l1", source)
+    document: MapDocument = MapDocument()
+    document.add_layer(layer)
+    document.set_active_layer(layer.layer_id)
+    window: MainWindow = _make_window(document)
+    _patch_dialogs(monkeypatch)
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda _parent, title, text: warnings.append((title, text))),
+    )
+    monkeypatch.setattr(QDialog, "exec", lambda _self: QDialog.DialogCode.Rejected)
+
+    window._start_digitize("line", "线")
+    window._map_canvas._digitize_vertices.append(QPoint(10, 10))
+
+    window._set_display_crs()
+    assert warnings
+    assert warnings[0][0] == "无法切换 CRS"
+    assert "数字化" in warnings[0][1]
+    window.close()
+
+
+def test_cancel_geometry_edit_allows_display_crs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """取消顶点编辑后应清除编辑会话，允许切换显示坐标系。"""
+    source: Path = tmp_path / "points.geojson"
+    layer: VectorLayer = _make_point_layer("l1", source)
+    document: MapDocument = MapDocument()
+    document.add_layer(layer)
+    document.set_active_layer(layer.layer_id)
+    window: MainWindow = _make_window(document)
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda _parent, title, text: warnings.append((title, text))),
+    )
+    monkeypatch.setattr(QDialog, "exec", lambda _self: QDialog.DialogCode.Rejected)
+
+    window._application.set_selection(layer.layer_id, (1,))
+    window._edit_selected_geometry()
+    assert window._editing_layer_id == layer.layer_id
+
+    window._on_geom_edit_cancel()
+
+    assert window._editing_layer_id is None
+    window._set_display_crs()
+    assert warnings == []
+    window.close()
+
+
+def test_active_geometry_edit_blocks_display_crs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """顶点编辑未提交时，应继续阻止切换显示坐标系。"""
+    source: Path = tmp_path / "points.geojson"
+    layer: VectorLayer = _make_point_layer("l1", source)
+    document: MapDocument = MapDocument()
+    document.add_layer(layer)
+    document.set_active_layer(layer.layer_id)
+    window: MainWindow = _make_window(document)
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda _parent, title, text: warnings.append((title, text))),
+    )
+    monkeypatch.setattr(QDialog, "exec", lambda _self: QDialog.DialogCode.Rejected)
+
+    window._application.set_selection(layer.layer_id, (1,))
+    window._edit_selected_geometry()
+
+    window._set_display_crs()
+    assert warnings
+    assert warnings[0][0] == "无法切换 CRS"
+    assert "提交" in warnings[0][1] or "取消" in warnings[0][1]
+    window.close()

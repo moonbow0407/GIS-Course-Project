@@ -69,3 +69,4 @@ docs/
 !docs/
 docs/*
 !docs/spatial-file-dialog-spec.md
+!docs/geopackage-editable-atomic-write-spec.md

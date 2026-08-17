@@ -174,8 +174,8 @@ def test_append_feature_to_database_layer_raises() -> None:
 
 
 def test_append_feature_to_unsupported_format_raises(tmp_path: Path) -> None:
-    """源文件为 GeoPackage 等不支持写回的格式时应拒绝追加。"""
-    source: Path = tmp_path / "zones.gpkg"
+    """源文件为 KML 等不支持写回的格式时应拒绝追加。"""
+    source: Path = tmp_path / "zones.kml"
     layer: VectorLayer = _make_layer("l1", source)
     application: GisApplication = _make_application(
         layer, RecordingDataWriter()
@@ -183,6 +183,22 @@ def test_append_feature_to_unsupported_format_raises(tmp_path: Path) -> None:
 
     with pytest.raises(ApplicationError, match="暂不支持追加要素"):
         application.append_feature("l1", Point(0, 0), {})
+
+
+def test_append_feature_to_gpkg_source_passes_format_check(
+    tmp_path: Path,
+) -> None:
+    """GeoPackage 源图层应通过格式检查并进入写回流程。"""
+    source: Path = tmp_path / "zones.gpkg"
+    layer: VectorLayer = _make_layer("l1", source)
+    writer: RecordingDataWriter = RecordingDataWriter()
+    application: GisApplication = _make_application(layer, writer)
+
+    application.append_feature("l1", Point(0, 0), {})
+
+    assert writer.path == source
+    assert writer.layer is not None
+    assert len(writer.layer.features) == 2
 
 
 def test_append_feature_to_missing_layer_raises(tmp_path: Path) -> None:
