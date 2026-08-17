@@ -15,19 +15,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.application.legend_model import (
+    LegendPatch,
+    build_legend_block,
+)
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
-from app.application.symbology_service import raster_stretch_legend_text
 from app.domain.layer_style import GeometryFamily, LayerStyle
 from app.domain.raster_layer import RasterLayer
-from app.domain.symbology import (
-    COLOR_RAMPS,
-    GraduatedClass,
-    RasterClass,
-    RasterRendererType,
-    RasterSymbology,
-    UniqueValueClass,
-    VectorRendererType,
-)
 from app.domain.vector_layer import VectorLayer
 
 
@@ -457,78 +451,27 @@ class LayerPanel(QWidget):
         layer: VectorLayer | RasterLayer,
     ) -> None:
         """在图层节点下添加符号类别或栅格色带摘要。"""
-        if isinstance(layer, RasterLayer):
-            raster_symbology = layer.symbology
-            if raster_symbology is None:
-                return
-            if raster_symbology.renderer_type is RasterRendererType.RGB:
-                label = "RGB 合成"
-                self._add_raster_legend_item(parent, label, ("#EF4444", "#22C55E", "#3B82F6"))
-            elif raster_symbology.renderer_type is RasterRendererType.CLASSIFIED:
-                label = f"分类值 · {len(raster_symbology.classes)} 类"
-                self._add_raster_legend_item(
-                    parent,
-                    label,
-                    tuple(raster_category.color for raster_category in raster_symbology.classes),
-                )
-                for raster_category in raster_symbology.classes:
-                    self._add_raster_class_child(parent, raster_category)
-                if raster_symbology.other_visible:
-                    self._add_raster_legend_item(
-                        parent,
-                        "其他值",
-                        (raster_symbology.other_color,),
-                    )
-            else:
-                ramp_colors = COLOR_RAMPS.get(raster_symbology.color_scheme, ("#000000", "#FFFFFF"))
-                if raster_symbology.inverted:
-                    ramp_colors = tuple(reversed(ramp_colors))
-                self._add_raster_legend_item(
-                    parent,
-                    raster_stretch_legend_text(layer),
-                    ramp_colors,
-                )
-            self._add_raster_nodata_legend(parent, layer, raster_symbology)
+        block = build_legend_block(layer)
+        if block is None:
             return
-        vector_symbology = layer.symbology
-        if vector_symbology is None:
-            return
-        if vector_symbology.renderer_type is VectorRendererType.SIMPLE:
+        if block.heading:
+            self._add_raster_legend_item(parent, block.heading, block.heading_colors)
+        for patch in block.patches:
+            self._add_legend_patch(parent, patch)
+
+    def _add_legend_patch(self, parent: QTreeWidgetItem, patch: LegendPatch) -> None:
+        """把一条图例补丁画成图层树子节点。"""
+        if patch.style is not None:
             self._add_symbol_child(
                 parent,
-                0,
-                "单一符号",
-                vector_symbology.base_symbol,
-                True,
-                False,
+                patch.category_index if patch.category_index is not None else 0,
+                patch.label,
+                patch.style,
+                patch.visible,
+                patch.checkable,
             )
             return
-        classes: tuple[UniqueValueClass | GraduatedClass, ...] = (
-            tuple(vector_symbology.unique_classes)
-            if vector_symbology.unique_classes
-            else tuple(vector_symbology.graduated_classes)
-        )
-        for index, category in enumerate(classes):
-            self._add_symbol_child(
-                parent,
-                index,
-                category.label,
-                category.symbol,
-                category.visible,
-                True,
-            )
-        if (
-            vector_symbology.renderer_type is VectorRendererType.UNIQUE
-            and vector_symbology.other_symbol
-        ):
-            self._add_symbol_child(
-                parent,
-                len(classes),
-                "其他值",
-                vector_symbology.other_symbol,
-                vector_symbology.other_visible,
-                True,
-            )
+        self._add_raster_legend_item(parent, patch.label, patch.colors)
 
     @staticmethod
     def _add_symbol_child(
@@ -566,42 +509,6 @@ class LayerPanel(QWidget):
         child.setIcon(0, cls._color_icon(colors))
         child.setFlags(Qt.ItemFlag.ItemIsEnabled)
         parent.addChild(child)
-
-    @classmethod
-    def _add_raster_class_child(
-        cls,
-        parent: QTreeWidgetItem,
-        category: RasterClass,
-    ) -> None:
-        """添加单个栅格分类值及其对应颜色。"""
-        value_text: str = f"{category.value:.6g}"
-        label: str = category.label.strip()
-        if category.upper is not None:
-            display_label = label or f"{value_text}–{category.upper:.6g}"
-        else:
-            display_label = (
-                value_text if not label or label == value_text else f"{value_text} · {label}"
-            )
-        child = QTreeWidgetItem([display_label])
-        child.setIcon(0, cls._color_icon((category.color,)))
-        child.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        parent.addChild(child)
-
-    @classmethod
-    def _add_raster_nodata_legend(
-        cls,
-        parent: QTreeWidgetItem,
-        layer: RasterLayer,
-        symbology: RasterSymbology,
-    ) -> None:
-        """在有效分类之后列出正在上色的无数据取值。"""
-        if not symbology.nodata_visible:
-            return
-        if layer.nodata is None:
-            label = "无数据"
-        else:
-            label = f"无数据 · {float(layer.nodata):.6g}"
-        cls._add_raster_legend_item(parent, label, (symbology.nodata_color,))
 
     @staticmethod
     def _color_icon(colors: tuple[str, ...]) -> QIcon:

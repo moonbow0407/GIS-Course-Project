@@ -45,8 +45,9 @@ class PageSetupDialog(QDialog):
         form.addRow("纸张大小:", self._paper_combo)
 
         self._orientation_combo: QComboBox = QComboBox()
-        self._orientation_combo.addItem("纵向", PageOrientation.PORTRAIT)
-        self._orientation_combo.addItem("横向", PageOrientation.LANDSCAPE)
+        # 只存字符串值：QComboBox 无法可靠保留 Python Enum 对象。
+        self._orientation_combo.addItem("纵向", PageOrientation.PORTRAIT.value)
+        self._orientation_combo.addItem("横向", PageOrientation.LANDSCAPE.value)
         form.addRow("方向:", self._orientation_combo)
 
         self._dpi_spin: QDoubleSpinBox = QDoubleSpinBox()
@@ -89,7 +90,7 @@ class PageSetupDialog(QDialog):
         index = self._paper_combo.findText(page.name)
         if index >= 0:
             self._paper_combo.setCurrentIndex(index)
-        orient_index = self._orientation_combo.findData(page.orientation)
+        orient_index = self._orientation_combo.findData(page.orientation.value)
         if orient_index >= 0:
             self._orientation_combo.setCurrentIndex(orient_index)
         self._dpi_spin.setValue(page.dpi)
@@ -99,7 +100,7 @@ class PageSetupDialog(QDialog):
     def _update_preview(self) -> None:
         """更新尺寸预览。"""
         name = self._paper_combo.currentText()
-        orientation = self._orientation_combo.currentData()
+        orientation = self._resolve_orientation()
         w, h = _PAPER_SIZES_MM.get(name, (210.0, 297.0))
         if orientation == PageOrientation.LANDSCAPE:
             w, h = h, w
@@ -111,14 +112,21 @@ class PageSetupDialog(QDialog):
     def _on_accept(self) -> None:
         """确认并构建结果。"""
         name = self._paper_combo.currentText()
-        orientation = self._orientation_combo.currentData()
         self._result_page = LayoutPage.from_preset(
             name=name,
-            orientation=orientation,
+            orientation=self._resolve_orientation(),
             dpi=self._dpi_spin.value(),
             margin_mm=self._margin_spin.value(),
         )
         self.accept()
+
+    def _resolve_orientation(self) -> PageOrientation:
+        """从下拉框读取纸张方向，缺省或非法值回退为纵向。"""
+        raw = self._orientation_combo.currentData()
+        try:
+            return PageOrientation(str(raw))
+        except ValueError:
+            return PageOrientation.PORTRAIT
 
     def page(self) -> LayoutPage | None:
         """返回用户配置的新纸张规格。"""

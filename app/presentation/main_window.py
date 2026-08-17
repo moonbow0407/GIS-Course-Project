@@ -223,11 +223,15 @@ class MainWindow(QMainWindow):
         self._layout_view.set_map_canvas(self._map_canvas)
         # 布局工具栏：浮动在布局视图上方。
         self._layout_toolbar: LayoutToolbar = LayoutToolbar(self)
-        self._layout_toolbar.add_map_frame.connect(self._layout_view.add_map_frame)
+        self._layout_toolbar.add_map_frame.connect(self._on_add_map_frame)
         self._layout_toolbar.add_scale_bar.connect(self._layout_view.add_scale_bar)
         self._layout_toolbar.add_legend.connect(self._layout_view.add_legend)
         self._layout_toolbar.add_north_arrow.connect(self._layout_view.add_north_arrow)
         self._layout_toolbar.add_text.connect(self._layout_view.add_text_element)
+        self._layout_toolbar.apply_template.connect(self._on_apply_layout_template)
+        self._layout_toolbar.align_to_page.connect(
+            self._layout_view.align_selection_to_page
+        )
         self._layout_toolbar.page_setup.connect(self._on_page_setup)
         self._layout_toolbar.zoom_in.connect(self._layout_view.zoom_in)
         self._layout_toolbar.zoom_out.connect(self._layout_view.zoom_out)
@@ -4752,9 +4756,9 @@ class MainWindow(QMainWindow):
             if document is not None else set()
         )
         self._layout_toolbar.sync_add_buttons(present)
-        self._layout_toolbar.set_delete_enabled(
-            self._layout_view.selected_element_id is not None
-        )
+        selected = self._layout_view.selected_element_id is not None
+        self._layout_toolbar.set_delete_enabled(selected)
+        self._layout_toolbar.set_align_enabled(selected)
         self._layout_toolbar.set_undo_enabled(self._layout_view.can_undo())
         self._layout_toolbar.set_clear_enabled(self._layout_view.has_elements())
 
@@ -4778,6 +4782,22 @@ class MainWindow(QMainWindow):
 
         dialog = LayoutShortcutDialog(self)
         dialog.exec()
+
+    def _on_add_map_frame(self) -> None:
+        """刷新工作区快照后添加或选中地图框。"""
+        snapshot = self._application.snapshot()
+        self._layout_view.set_snapshot(snapshot)
+        element_id = self._layout_view.add_map_frame()
+        if element_id is None:
+            return
+        if not snapshot.layers:
+            self._ready_label.setText("已添加空白地图框，请先加载图层")
+
+    def _on_apply_layout_template(self) -> None:
+        """按专题图默认位置补齐标题、地图框和图例等元素。"""
+        self._layout_view.set_snapshot(self._application.snapshot())
+        self._layout_view.apply_thematic_template()
+        self._sync_layout_toolbar_states()
 
     def _on_page_setup(self) -> None:
         """打开页面设置对话框并应用新纸张规格。"""
@@ -4809,20 +4829,9 @@ class MainWindow(QMainWindow):
         element_id = self._layout_view.selected_element_id
         if element_id is None:
             return
-        element = self._layout_view.find_element(element_id)
-        if element is None:
+        if self._layout_view.find_element(element_id) is None:
             return
-        from app.presentation.widgets.element_properties_dialog import (
-            ElementPropertiesDialog,
-        )
-
-        dialog = ElementPropertiesDialog(self)
-        dialog.set_element(element)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        changes = dialog.changes()
-        if changes:
-            self._layout_view.apply_element_changes(element_id, changes)
+        self._layout_view._open_properties_dialog(element_id)
 
     def _export_layout(self) -> None:
         """导出布局为 PDF 或图片文件。"""
@@ -5118,7 +5127,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "关于 GIS 桌面通用平台",
-            "GIS 桌面通用平台\n\n基于 PySide6、GeoPandas 与 Rasterio 构建。\n当前版本已完成统一主界面和功能接口集成。",
+            "这是一个简易的C/S架构的桌面端GIS通用平台，有很多不完善的地方，敬请谅解~",
         )
 
     def _refresh_workspace(

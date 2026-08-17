@@ -4,14 +4,16 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from app.application.results import LayerSnapshot, WorkspaceSnapshot
 from app.domain.layout import (
     LayoutDocument,
+    LayoutPage,
     MapFrameElement,
+    PageOrientation,
     TextElement,
 )
 from app.presentation.widgets.layout_view import LayoutView, _mm_to_px
@@ -138,13 +140,11 @@ def test_resize_handles_removed_on_deselect() -> None:
 
 
 def test_add_map_frame_toggles_add_select_then_remove() -> None:
-    """add_map_frame 应实现切换：添加→选中已有→删除→重新添加。"""
+    """add_map_frame：添加后再次点击只选中，不再删除。"""
     view = _make_view()
-    # 第一次点击：添加并选中
     eid1 = view.add_map_frame()
     assert eid1 is not None
     assert view.selected_element_id == eid1
-    # 点击空白处取消选中后再次点击：选中已有元素，不新增
     view._select_element(None)
     eid2 = view.add_map_frame()
     assert eid2 == eid1
@@ -153,19 +153,13 @@ def test_add_map_frame_toggles_add_select_then_remove() -> None:
         e for e in view.document().elements if isinstance(e, MapFrameElement)
     ]
     assert len(frame_count) == 1
-    # 已选中时再次点击：删除
     result = view.add_map_frame()
-    assert result is None
-    assert view.find_element(eid1) is None
-    # 再次点击：重新添加
-    eid3 = view.add_map_frame()
-    assert eid3 is not None
-    assert eid3 != eid1
-    assert view.selected_element_id == eid3
+    assert result == eid1
+    assert view.find_element(eid1) is not None
 
 
 def test_add_scale_bar_toggles_select_then_remove() -> None:
-    """add_scale_bar 应实现切换：添加→选中已有→删除。"""
+    """add_scale_bar：添加后再次点击只选中，不再删除。"""
     view = _make_view()
     eid = view.add_scale_bar()
     assert eid is not None
@@ -173,7 +167,7 @@ def test_add_scale_bar_toggles_select_then_remove() -> None:
     eid2 = view.add_scale_bar()
     assert eid2 == eid
     view.add_scale_bar()
-    assert view.find_element(eid) is None
+    assert view.find_element(eid) is not None
 
 
 def test_delete_selected_removes_resize_handles_immediately() -> None:
@@ -381,6 +375,107 @@ def test_shift_drag_pans_map_content() -> None:
     assert frame.map_center_x < old_cx
     # 场景向下拖 → 地图中心向北移动（Y 增）
     assert frame.map_center_y > old_cy
+
+
+def test_overflowing_map_frame_can_be_dragged_back() -> None:
+    """地图框超出纸张后，点框内（含纸外部分）仍应拖动元素而不是平移视图。"""
+    view = _make_view()
+    fid = view.add_map_frame()
+    frame = view.find_element(fid)
+    assert isinstance(frame, MapFrameElement)
+    page = view.document().page
+    frame.x_mm = page.margin_mm
+    frame.y_mm = page.height_mm * 0.55
+    frame.width_mm = 90.0
+    frame.height_mm = page.height_mm
+    view._render_element(frame)
+    view._expand_scene_rect()
+    view._select_element(None)
+    dpi = view._view_dpi
+    # 点在纸张内的框上部
+    on_page = QPointF(
+        _mm_to_px(frame.x_mm + 30.0, dpi),
+        _mm_to_px(frame.y_mm + 15.0, dpi),
+    )
+    _send_press(view, on_page, Qt.KeyboardModifier.NoModifier)
+    assert view._dragging_element_id == fid
+    assert view._panning is False
+    old_y = frame.y_mm
+    end = QPointF(on_page.x(), on_page.y() - _mm_to_px(25.0, dpi))
+    _send_move(view, end, Qt.KeyboardModifier.NoModifier)
+    _send_release(view, end, Qt.KeyboardModifier.NoModifier)
+    assert frame.y_mm < old_y
+    # 点在纸张下方、但仍落在地图框内的溢出部分
+    view._select_element(None)
+    overflow = QPointF(
+        _mm_to_px(frame.x_mm + 30.0, dpi),
+        _mm_to_px(page.height_mm + 12.0, dpi),
+    )
+    assert view._hits_element(frame, overflow)
+    _send_press(view, overflow, Qt.KeyboardModifier.NoModifier)
+    assert view._dragging_element_id == fid
+    assert view._panning is False
+
+
+def test_page_orientation_change_keeps_elements_draggable() -> None:
+    """更换纸张方向后，已选中的地图框仍应能拖动。
+
+    换页会重建场景。若未先卸掉缩放手柄，scene.clear() 会留下已删除的
+    C++ 图元，下一次点击在 _handle_at 里踩空，表现为完全拖不动。
+    """
+    view = _make_view()
+    fid = view.add_map_frame()
+    assert fid is not None
+    view._select_element(fid)
+    assert len(view._resize_handles) == 8
+    document = view.document()
+    assert document is not None
+    new_page = LayoutPage.from_preset(document.page.name, PageOrientation.LANDSCAPE)
+    view.set_document(LayoutDocument(page=new_page, elements=document.elements))
+    for handle in view._resize_handles:
+        assert handle.scene() is view.scene()
+    frame = view.find_element(fid)
+    assert isinstance(frame, MapFrameElement)
+    dpi = view._view_dpi
+    start = QPointF(
+        _mm_to_px(frame.x_mm + frame.width_mm / 2, dpi),
+        _mm_to_px(frame.y_mm + frame.height_mm / 2, dpi),
+    )
+    old_x = frame.x_mm
+    _send_press(view, start, Qt.KeyboardModifier.NoModifier)
+    assert view._dragging_element_id == fid
+    assert view._resizing_handle_index is None
+    end = QPointF(start.x() + 40, start.y())
+    _send_move(view, end, Qt.KeyboardModifier.NoModifier)
+    _send_release(view, end, Qt.KeyboardModifier.NoModifier)
+    assert frame.x_mm != old_x
+
+
+def test_align_selection_centers_map_frame_on_printable_area() -> None:
+    """页面居中应把地图框放到可印区中心，且可撤销。"""
+    view = _make_view()
+    fid = view.add_map_frame()
+    frame = view.find_element(fid)
+    assert isinstance(frame, MapFrameElement)
+    page = view.document().page
+    frame.x_mm = 12.0
+    frame.y_mm = 18.0
+    view._render_element(frame)
+    view._select_element(fid)
+    old_x, old_y = frame.x_mm, frame.y_mm
+    view.align_selection_to_page("center", "middle")
+    assert frame.x_mm == page.margin_mm + (page.printable_width_mm - frame.width_mm) / 2.0
+    assert frame.y_mm == page.margin_mm + (page.printable_height_mm - frame.height_mm) / 2.0
+    view._undo()
+    assert (frame.x_mm, frame.y_mm) == (old_x, old_y)
+    landscape = LayoutPage.from_preset(page.name, PageOrientation.LANDSCAPE)
+    view.set_document(LayoutDocument(page=landscape, elements=view.document().elements))
+    view._select_element(fid)
+    view.align_selection_to_page("center", "middle")
+    new_page = view.document().page
+    assert frame.x_mm == new_page.margin_mm + (
+        new_page.printable_width_mm - frame.width_mm
+    ) / 2.0
 
 
 def test_alt_click_cycles_selected_frame_not_pan() -> None:

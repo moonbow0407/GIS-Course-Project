@@ -16,7 +16,7 @@ def test_page_setup_dialog_returns_configured_page() -> None:
     current = LayoutPage.from_preset("A4")
     dialog = PageSetupDialog(current)
     dialog._paper_combo.setCurrentText("A3")
-    orient_idx = dialog._orientation_combo.findData(PageOrientation.LANDSCAPE)
+    orient_idx = dialog._orientation_combo.findData(PageOrientation.LANDSCAPE.value)
     dialog._orientation_combo.setCurrentIndex(orient_idx)
     dialog._dpi_spin.setValue(150.0)
     dialog._margin_spin.setValue(15.0)

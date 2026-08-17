@@ -6,12 +6,14 @@
 """
 
 import math
+from dataclasses import dataclass
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QFontMetrics,
     QPainter,
     QPainterPath,
     QPen,
@@ -27,6 +29,12 @@ from PySide6.QtWidgets import (
 )
 
 from app.application.display_models import RasterDisplayPayload, VectorDisplayPayload
+from app.application.legend_model import (
+    LegendLayerBlock,
+    LegendPatch,
+    LegendPatchKind,
+    build_layout_legend_model,
+)
 from app.application.results import WorkspaceSnapshot
 from app.domain.layout import (
     LegendElement,
@@ -135,13 +143,32 @@ def render_map_frame(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class _ScaleBarMetrics:
+    """比例尺绘制用的像素几何。"""
+
+    px: float
+    py: float
+    actual_pw: float
+    seg_px: float
+    seg_ground_m: float
+    num_segments: int
+    unit: str
+    color: QColor
+    alt_color: QColor
+    label_font: QFont
+    bar_y: float
+    bar_h: float
+    stroke: float
+
+
 def render_scale_bar(
     element: ScaleBarElement,
     scene: QGraphicsScene,
     dpi: float,
     map_frame: MapFrameElement | None = None,
 ) -> list[QGraphicsItem]:
-    """在场景中绘制黑白交替比例尺。
+    """在场景中绘制比例尺，形态对齐 ArcGIS Pro 的条状 / 线状两类。
 
     参数:
         element: 比例尺布局元素。
@@ -152,70 +179,267 @@ def render_scale_bar(
     返回:
         创建的全部图元。
     """
+    metrics = _scale_bar_metrics(element, dpi, map_frame)
     items: list[QGraphicsItem] = []
+    if element.style == "double_alternating":
+        items.extend(_draw_double_alternating_bar(scene, metrics))
+    elif element.style == "line":
+        items.extend(_draw_line_scale_bar(scene, metrics))
+    else:
+        items.extend(_draw_alternating_bar(scene, metrics))
+    items.extend(_draw_scale_bar_labels(scene, metrics))
+    return items
+
+
+def _scale_bar_metrics(
+    element: ScaleBarElement,
+    dpi: float,
+    map_frame: MapFrameElement | None,
+) -> _ScaleBarMetrics:
+    """按框宽和地图比例计算分段几何。"""
     px: float = _mm_to_px(element.x_mm, dpi)
     py: float = _mm_to_px(element.y_mm, dpi)
     pw: float = _mm_to_px(element.width_mm, dpi) if element.width_mm > 0 else 120
     ph: float = _mm_to_px(element.height_mm, dpi) if element.height_mm > 0 else 4
+    segments: int = max(1, element.num_segments)
 
-    # 计算比例尺代表的实际距离
     mupp: float = map_frame.map_units_per_pixel if map_frame is not None else 1.0
-    # 比例尺总宽度对应的地面距离（米）
     total_ground_m: float = pw * mupp
-    # 取整到最接近的"好看"数字
     nice: float = _nice_number(total_ground_m)
-    # 每个分段的地面距离
-    seg_ground: float = nice / element.num_segments
-
-    # 在场景中，总像素宽度应该反映 nice 地面距离
     actual_pw: float = nice / mupp if mupp > 0 else pw
-    seg_px: float = actual_pw / element.num_segments
 
-    bar_h: float = ph * 0.5
-    bar_y: float = py + ph - bar_h
-
-    color: QColor = QColor(element.color)
-    alt_color: QColor = QColor("#ffffff")
     label_font: QFont = QFont("Arial")
     label_font.setPixelSize(max(1, round(_mm_to_px(element.label_font_size_mm, dpi))))
-
-    for i in range(element.num_segments):
-        seg_x: float = px + i * seg_px
-        fill: QColor = color if i % 2 == 0 else alt_color
-        rect: QGraphicsRectItem = scene.addRect(
-            QRectF(seg_x, bar_y, seg_px, bar_h),
-            QPen(Qt.PenStyle.NoPen),
-            QBrush(fill),
-        )
-        rect.setZValue(20)
-        items.append(rect)
-
-        # 标签
-        dist: float = seg_ground
-        if element.unit == "km" and dist >= 1000:
-            label: str = f"{dist / 1000:.1f} km" if i == element.num_segments - 1 else ""
-        elif element.unit == "km":
-            label = f"{dist:.0f} m" if i == 0 else ""
-        else:
-            label = f"{dist:.0f}" if i == 0 or i == element.num_segments - 1 else ""
-        if label:
-            text: QGraphicsSimpleTextItem = scene.addSimpleText(
-                label, label_font,
-            )
-            text.setPos(seg_x, py)
-            text.setBrush(QBrush(color))
-            text.setZValue(20)
-            items.append(text)
-
-    # 顶层水平线
-    line = scene.addLine(
-        px, bar_y, px + actual_pw, bar_y,
-        QPen(color, 1.0),
+    bar_h: float = ph * 0.5
+    return _ScaleBarMetrics(
+        px=px,
+        py=py,
+        actual_pw=actual_pw,
+        seg_px=actual_pw / segments,
+        seg_ground_m=nice / segments,
+        num_segments=segments,
+        unit=element.unit,
+        color=QColor(element.color),
+        alt_color=QColor("#ffffff"),
+        label_font=label_font,
+        bar_y=py + ph - bar_h,
+        bar_h=bar_h,
+        stroke=max(1.0, _mm_to_px(0.2, dpi)),
     )
-    line.setZValue(20)
-    items.append(line)
 
+
+def _draw_alternating_bar(
+    scene: QGraphicsScene,
+    metrics: _ScaleBarMetrics,
+) -> list[QGraphicsItem]:
+    """单层黑白交替条（Pro Alternating Scale Bar）。"""
+    items: list[QGraphicsItem] = []
+    for i in range(metrics.num_segments):
+        fill = metrics.color if i % 2 == 0 else metrics.alt_color
+        items.append(
+            _add_scale_rect(
+                scene,
+                metrics.px + i * metrics.seg_px,
+                metrics.bar_y,
+                metrics.seg_px,
+                metrics.bar_h,
+                fill,
+            )
+        )
+    items.extend(_add_scale_dividers(scene, metrics))
+    items.append(_add_scale_outline(scene, metrics))
     return items
+
+
+def _draw_double_alternating_bar(
+    scene: QGraphicsScene,
+    metrics: _ScaleBarMetrics,
+) -> list[QGraphicsItem]:
+    """双层黑白交错条（Pro Double Alternating Scale Bar）。"""
+    items: list[QGraphicsItem] = []
+    row_h: float = metrics.bar_h / 2.0
+    for i in range(metrics.num_segments):
+        top_fill = metrics.color if i % 2 == 0 else metrics.alt_color
+        bot_fill = metrics.alt_color if i % 2 == 0 else metrics.color
+        seg_x: float = metrics.px + i * metrics.seg_px
+        items.append(
+            _add_scale_rect(scene, seg_x, metrics.bar_y, metrics.seg_px, row_h, top_fill)
+        )
+        items.append(
+            _add_scale_rect(
+                scene, seg_x, metrics.bar_y + row_h, metrics.seg_px, row_h, bot_fill,
+            )
+        )
+    items.extend(_add_scale_dividers(scene, metrics))
+    items.append(_add_scale_outline(scene, metrics))
+    mid_y: float = metrics.bar_y + row_h
+    items.append(
+        _add_scale_line(
+            scene,
+            metrics.px,
+            mid_y,
+            metrics.px + metrics.actual_pw,
+            mid_y,
+            metrics.color,
+            metrics.stroke,
+        )
+    )
+    return items
+
+
+def _draw_line_scale_bar(
+    scene: QGraphicsScene,
+    metrics: _ScaleBarMetrics,
+) -> list[QGraphicsItem]:
+    """线状刻度比例尺（Pro Scale Line）。"""
+    items: list[QGraphicsItem] = []
+    base_y: float = metrics.bar_y + metrics.bar_h
+    items.append(
+        _add_scale_line(
+            scene,
+            metrics.px,
+            base_y,
+            metrics.px + metrics.actual_pw,
+            base_y,
+            metrics.color,
+            metrics.stroke,
+        )
+    )
+    ticks: int = metrics.num_segments + 1
+    for i in range(ticks):
+        tick_x: float = metrics.px + i * metrics.seg_px
+        # 起止刻度拉满，中间刻度略短，对应 Pro 的 division marks。
+        tick_h: float = metrics.bar_h if i in {0, ticks - 1} else metrics.bar_h * 0.7
+        items.append(
+            _add_scale_line(
+                scene,
+                tick_x,
+                base_y - tick_h,
+                tick_x,
+                base_y,
+                metrics.color,
+                metrics.stroke,
+            )
+        )
+    return items
+
+
+def _draw_scale_bar_labels(
+    scene: QGraphicsScene,
+    metrics: _ScaleBarMetrics,
+) -> list[QGraphicsItem]:
+    """在各分段点标注累计距离，单位写在末端。"""
+    items: list[QGraphicsItem] = []
+    font_metrics = QFontMetrics(metrics.label_font)
+    label_h: float = float(font_metrics.height())
+    label_y: float = max(metrics.py, metrics.bar_y - label_h - 1.0)
+    last_index: int = metrics.num_segments
+    for i in range(last_index + 1):
+        meters: float = i * metrics.seg_ground_m
+        text = _format_scale_label(
+            meters, metrics.unit, with_unit=(i == last_index),
+        )
+        item: QGraphicsSimpleTextItem = scene.addSimpleText(text, metrics.label_font)
+        width: float = item.boundingRect().width()
+        tick_x: float = metrics.px + i * metrics.seg_px
+        if i == 0:
+            pos_x = tick_x
+        elif i == last_index:
+            pos_x = tick_x
+        else:
+            pos_x = tick_x - width / 2.0
+        item.setPos(pos_x, label_y)
+        item.setBrush(QBrush(metrics.color))
+        item.setZValue(20)
+        items.append(item)
+    return items
+
+
+def _format_scale_label(meters: float, unit: str, *, with_unit: bool) -> str:
+    """把地面距离格式化为比例尺数字。"""
+    if unit == "km" and meters >= 1000.0:
+        value = meters / 1000.0
+        suffix = " km"
+    elif unit == "km" and meters == 0.0:
+        value = 0.0
+        suffix = " km"
+    else:
+        value = meters
+        suffix = " m"
+    if abs(value - round(value)) < 1e-6:
+        number = str(int(round(value)))
+    else:
+        number = f"{value:.1f}"
+    return f"{number}{suffix}" if with_unit else number
+
+
+def _add_scale_rect(
+    scene: QGraphicsScene,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    fill: QColor,
+) -> QGraphicsRectItem:
+    """添加无描边填充块。"""
+    rect = scene.addRect(
+        QRectF(x, y, width, height),
+        QPen(Qt.PenStyle.NoPen),
+        QBrush(fill),
+    )
+    rect.setZValue(20)
+    return rect
+
+
+def _add_scale_dividers(
+    scene: QGraphicsScene,
+    metrics: _ScaleBarMetrics,
+) -> list[QGraphicsItem]:
+    """在分段处画竖线。"""
+    items: list[QGraphicsItem] = []
+    for i in range(1, metrics.num_segments):
+        tick_x = metrics.px + i * metrics.seg_px
+        items.append(
+            _add_scale_line(
+                scene,
+                tick_x,
+                metrics.bar_y,
+                tick_x,
+                metrics.bar_y + metrics.bar_h,
+                metrics.color,
+                metrics.stroke,
+            )
+        )
+    return items
+
+
+def _add_scale_outline(
+    scene: QGraphicsScene,
+    metrics: _ScaleBarMetrics,
+) -> QGraphicsRectItem:
+    """勾出整条比例尺外框，保证浅色分段在白纸上可见。"""
+    outline = scene.addRect(
+        QRectF(metrics.px, metrics.bar_y, metrics.actual_pw, metrics.bar_h),
+        QPen(metrics.color, metrics.stroke),
+        QBrush(Qt.BrushStyle.NoBrush),
+    )
+    outline.setZValue(21)
+    return outline
+
+
+def _add_scale_line(
+    scene: QGraphicsScene,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    color: QColor,
+    width: float,
+) -> QGraphicsItem:
+    """添加比例尺线段。"""
+    line = scene.addLine(x1, y1, x2, y2, QPen(color, width))
+    line.setZValue(21)
+    return line
 
 
 def _nice_number(value: float) -> float:
@@ -240,6 +464,188 @@ def _nice_number(value: float) -> float:
 # 图例渲染
 # ---------------------------------------------------------------------------
 
+_LEGEND_PAD_MM = 2.5
+_LEGEND_PATCH_W_MM = 8.0
+_LEGEND_PATCH_H_MM = 4.5
+_LEGEND_PATCH_GAP_MM = 2.0
+_LEGEND_CLASS_GAP_MM = 1.4
+_LEGEND_TITLE_GAP_MM = 2.2
+_LEGEND_COL_GAP_MM = 4.0
+_LEGEND_RULE_MM = 0.18
+_LEGEND_TITLE_COLOR = "#111827"
+_LEGEND_LABEL_COLOR = "#1f2937"
+_LEGEND_FONTS = (
+    "Microsoft YaHei",
+    "Microsoft YaHei UI",
+    "Source Han Sans SC",
+    "SimHei",
+    "Arial",
+)
+
+
+def estimate_legend_height_mm(
+    element: LegendElement,
+    snapshot: WorkspaceSnapshot | None,
+) -> float:
+    """按当前图例模型估算所需高度（毫米），供首次添加时定框。"""
+    rows, headings = _legend_body_counts(element, snapshot)
+    height = _LEGEND_PAD_MM * 2
+    if _legend_shows_title(element):
+        height += element.title_font_size_mm + _LEGEND_TITLE_GAP_MM
+    row_h = max(_LEGEND_PATCH_H_MM, element.item_font_size_mm) + _LEGEND_CLASS_GAP_MM
+    cols = max(1, element.column_count)
+    body = rows + headings
+    per_col = math.ceil(body / cols) if body else 0
+    height += per_col * row_h
+    return max(12.0, height)
+
+
+def estimate_legend_width_mm(
+    element: LegendElement,
+    snapshot: WorkspaceSnapshot | None,
+) -> float:
+    """按最长标题/标签估算图例宽度（毫米）。"""
+    labels = _legend_width_labels(element, snapshot)
+    text_w = 12.0
+    for text, size_mm, bold in labels:
+        text_w = max(text_w, _estimate_text_width_mm(text, size_mm, bold=bold))
+    patch_row_w = _LEGEND_PATCH_W_MM + _LEGEND_PATCH_GAP_MM + text_w
+    if _legend_shows_title(element):
+        title_w = _estimate_text_width_mm(
+            element.title.strip(), element.title_font_size_mm, bold=True,
+        )
+        patch_row_w = max(patch_row_w, title_w)
+    cols = max(1, element.column_count)
+    width = (
+        _LEGEND_PAD_MM * 2
+        + cols * patch_row_w
+        + (cols - 1) * _LEGEND_COL_GAP_MM
+    )
+    return max(22.0, width)
+
+
+def _legend_shows_title(element: LegendElement) -> bool:
+    """标题开关打开且文字非空时才绘制标题。"""
+    return element.show_title and bool(element.title.strip())
+
+
+def _legend_body_counts(
+    element: LegendElement,
+    snapshot: WorkspaceSnapshot | None,
+) -> tuple[int, int]:
+    """返回 (补丁行数, 图层名行数)。"""
+    rows = 0
+    headings = 0
+    for _block, visible in _iter_legend_blocks(element, snapshot):
+        if _should_draw_layer_heading(element, visible):
+            headings += 1
+        rows += len(visible)
+    return rows, headings
+
+
+def _legend_width_labels(
+    element: LegendElement,
+    snapshot: WorkspaceSnapshot | None,
+) -> list[tuple[str, float, bool]]:
+    """收集用于估宽的 (文字, 字号毫米, 是否粗体)。"""
+    labels: list[tuple[str, float, bool]] = []
+    if _legend_shows_title(element):
+        labels.append((element.title.strip(), element.title_font_size_mm, True))
+    for block, visible in _iter_legend_blocks(element, snapshot):
+        if _should_draw_layer_heading(element, visible):
+            labels.append((block.layer_name, element.item_font_size_mm, True))
+        for patch in visible:
+            label = _legend_patch_label(block, visible, patch)
+            labels.append((label, element.item_font_size_mm, False))
+    return labels
+
+
+def _iter_legend_blocks(
+    element: LegendElement,
+    snapshot: WorkspaceSnapshot | None,
+) -> list[tuple[LegendLayerBlock, tuple[LegendPatch, ...]]]:
+    """按布局覆盖后的模型列出有可见补丁的图层块。"""
+    if snapshot is None:
+        return []
+    result: list[tuple[LegendLayerBlock, tuple[LegendPatch, ...]]] = []
+    for block in build_layout_legend_model(snapshot, element.label_overrides):
+        visible = _visible_layout_patches(block)
+        if visible:
+            result.append((block, visible))
+    return result
+
+
+def _should_draw_layer_heading(
+    element: LegendElement,
+    patches: tuple[LegendPatch, ...],
+) -> bool:
+    """图层名默认关闭；打开后仍只在多类别/栅格专题下显示。"""
+    return element.show_layer_headings and _needs_layer_header(patches)
+
+
+def _legend_patch_label(
+    block: LegendLayerBlock,
+    visible: tuple[LegendPatch, ...],
+    patch: LegendPatch,
+) -> str:
+    """单符号图层用图层名作标签，分类图层用类别名。"""
+    is_simple = (
+        len(visible) == 1
+        and patch.kind not in {LegendPatchKind.SWATCH, LegendPatchKind.RAMP}
+    )
+    return block.layer_name if is_simple else patch.label
+
+
+def _estimate_text_width_mm(
+    text: str, font_size_mm: float, *, bold: bool = False,
+) -> float:
+    """按中西文字宽粗估一行宽度，避免估宽依赖 Qt 字体度量。"""
+    width = 0.0
+    for char in text:
+        code = ord(char)
+        if 0x4E00 <= code <= 0x9FFF or 0x3000 <= code <= 0x303F:
+            width += font_size_mm * 1.05
+        elif char == " ":
+            width += font_size_mm * 0.35
+        else:
+            width += font_size_mm * 0.56
+    if bold:
+        width *= 1.06
+    return width
+
+
+def _visible_layout_patches(block: LegendLayerBlock) -> tuple[LegendPatch, ...]:
+    """返回布局图例应绘制的可见补丁。"""
+    return tuple(patch for patch in block.patches if patch.visible)
+
+
+def _needs_layer_header(patches: tuple[LegendPatch, ...]) -> bool:
+    """多个类别或栅格专题时，在补丁前加一层图层名。"""
+    if len(patches) > 1:
+        return True
+    if not patches:
+        return False
+    return patches[0].kind in {LegendPatchKind.SWATCH, LegendPatchKind.RAMP}
+
+
+@dataclass(frozen=True, slots=True)
+class _LegendDrawRow:
+    """图例框内的一行待绘内容。"""
+
+    kind: str
+    label: str
+    font: QFont
+    patch: LegendPatch | None
+
+
+def _legend_font(size_mm: float, dpi: float, *, bold: bool = False) -> QFont:
+    """图例用中文字体，避免 Arial 把省名画得又稀又淡。"""
+    font = QFont()
+    font.setFamilies(list(_LEGEND_FONTS))
+    font.setPixelSize(max(1, round(_mm_to_px(size_mm, dpi))))
+    font.setBold(bold)
+    return font
+
 
 def render_legend(
     element: LegendElement,
@@ -247,221 +653,250 @@ def render_legend(
     dpi: float,
     snapshot: WorkspaceSnapshot | None = None,
 ) -> list[QGraphicsItem]:
-    """在场景中绘制图例：按几何类型渲染对应符号预览 + 图层名称。
-
-    点图层 → 实心圆，线图层 → 水平线段，面图层 → 填充矩形。
-    颜色取自图层的实际符号系统，与地图显示一致。
-    支持通过 ``column_count`` 分列布局。
+    """在元素框内绘制左对齐、贴内容的专题图例。
 
     参数:
         element: 图例布局元素。
         scene: 目标场景。
         dpi: 输出分辨率。
-        snapshot: 工作区快照（获取图层符号信息）。
+        snapshot: 工作区快照。
 
     返回:
         创建的全部图元。
     """
-    from app.domain.raster_layer import RasterLayer
-    from app.domain.symbology import VectorRendererType
-
     items: list[QGraphicsItem] = []
     px: float = _mm_to_px(element.x_mm, dpi)
     py: float = _mm_to_px(element.y_mm, dpi)
+    frame_h: float = _mm_to_px(element.height_mm, dpi)
+    frame_w: float = _mm_to_px(element.width_mm, dpi)
+    frame_bottom: float = py + frame_h
+    pad: float = _mm_to_px(_LEGEND_PAD_MM, dpi)
+    inner_x: float = px + pad
+    inner_w: float = max(1.0, frame_w - pad * 2)
 
-    # ── 字体与尺寸 ──────────────────────────────────────────────
-    title_font: QFont = QFont("Arial")
-    title_font.setPixelSize(max(1, round(_mm_to_px(element.title_font_size_mm, dpi))))
-    title_font.setBold(True)
+    title_font = _legend_font(element.title_font_size_mm, dpi, bold=True)
+    item_font = _legend_font(element.item_font_size_mm, dpi)
+    heading_font = _legend_font(element.item_font_size_mm, dpi, bold=True)
 
-    item_font: QFont = QFont("Arial")
-    item_font.setPixelSize(max(1, round(_mm_to_px(element.item_font_size_mm, dpi))))
+    row_h: float = _mm_to_px(
+        max(_LEGEND_PATCH_H_MM, element.item_font_size_mm) + _LEGEND_CLASS_GAP_MM,
+        dpi,
+    )
+    patch_w: float = _mm_to_px(_LEGEND_PATCH_W_MM, dpi)
+    patch_h: float = _mm_to_px(_LEGEND_PATCH_H_MM, dpi)
+    patch_gap: float = _mm_to_px(_LEGEND_PATCH_GAP_MM, dpi)
 
-    sub_font: QFont = QFont("Arial")
-    sub_font.setPixelSize(max(1, round(_mm_to_px(element.item_font_size_mm * 0.85, dpi))))
+    body_entries: list[_LegendDrawRow] = []
+    for block, visible in _iter_legend_blocks(element, snapshot):
+        if _should_draw_layer_heading(element, visible):
+            body_entries.append(
+                _LegendDrawRow(
+                    kind="layer_header",
+                    label=block.layer_name,
+                    font=heading_font,
+                    patch=None,
+                )
+            )
+        for patch in visible:
+            body_entries.append(
+                _LegendDrawRow(
+                    kind="patch",
+                    label=_legend_patch_label(block, visible, patch),
+                    font=item_font,
+                    patch=patch,
+                )
+            )
 
-    row_h: float = _mm_to_px(element.item_font_size_mm + 2.5, dpi)
-    patch_size: float = _mm_to_px(7.0, dpi)
-    gap: float = _mm_to_px(1.5, dpi)
-    indent: float = _mm_to_px(4.0, dpi)
+    cursor_y: float = py + pad
+    content_w: float = 0.0
+    title_rule_y: float | None = None
+    if _legend_shows_title(element):
+        title_item = scene.addSimpleText(element.title.strip(), title_font)
+        title_item.setPos(inner_x, cursor_y)
+        title_item.setBrush(QBrush(QColor(_LEGEND_TITLE_COLOR)))
+        title_item.setZValue(20)
+        items.append(title_item)
+        title_box = title_item.boundingRect()
+        content_w = max(content_w, title_box.width())
+        cursor_y += title_box.height() + _mm_to_px(0.7, dpi)
+        title_rule_y = cursor_y
+        cursor_y += _mm_to_px(_LEGEND_TITLE_GAP_MM - 0.7, dpi)
 
-    # ── 阶段一：收集条目（不立即创建图元） ──────────────────────
-    # 每条目: (kind, label, font, color, geom_family, style, height_px)
-    body_entries: list[dict] = []
-
-    if snapshot is not None:
-        for layer_snap in snapshot.layers:
-            if not layer_snap.visible:
-                continue
-
-            layer = layer_snap.layer
-            layer_name: str = getattr(layer, "name", "图层")
-
-            if isinstance(layer, RasterLayer):
-                body_entries.append({
-                    "kind": "simple",
-                    "label": layer_name,
-                    "font": item_font,
-                    "color": "#374151",
-                    "geom": "raster",
-                    "style": None,
-                })
-                continue
-
-            if not isinstance(layer, VectorLayer):
-                continue
-
-            symbology = layer.symbology
-            geom_family = layer.geometry_family
-
-            if (symbology is not None
-                    and symbology.renderer_type is VectorRendererType.UNIQUE
-                    and symbology.unique_classes):
-                # 图层名（粗体）
-                body_entries.append({
-                    "kind": "layer_header",
-                    "label": layer_name,
-                    "font": item_font,
-                    "color": "#374151",
-                    "geom": None,
-                    "style": None,
-                })
-                for cat in symbology.unique_classes:
-                    if not cat.visible:
-                        continue
-                    cat_label = cat.label if cat.label else cat.value_key
-                    body_entries.append({
-                        "kind": "category",
-                        "label": cat_label,
-                        "font": sub_font,
-                        "color": "#6b7280",
-                        "geom": geom_family,
-                        "style": cat.symbol,
-                    })
-            else:
-                body_entries.append({
-                    "kind": "simple",
-                    "label": layer_name,
-                    "font": item_font,
-                    "color": "#374151",
-                    "geom": geom_family,
-                    "style": layer.style,
-                })
-
-    # ── 阶段二：计算列布局 ──────────────────────────────────────
     num_cols: int = max(1, element.column_count)
-    total_col_width: float = _mm_to_px(element.width_mm, dpi)
-    col_width: float = total_col_width / num_cols
-    per_col: int = (
-        math.ceil(len(body_entries) / num_cols) if body_entries else 1
+    col_gap: float = _mm_to_px(_LEGEND_COL_GAP_MM, dpi)
+    col_width: float = (
+        (inner_w - (num_cols - 1) * col_gap) / num_cols if num_cols > 1 else inner_w
     )
+    per_col: int = math.ceil(len(body_entries) / num_cols) if body_entries else 1
 
-    # ── 阶段三：渲染标题（跨全部列居中） ──────────────────────────
-    title_item: QGraphicsSimpleTextItem = scene.addSimpleText(
-        element.title, title_font,
-    )
-    title_width: float = title_item.boundingRect().width()
-    title_item.setPos(
-        px + total_col_width / 2.0 - title_width / 2.0,
-        py,
-    )
-    title_item.setBrush(QBrush(QColor("#1f2937")))
-    title_item.setZValue(20)
-    items.append(title_item)
-
-    title_bottom: float = py + title_item.boundingRect().height() + gap * 2
-
-    # ── 阶段四：逐列渲染条目 ────────────────────────────────────
     for idx, entry in enumerate(body_entries):
-        col: int = idx // per_col
-        if col >= num_cols:
-            col = num_cols - 1  # 防止舍入导致列越界
+        col: int = min(idx // per_col, num_cols - 1)
         row_in_col: int = idx % per_col
+        entry_x: float = inner_x + col * (col_width + col_gap)
+        entry_y: float = cursor_y + row_in_col * row_h
+        if entry_y + row_h > frame_bottom - pad + 1.0:
+            continue
 
-        entry_x: float = px + col * col_width
-        entry_y: float = title_bottom + row_in_col * row_h
-
-        kind: str = entry["kind"]
-        label: str = entry["label"]
-        font: QFont = entry["font"]
-        color_str: str = entry["color"]
-        geom = entry["geom"]
-        style = entry["style"]
-
-        if kind == "layer_header":
-            # 粗体图层名（无符号）
-            text = scene.addSimpleText(label, font)
-            text.setPos(entry_x, entry_y)
-            text.setBrush(QBrush(QColor(color_str)))
+        if entry.kind == "layer_header":
+            text = scene.addSimpleText(entry.label, entry.font)
+            text_h = text.boundingRect().height()
+            text.setPos(entry_x, entry_y + (row_h - text_h) / 2.0)
+            text.setBrush(QBrush(QColor(_LEGEND_TITLE_COLOR)))
             text.setZValue(20)
             items.append(text)
+            content_w = max(content_w, text.boundingRect().width())
+            continue
 
-        elif kind == "category":
-            # 缩进子条目：符号色块 + 标签
-            cat_px: float = entry_x + indent
-            _draw_patch_for_geom(
-                scene, items, geom, style,
-                cat_px, entry_y, patch_size, row_h,
-            )
-            cat_label_x: float = cat_px + patch_size + _mm_to_px(2.0, dpi)
-            text = scene.addSimpleText(f"  {label}", font)
-            text.setPos(cat_label_x, entry_y)
-            text.setBrush(QBrush(QColor(color_str)))
-            text.setZValue(20)
-            items.append(text)
+        row_patch = entry.patch
+        if row_patch is None:
+            continue
+        _draw_legend_patch(
+            scene, items, row_patch, entry_x, entry_y, patch_w, patch_h, row_h,
+        )
+        text = scene.addSimpleText(entry.label, entry.font)
+        text_box = text.boundingRect()
+        text.setPos(
+            entry_x + patch_w + patch_gap,
+            entry_y + (row_h - text_box.height()) / 2.0,
+        )
+        text.setBrush(QBrush(QColor(_LEGEND_LABEL_COLOR)))
+        text.setZValue(20)
+        items.append(text)
+        content_w = max(content_w, patch_w + patch_gap + text_box.width())
 
-        else:  # "simple" — 符号色块 + 图层名
-            label_x: float = entry_x + patch_size + _mm_to_px(3.0, dpi)
-            _draw_patch_for_geom(
-                scene, items, geom, style,
-                entry_x, entry_y, patch_size, row_h,
-            )
-            text = scene.addSimpleText(label, font)
-            text.setPos(label_x, entry_y)
-            text.setBrush(QBrush(QColor(color_str)))
-            text.setZValue(20)
-            items.append(text)
+    if title_rule_y is not None and content_w > 0:
+        rule = scene.addLine(
+            inner_x,
+            title_rule_y,
+            inner_x + min(content_w, inner_w),
+            title_rule_y,
+            QPen(QColor("#9ca3af"), max(1.0, _mm_to_px(_LEGEND_RULE_MM, dpi))),
+        )
+        rule.setZValue(20)
+        items.append(rule)
 
     return items
 
 
-def _draw_patch_for_geom(
+def _draw_legend_patch(
     scene: QGraphicsScene,
     items: list[QGraphicsItem],
-    geom_family,
-    style,
+    patch: LegendPatch,
     px: float,
     py: float,
-    patch_size: float,
+    patch_w: float,
+    patch_h: float,
     row_h: float,
 ) -> None:
-    """根据几何类型和样式调度绘制符号色块。"""
-    if geom_family == "raster" or style is None:
-        _draw_raster_patch(scene, items, px, py, patch_size, row_h)
+    """按补丁类型绘制色块、色带或几何符号。"""
+    if patch.kind is LegendPatchKind.RAMP:
+        _draw_color_ramp(scene, items, px, py, patch_w, patch_h, row_h, patch.colors)
         return
-
-    from app.domain.layer_style import GeometryFamily
-
-    if geom_family is GeometryFamily.POINT:
-        _draw_point_patch(scene, items, px, py, patch_size, row_h, style)
-    elif geom_family is GeometryFamily.LINE:
-        _draw_line_patch(scene, items, px, py, patch_size, row_h, style)
+    if patch.kind is LegendPatchKind.SWATCH:
+        color = patch.colors[0] if patch.colors else "#6b7280"
+        _draw_swatch(scene, items, px, py, patch_w, patch_h, row_h, color)
+        return
+    if patch.style is None:
+        _draw_raster_patch(scene, items, px, py, patch_w, patch_h, row_h)
+        return
+    if patch.kind is LegendPatchKind.POINT:
+        _draw_point_patch(scene, items, px, py, patch_w, patch_h, row_h, patch.style)
+    elif patch.kind is LegendPatchKind.LINE:
+        _draw_line_patch(scene, items, px, py, patch_w, patch_h, row_h, patch.style)
     else:
-        _draw_polygon_patch(scene, items, px, py, patch_size, row_h, style)
+        _draw_polygon_patch(scene, items, px, py, patch_w, patch_h, row_h, patch.style)
+
+
+def _legend_patch_rect(
+    px: float, py: float, patch_w: float, patch_h: float, row_h: float,
+) -> QRectF:
+    """色块在行内垂直居中。"""
+    return QRectF(px, py + (row_h - patch_h) / 2.0, patch_w, patch_h)
+
+
+def _add_rounded_patch(
+    scene: QGraphicsScene,
+    items: list[QGraphicsItem],
+    rect: QRectF,
+    fill: QColor,
+    stroke: QColor,
+    stroke_w: float,
+) -> None:
+    """略圆角的图例色块，接近 Pro 默认 patch。"""
+    path = QPainterPath()
+    radius = min(rect.height(), rect.width()) * 0.12
+    path.addRoundedRect(rect, radius, radius)
+    item = scene.addPath(path, QPen(stroke, stroke_w), QBrush(fill))
+    item.setZValue(20)
+    items.append(item)
+
+
+def _draw_swatch(
+    scene: QGraphicsScene,
+    items: list[QGraphicsItem],
+    px: float,
+    py: float,
+    patch_w: float,
+    patch_h: float,
+    row_h: float,
+    color: str,
+) -> None:
+    """绘制单色矩形色块。"""
+    _add_rounded_patch(
+        scene,
+        items,
+        _legend_patch_rect(px, py, patch_w, patch_h, row_h),
+        QColor(color),
+        QColor("#374151"),
+        0.7,
+    )
+
+
+def _draw_color_ramp(
+    scene: QGraphicsScene,
+    items: list[QGraphicsItem],
+    px: float,
+    py: float,
+    patch_w: float,
+    patch_h: float,
+    row_h: float,
+    colors: tuple[str, ...],
+) -> None:
+    """绘制横向色带。"""
+    resolved: tuple[str, ...] = colors or ("#000000", "#FFFFFF")
+    rect = _legend_patch_rect(px, py, patch_w, patch_h, row_h)
+    seg_w: float = rect.width() / len(resolved)
+    for index, color in enumerate(resolved):
+        cell = scene.addRect(
+            QRectF(rect.x() + index * seg_w, rect.y(), max(seg_w, 1.0), rect.height()),
+            QPen(Qt.PenStyle.NoPen),
+            QBrush(QColor(color)),
+        )
+        cell.setZValue(20)
+        items.append(cell)
+    outline = scene.addRect(
+        rect, QPen(QColor("#374151"), 0.7), QBrush(Qt.BrushStyle.NoBrush),
+    )
+    outline.setZValue(21)
+    items.append(outline)
 
 
 def _draw_point_patch(
     scene: QGraphicsScene,
     items: list[QGraphicsItem],
-    px: float, py: float,
-    patch_size: float, row_h: float,
+    px: float,
+    py: float,
+    patch_w: float,
+    patch_h: float,
+    row_h: float,
     style,
 ) -> None:
     """绘制点符号：实心圆。"""
     fill = QColor(style.fill_color) if style.fill_color != "transparent" else QColor(Qt.GlobalColor.transparent)
     stroke = QColor(style.stroke_color)
-    r: float = patch_size * 0.35
-    cx: float = px + patch_size / 2
+    size = min(patch_w, patch_h)
+    r: float = size * 0.38
+    cx: float = px + patch_w / 2
     cy: float = py + row_h / 2
     circle: QGraphicsEllipseItem = scene.addEllipse(
         QRectF(cx - r, cy - r, r * 2, r * 2),
@@ -475,8 +910,11 @@ def _draw_point_patch(
 def _draw_line_patch(
     scene: QGraphicsScene,
     items: list[QGraphicsItem],
-    px: float, py: float,
-    patch_size: float, row_h: float,
+    px: float,
+    py: float,
+    patch_w: float,
+    patch_h: float,
+    row_h: float,
     style,
 ) -> None:
     """绘制线符号：水平线段。"""
@@ -484,7 +922,7 @@ def _draw_line_patch(
     lw: float = max(1.0, style.line_width * 1.2)
     y: float = py + row_h / 2
     line = scene.addLine(
-        px + 1, y, px + patch_size - 1, y,
+        px, y, px + patch_w, y,
         QPen(stroke, lw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap),
     )
     line.setZValue(20)
@@ -494,39 +932,50 @@ def _draw_line_patch(
 def _draw_polygon_patch(
     scene: QGraphicsScene,
     items: list[QGraphicsItem],
-    px: float, py: float,
-    patch_size: float, row_h: float,
+    px: float,
+    py: float,
+    patch_w: float,
+    patch_h: float,
+    row_h: float,
     style,
 ) -> None:
     """绘制面符号：填充矩形 + 描边。"""
     fill = QColor(style.fill_color) if style.fill_color != "transparent" else QColor(Qt.GlobalColor.transparent)
     stroke = QColor(style.stroke_color)
-    rect_h: float = row_h * 0.55
-    rect_y: float = py + (row_h - rect_h) / 2
-    rect = scene.addRect(
-        QRectF(px + 1, rect_y, patch_size - 2, rect_h),
-        QPen(stroke, max(0.8, style.line_width * 0.6)),
-        QBrush(fill),
+    _add_rounded_patch(
+        scene,
+        items,
+        _legend_patch_rect(px, py, patch_w, patch_h, row_h),
+        fill,
+        stroke,
+        max(0.7, style.line_width * 0.5),
     )
-    rect.setZValue(20)
-    items.append(rect)
 
 
 def _draw_raster_patch(
     scene: QGraphicsScene,
     items: list[QGraphicsItem],
-    px: float, py: float,
-    patch_size: float, row_h: float,
+    px: float,
+    py: float,
+    patch_w: float,
+    patch_h: float,
+    row_h: float,
 ) -> None:
     """绘制栅格符号：3×3 棋盘格。"""
-    cell: float = patch_size / 3
-    rect_y: float = py + (row_h - patch_size + cell) / 2
+    rect = _legend_patch_rect(px, py, patch_w, patch_h, row_h)
+    cell_w: float = rect.width() / 3
+    cell_h: float = rect.height() / 3
     for row in range(3):
         for col in range(3):
             is_dark: bool = (row + col) % 2 == 0
             color: QColor = QColor("#6b7280") if is_dark else QColor("#d1d5db")
             cell_rect = scene.addRect(
-                QRectF(px + col * cell, rect_y + row * cell, cell, cell),
+                QRectF(
+                    rect.x() + col * cell_w,
+                    rect.y() + row * cell_h,
+                    cell_w,
+                    cell_h,
+                ),
                 QPen(Qt.PenStyle.NoPen),
                 QBrush(color),
             )
@@ -678,13 +1127,21 @@ def render_text(
     text_item.setBrush(QBrush(color))
     text_item.setZValue(20)
 
-    px: float = _mm_to_px(element.x_mm, dpi)
-    py: float = _mm_to_px(element.y_mm, dpi)
+    pad: float = _mm_to_px(1.0, dpi)
+    frame_x: float = _mm_to_px(element.x_mm, dpi)
+    frame_y: float = _mm_to_px(element.y_mm, dpi)
+    frame_w: float = _mm_to_px(max(element.width_mm, 1.0), dpi)
+    frame_h: float = _mm_to_px(max(element.height_mm, 1.0), dpi)
+    text_w: float = text_item.boundingRect().width()
+    text_h: float = text_item.boundingRect().height()
 
     if element.alignment == "center":
-        px -= text_item.boundingRect().width() / 2
+        px = frame_x + (frame_w - text_w) / 2.0
     elif element.alignment == "right":
-        px -= text_item.boundingRect().width()
+        px = frame_x + frame_w - text_w - pad
+    else:
+        px = frame_x + pad
+    py = frame_y + (frame_h - text_h) / 2.0
 
     text_item.setPos(px, py)
     items.append(text_item)
@@ -732,6 +1189,13 @@ def render_full_page(
     scene.setSceneRect(0, 0, pw, ph)
     scene.setBackgroundBrush(QBrush(QColor("#ffffff")))
 
+    frames_by_id: dict[str, MapFrameElement] = {
+        element.element_id: element
+        for element in document.elements
+        if isinstance(element, MapFrameElement)
+    }
+    first_frame: MapFrameElement | None = next(iter(frames_by_id.values()), None)
+
     for element in document.elements:
         if isinstance(element, MapFrameElement):
             if snapshot is not None:
@@ -755,7 +1219,8 @@ def render_full_page(
             )
             border_rect.setZValue(11)
         elif isinstance(element, ScaleBarElement):
-            render_scale_bar(element, scene, out_dpi)
+            linked = frames_by_id.get(element.linked_frame_id, first_frame)
+            render_scale_bar(element, scene, out_dpi, linked)
         elif isinstance(element, LegendElement):
             render_legend(element, scene, out_dpi, snapshot)
         elif isinstance(element, NorthArrowElement):

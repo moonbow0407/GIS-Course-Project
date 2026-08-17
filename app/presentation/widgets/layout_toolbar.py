@@ -4,7 +4,9 @@ from PySide6.QtCore import Signal, SignalInstance
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
+    QMenu,
     QPushButton,
+    QToolButton,
     QWidget,
 )
 
@@ -18,6 +20,7 @@ class LayoutToolbar(QFrame):
         add_legend: 添加图例。
         add_north_arrow: 添加指北针。
         add_text: 添加一个文本（支持多实例）。
+        apply_template: 补齐专题图默认排版。
         clear_all: 清空图幅中的全部元素。
         delete_selected: 删除选中元素。
         undo: 撤销。
@@ -28,6 +31,7 @@ class LayoutToolbar(QFrame):
     add_legend = Signal()
     add_north_arrow = Signal()
     add_text = Signal()
+    apply_template = Signal()
     page_setup = Signal()
     edit_properties = Signal()
     zoom_in = Signal()
@@ -39,6 +43,7 @@ class LayoutToolbar(QFrame):
     undo = Signal()
     clear_all = Signal()
     shortcut_help = Signal()
+    align_to_page = Signal(object, object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -85,6 +90,11 @@ class LayoutToolbar(QFrame):
         self._btn_text.clicked.connect(self.add_text.emit)
         layout.addWidget(self._btn_text)
 
+        self._btn_template: QPushButton = QPushButton("默认排版")
+        self._btn_template.setObjectName("layoutEditBtn")
+        self._btn_template.clicked.connect(self.apply_template.emit)
+        layout.addWidget(self._btn_template)
+
         # 缩放分隔
         sep_zoom: QFrame = QFrame()
         sep_zoom.setFrameShape(QFrame.Shape.VLine)
@@ -108,6 +118,28 @@ class LayoutToolbar(QFrame):
         btn_fit.setObjectName("layoutEditBtn")
         btn_fit.clicked.connect(self.zoom_fit.emit)
         layout.addWidget(btn_fit)
+
+        self._align_btn: QToolButton = QToolButton()
+        self._align_btn.setText("对齐")
+        self._align_btn.setObjectName("layoutEditBtn")
+        self._align_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._align_btn.setEnabled(False)
+        align_menu: QMenu = QMenu(self._align_btn)
+        for label, horizontal, vertical in (
+            ("页面居中", "center", "middle"),
+            ("水平居中", "center", None),
+            ("垂直居中", None, "middle"),
+            ("左对齐", "left", None),
+            ("右对齐", "right", None),
+            ("顶对齐", None, "top"),
+            ("底对齐", None, "bottom"),
+        ):
+            action = align_menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, h=horizontal, v=vertical: self.align_to_page.emit(h, v)
+            )
+        self._align_btn.setMenu(align_menu)
+        layout.addWidget(self._align_btn)
 
         # 分隔
         sep: QFrame = QFrame()
@@ -275,6 +307,10 @@ class LayoutToolbar(QFrame):
         }
         for type_name, btn in mapping.items():
             btn.setChecked(type_name in present_types)
+
+    def set_align_enabled(self, enabled: bool) -> None:
+        """启用/禁用页面对齐按钮。"""
+        self._align_btn.setEnabled(enabled)
 
     def set_delete_enabled(self, enabled: bool) -> None:
         """启用/禁用删除按钮。"""

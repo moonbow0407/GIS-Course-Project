@@ -138,6 +138,16 @@ class ElementPropertiesDialog(QDialog):
 
     def _add_scale_bar_fields(self, element: ScaleBarElement) -> None:
         """添加比例尺特有字段。"""
+        style_combo = QComboBox()
+        style_combo.addItem("交替条", "alternating")
+        style_combo.addItem("双层交替", "double_alternating")
+        style_combo.addItem("线状刻度", "line")
+        style_idx = style_combo.findData(element.style)
+        if style_idx >= 0:
+            style_combo.setCurrentIndex(style_idx)
+        self._form.addRow("形态:", style_combo)
+        self._register_combo("style", style_combo)
+
         unit_combo = QComboBox()
         unit_combo.addItem("千米", "km")
         unit_combo.addItem("米", "m")
@@ -216,7 +226,7 @@ class ElementPropertiesDialog(QDialog):
         idx = align_combo.findData(element.alignment)
         if idx >= 0:
             align_combo.setCurrentIndex(idx)
-        self._form.addRow("对齐:", align_combo)
+        self._form.addRow("框内对齐:", align_combo)
         self._register_combo("alignment", align_combo)
 
     # --- 字段注册辅助 ---

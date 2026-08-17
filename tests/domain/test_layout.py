@@ -9,6 +9,7 @@ from app.domain.layout import (
     PageOrientation,
     ScaleBarElement,
     TextElement,
+    align_element_to_page,
     layout_from_dict,
     layout_to_dict,
 )
@@ -35,6 +36,21 @@ def test_layout_page_pixel_dimensions() -> None:
     page = LayoutPage(width_mm=25.4, height_mm=25.4, dpi=300.0)
     assert page.width_px == 300
     assert page.height_px == 300
+
+
+def test_align_element_to_page_uses_printable_area() -> None:
+    """页面对齐应以可印区为基准，且不改元素尺寸。"""
+    page = LayoutPage.from_preset("A4")
+    frame = MapFrameElement(x_mm=12.0, y_mm=20.0, width_mm=80.0, height_mm=60.0)
+    x_mm, y_mm = align_element_to_page(frame, page, "center", "middle")
+    assert x_mm == page.margin_mm + (page.printable_width_mm - 80.0) / 2.0
+    assert y_mm == page.margin_mm + (page.printable_height_mm - 60.0) / 2.0
+    assert frame.width_mm == 80.0
+    assert frame.height_mm == 60.0
+    left_x, _ = align_element_to_page(frame, page, "left", None)
+    assert left_x == page.margin_mm
+    right_x, _ = align_element_to_page(frame, page, "right", None)
+    assert right_x == page.width_mm - page.margin_mm - frame.width_mm
 
 
 def test_layout_page_printable_area() -> None:
@@ -69,6 +85,7 @@ def test_layout_to_dict_and_back_roundtrip() -> None:
             element_id="sb1",
             x_mm=10, y_mm=280, width_mm=80, height_mm=8,
             linked_frame_id="mf1",
+            style="double_alternating",
         ),
         LegendElement(
             element_id="lg1",
@@ -103,6 +120,7 @@ def test_layout_to_dict_and_back_roundtrip() -> None:
     sb = restored.elements[1]
     assert isinstance(sb, ScaleBarElement)
     assert sb.linked_frame_id == "mf1"
+    assert sb.style == "double_alternating"
 
     lg = restored.elements[2]
     assert isinstance(lg, LegendElement)

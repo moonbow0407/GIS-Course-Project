@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QDoubleSpinBox, QLineEdit
 from app.domain.layout import (
     MapFrameElement,
     NorthArrowElement,
+    ScaleBarElement,
     TextElement,
 )
 from app.presentation.widgets.element_properties_dialog import (
@@ -57,6 +58,22 @@ def test_properties_dialog_map_frame_changes() -> None:
 
     changes = _collect(dialog)
     assert changes["border_width_mm"] == 2.0
+
+
+def test_properties_dialog_scale_bar_style() -> None:
+    """比例尺属性对话框应能切换双层交替 / 线状形态。"""
+    QApplication.instance() or QApplication([])
+    elem = ScaleBarElement(style="alternating")
+    dialog = ElementPropertiesDialog()
+    dialog.set_element(elem)
+
+    combo = dialog._changes["style"]
+    assert isinstance(combo, QComboBox)
+    idx = combo.findData("double_alternating")
+    combo.setCurrentIndex(idx)
+
+    changes = _collect(dialog)
+    assert changes["style"] == "double_alternating"
 
 
 def test_properties_dialog_north_arrow_style() -> None:

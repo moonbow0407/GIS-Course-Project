@@ -58,7 +58,8 @@ class LayoutPage:
     ) -> "LayoutPage":
         """根据预设名称创建纸张。"""
         w, h = _PAPER_SIZES_MM.get(name, (210.0, 297.0))
-        if orientation is PageOrientation.LANDSCAPE:
+        # QComboBox 会把 str Enum 存成裸字符串，必须按值比较。
+        if orientation == PageOrientation.LANDSCAPE:
             w, h = h, w
         return cls(
             name=name,
@@ -172,7 +173,8 @@ class ScaleBarElement(LayoutElement):
 
     属性:
         linked_frame_id: 关联的地图框元素 ID，用于获取比例。
-        style: 样式 "alternating"（黑白交替）。
+        style: 形态 "alternating"（单层交替条）/
+            "double_alternating"（双层交替条）/ "line"（线状刻度）。
         unit: 显示单位 "km" / "m"。
         num_segments: 分段数量（默认 4）。
         label_font_size_mm: 标签字号（毫米）。
@@ -197,6 +199,10 @@ class LegendElement(LayoutElement):
         title_font_size_mm: 标题字号（毫米）。
         item_font_size_mm: 条目字号（毫米）。
         column_count: 列数。
+        fit_frame: 符号刷新时是否按内容收紧图例框；用户手动缩放后为 False。
+        show_title: 是否绘制图例标题。
+        show_layer_headings: 是否在类别前显示图层名。
+        label_overrides: 图例条目编号到自定义标签；不改图层符号系统。
     """
 
     linked_frame_id: str = ""
@@ -204,6 +210,10 @@ class LegendElement(LayoutElement):
     title_font_size_mm: float = 3.0
     item_font_size_mm: float = 2.5
     column_count: int = 1
+    fit_frame: bool = True
+    show_title: bool = True
+    show_layer_headings: bool = False
+    label_overrides: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=False, slots=True)
@@ -229,7 +239,7 @@ class TextElement(LayoutElement):
         color: 文字颜色。
         bold: 是否粗体。
         italic: 是否斜体。
-        alignment: 对齐方式 "left" / "center" / "right"。
+        alignment: 文本在元素框内的水平对齐 "left" / "center" / "right"。
     """
 
     text: str = "文本"
@@ -259,6 +269,37 @@ class LayoutDocument:
     def create_default(cls, page_name: str = "A4") -> "LayoutDocument":
         """创建一个空 A4 纵向布局文档。"""
         return cls(page=LayoutPage.from_preset(page_name))
+
+
+def align_element_to_page(
+    element: LayoutElement,
+    page: LayoutPage,
+    horizontal: str | None = None,
+    vertical: str | None = None,
+) -> tuple[float, float]:
+    """计算元素对齐到可印区后的左上角（毫米）。
+
+    只改位置，不改宽高。horizontal 为 left/center/right；
+    vertical 为 top/middle/bottom；空值表示该方向保持不动。
+    """
+    margin = page.margin_mm
+    printable_w = page.printable_width_mm
+    printable_h = page.printable_height_mm
+    x_mm = element.x_mm
+    y_mm = element.y_mm
+    if horizontal == "left":
+        x_mm = margin
+    elif horizontal == "center":
+        x_mm = margin + (printable_w - element.width_mm) / 2.0
+    elif horizontal == "right":
+        x_mm = page.width_mm - margin - element.width_mm
+    if vertical == "top":
+        y_mm = margin
+    elif vertical == "middle":
+        y_mm = margin + (printable_h - element.height_mm) / 2.0
+    elif vertical == "bottom":
+        y_mm = page.height_mm - margin - element.height_mm
+    return x_mm, y_mm
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +354,13 @@ def layout_from_dict(payload: dict[str, object]) -> LayoutDocument:
     return LayoutDocument(page=page, elements=tuple(elements))
 
 
+def _label_overrides_from_dict(value: object) -> dict[str, str]:
+    """从工程字典恢复图例标签覆盖。"""
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(label) for key, label in value.items()}
+
+
 def _element_to_dict(element: LayoutElement) -> dict[str, object]:
     """把单个布局元素转换为字典。"""
     base: dict[str, object] = {
@@ -349,6 +397,10 @@ def _element_to_dict(element: LayoutElement) -> dict[str, object]:
             "title_font_size_mm": element.title_font_size_mm,
             "item_font_size_mm": element.item_font_size_mm,
             "column_count": element.column_count,
+            "fit_frame": element.fit_frame,
+            "show_title": element.show_title,
+            "show_layer_headings": element.show_layer_headings,
+            "label_overrides": dict(element.label_overrides),
         })
     elif isinstance(element, NorthArrowElement):
         base.update({
@@ -418,6 +470,10 @@ def _element_from_dict(data: dict[str, object]) -> LayoutElement | None:
                 cast(str | int | float, data.get("item_font_size_mm", 2.5))
             ),
             column_count=int(cast(str | int | float, data.get("column_count", 1))),
+            fit_frame=bool(data.get("fit_frame", True)),
+            show_title=bool(data.get("show_title", True)),
+            show_layer_headings=bool(data.get("show_layer_headings", False)),
+            label_overrides=_label_overrides_from_dict(data.get("label_overrides")),
         )
     if type_name == "NorthArrowElement":
         return NorthArrowElement(
