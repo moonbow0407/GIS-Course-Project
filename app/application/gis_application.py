@@ -129,11 +129,13 @@ from app.domain.feature import AttributeValue, Feature, FeatureId
 from app.domain.labeling import LabelingConfig
 from app.domain.layer_style import GeometryFamily
 from app.domain.layout import LayoutDocument
+from app.domain.lod import LodPyramid
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
 from app.domain.symbology import RasterRendererType, RasterSymbology, VectorSymbology
 from app.domain.vector_layer import VectorLayer
+from app.infrastructure.lod.vector_lod_service import VectorLodService
 
 # 支持要素编辑写回的本地矢量源文件后缀：应用层入口过滤与主窗口
 # 数字化候选过滤共用，避免两处维护重复的格式字面量。
@@ -306,6 +308,11 @@ class GisApplication:
         self._display_cache = DisplayCacheManager(self._display_projection_service)
         # 分块流式栅格重投影端口：为空时大栅格退化为内存路径（兼容旧行为）。
         self._windowed_raster_projector = windowed_raster_projector
+        # 矢量多级 LOD 生成服务：只在后台线程调用，主线程仅提交结果。
+        self._lod_service = VectorLodService()
+        # 矢量 LOD 开关：默认关闭，图层始终渲染完整几何，缩放不因级别
+        # 切换跳变；用户手动开启后才为矢量图层构建并挂载金字塔。
+        self._lod_enabled: bool = False
 
         # 地图文档：作为图层、显隐、活动状态和选择集的唯一事实来源。
         self._document: MapDocument = document or MapDocument()
@@ -506,6 +513,94 @@ class GisApplication:
             layer_id=layer.layer_id,
             snapshot=snapshot,
         )
+
+    def start_layer_lod_build(self, layer_id: str) -> tuple[VectorLayer, int]:
+        """捕获矢量图层与其内容版本，供后台线程构建 LOD。
+
+        返回 ``(图层, 修订号)``。图层为不可变快照，可安全交给后台线程
+        读取；LOD 开关未开启、栅格图层或已删除图层抛出异常，由调用方
+        决定是否忽略。
+
+        异常:
+            LayerNotFound: 图层不存在。
+            ValueError: 图层不是矢量图层，或 LOD 开关未开启。
+        """
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise ValueError("LOD 仅支持矢量图层。")
+        if not self._lod_enabled:
+            raise ValueError("LOD 未开启，直接渲染完整几何。")
+        return layer, self._document.layer_revision(layer_id)
+
+    @property
+    def lod_enabled(self) -> bool:
+        """返回矢量 LOD 开关是否已开启。"""
+        return self._lod_enabled
+
+    def set_lod_enabled(self, enabled: bool) -> WorkspaceSnapshot:
+        """开启或关闭矢量 LOD 金字塔。
+
+        关闭时移除所有图层已挂载的金字塔，恢复完整几何渲染；开启只更新
+        开关状态，构建由调用方对每个矢量图层调用 start_layer_lod_build
+        触发。返回最新工作区快照。
+        """
+        self._lod_enabled = enabled
+        if not enabled:
+            layer: SpatialLayer
+            for layer in self._document.layers:
+                if isinstance(layer, VectorLayer) and layer.lod is not None:
+                    self._document.set_layer_lod(layer.layer_id, None)
+        return self.snapshot()
+
+    def build_layer_lod(self, layer: VectorLayer) -> LodPyramid:
+        """为不可变图层快照构建 LOD 金字塔（只读，可在后台线程执行）。"""
+        return self._lod_service.build_pyramid(layer)
+
+    def commit_layer_lod(
+        self,
+        layer_id: str,
+        pyramid: LodPyramid,
+        source_revision: int,
+    ) -> WorkspaceSnapshot:
+        """把后台构建完成的 LOD 金字塔挂到图层并返回最新工作区快照。
+
+        图层在构建期间被替换（修订号变化，例如重投影或编辑）或 LOD 开关
+        已关闭时丢弃结果，避免把过期几何挂到已经变化的工作区图层上。
+        """
+        if not self._lod_enabled:
+            return self.snapshot()
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise LayerNotFound(f"图层已不是矢量图层：{layer_id}")
+        if self._document.layer_revision(layer_id) != source_revision:
+            return self.snapshot()
+        self._document.set_layer_lod(layer_id, pyramid)
+        self._modified = True
+        return self.snapshot()
+
+    def build_layer_lod(self, layer: VectorLayer) -> LodPyramid:
+        """为不可变图层快照构建 LOD 金字塔（只读，可在后台线程执行）。"""
+        return self._lod_service.build_pyramid(layer)
+
+    def commit_layer_lod(
+        self,
+        layer_id: str,
+        pyramid: LodPyramid,
+        source_revision: int,
+    ) -> WorkspaceSnapshot:
+        """把后台构建完成的 LOD 金字塔挂到图层并返回最新工作区快照。
+
+        图层在构建期间被替换（修订号变化，例如重投影或编辑）时丢弃
+        结果，避免把过期几何挂到已经变化的工作区图层上。
+        """
+        layer: SpatialLayer = self._find_layer(layer_id)
+        if not isinstance(layer, VectorLayer):
+            raise LayerNotFound(f"图层已不是矢量图层：{layer_id}")
+        if self._document.layer_revision(layer_id) != source_revision:
+            return self.snapshot()
+        self._document.set_layer_lod(layer_id, pyramid)
+        self._modified = True
+        return self.snapshot()
 
     def define_layer_crs(self, layer_id: str, crs: CRS) -> WorkspaceSnapshot:
         """定义或修正图层 CRS，只保存工程内解释，不改写源数据坐标。"""

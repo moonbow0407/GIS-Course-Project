@@ -1,8 +1,11 @@
 """地图文档聚合模型。"""
 
+from dataclasses import replace
+
 from pyproj import CRS
 
 from app.domain.feature import FeatureId
+from app.domain.lod import LodPyramid
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
 from app.domain.vector_layer import VectorLayer
@@ -170,6 +173,19 @@ class MapDocument:
         self._layers[current_index] = layer
         # 替换通常伴随几何、样式或 CRS 定义变化，必须使显示缓存失效。
         self._layer_revisions[layer.layer_id] += 1
+
+    def set_layer_lod(self, layer_id: str, lod: LodPyramid | None) -> None:
+        """把后台构建完成的 LOD 金字塔挂到矢量图层，或传 None 清除。
+
+        LOD 只决定渲染时按屏幕比例选择哪一级简化几何，不改变图层要素
+        与显示载荷，因此无需使显示缓存失效、重新投影大型图层。传 None
+        表示关闭 LOD 时移除已挂载的金字塔，恢复完整几何渲染。
+        """
+        current_index: int = self._layer_index(layer_id)
+        layer: SpatialLayer = self._layers[current_index]
+        if not isinstance(layer, VectorLayer):
+            raise ValueError("LOD 金字塔只能挂到矢量图层。")
+        self._layers[current_index] = replace(layer, lod=lod)
 
     def layer_revision(self, layer_id: str) -> int:
         """返回图层当前内容版本号；几何、样式或显示设置变更时递增。"""

@@ -265,6 +265,13 @@ class RibbonBar(QWidget):
                         RibbonActionSpec("open_project", "打开工程", "⌑"),
                         RibbonActionSpec("save_project", "保存工程", "◇"),
                         RibbonActionSpec("new_layer", "新建图层", "▣", "#16a34a"),
+                        RibbonActionSpec(
+                            "toggle_lod",
+                            "矢量简化",
+                            "⌁",
+                            "#0f766e",
+                            checkable=True,
+                        ),
                     )),
                 ),
             ),
@@ -426,6 +433,18 @@ class RibbonBar(QWidget):
         btn: QToolButton | None = self._checkable_buttons.get(action_id)
         if btn is not None:
             btn.setChecked(checked)
+
+    def action_checked(self, action_id: str) -> bool:
+        """返回可切换按钮当前的按下状态。
+
+        参数:
+            action_id: 按钮操作编号（须在定义时设置 checkable=True）。
+
+        返回:
+            按钮已按下返回 True；未知编号或不可切换按钮返回 False。
+        """
+        btn: QToolButton | None = self._checkable_buttons.get(action_id)
+        return btn.isChecked() if btn is not None else False
 
     def set_action_enabled(self, action_id: str, enabled: bool) -> None:
         """设置操作按钮的可用状态；禁用后不再响应点击并显示弱化样式。

@@ -11,6 +11,7 @@ from app.application.gis_application import GisApplication
 from app.application.ports import DataWriter, VectorReader
 from app.application.results import OpenVectorResult, SelectionResult, WorkspaceSnapshot
 from app.domain.feature import Feature
+from app.domain.lod import LodLevel, LodPyramid
 from app.domain.spatial_layer import SpatialLayer
 from app.domain.vector_layer import VectorLayer
 
@@ -274,3 +275,31 @@ def test_export_without_active_layer_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(NoActiveLayer, match="活动图层"):
         application.export_active_layer(tmp_path / "empty.geojson")
+
+
+def test_lod_toggle_gates_build_and_clears_pyramid() -> None:
+    """LOD 默认关闭不构建；开启后可构建；关闭后清除已挂载的金字塔。"""
+    application: GisApplication = GisApplication(
+        data_reader=InMemoryVectorReader(make_layer("points"))
+    )
+    layer_id: str = application.open_vector(Path("points.geojson")).layer_id
+
+    # 默认关闭，构建入口被拒绝。
+    assert application.lod_enabled is False
+    with pytest.raises(ValueError, match="LOD 未开启"):
+        application.start_layer_lod_build(layer_id)
+
+    # 开启后可捕获图层供后台构建。
+    application.set_lod_enabled(True)
+    assert application.lod_enabled is True
+    layer, revision = application.start_layer_lod_build(layer_id)
+    assert layer.layer_id == layer_id
+
+    # 挂载金字塔后关闭开关，金字塔应被清除。
+    pyramid: LodPyramid = LodPyramid((LodLevel(0.0, layer.features),))
+    application.commit_layer_lod(layer_id, pyramid, revision)
+    assert application.snapshot().layers[0].layer.lod is pyramid
+
+    application.set_lod_enabled(False)
+    assert application.lod_enabled is False
+    assert application.snapshot().layers[0].layer.lod is None

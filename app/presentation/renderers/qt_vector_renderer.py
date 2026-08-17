@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QStyleOptionGraphicsItem,
     QWidget,
 )
-from shapely import get_num_coordinates
 from shapely.geometry import (
     GeometryCollection,
     LinearRing,
@@ -43,36 +42,6 @@ from app.presentation.global_display_settings import selection_color
 # 标注避让网格的单元格边长（屏幕像素）：约等于单个标签高度，
 # 使每个已占矩形平均落在一到四个单元格内。
 _LABEL_GRID_CELL_SIZE: float = 48.0
-
-
-def _simplify_polygon_exteriors_only(
-    geometry: BaseGeometry,
-    tolerance: float,
-) -> BaseGeometry:
-    """对 Polygon/MultiPolygon 仅简化外环，保留内环原样。
-
-    内环（岛洞）通常顶点数少、面积小，简化收益可忽略不计；
-    且内环经过拓扑保持简化后容易与简化后的外环产生细微错位，
-    在特定缩放级别下形成不美观的裂隙。仅简化外环可避免此问题。
-    """
-    if geometry.geom_type == "Polygon":
-        poly: Polygon = geometry
-        # 对整个 polygon 做拓扑保持简化后再提取外环，
-        # 避免独立简化外环导致相邻面要素之间出现缝隙。
-        simplified_poly: Polygon = poly.simplify(tolerance, preserve_topology=True)
-        if simplified_poly.is_empty:
-            return geometry
-        return Polygon(simplified_poly.exterior, list(poly.interiors))
-    if geometry.geom_type == "MultiPolygon":
-        simplified_polys: list[Polygon] = []
-        for sub_poly in geometry.geoms:
-            simplified_sub = _simplify_polygon_exteriors_only(sub_poly, tolerance)
-            if not simplified_sub.is_empty:
-                simplified_polys.append(simplified_sub)
-        if not simplified_polys:
-            return geometry
-        return MultiPolygon(simplified_polys)
-    return geometry
 
 
 def _cull_features(
@@ -373,27 +342,103 @@ class QtVectorRenderer:
         if not isinstance(snapshot.layer, VectorLayer):
             raise TypeError("矢量渲染器只能绘制矢量图层。")
         if snapshot.display_payload is None:
-            display_features: tuple[Feature, ...] = snapshot.layer.features
+            base_features: tuple[Feature, ...] = snapshot.layer.features
         elif isinstance(snapshot.display_payload, VectorDisplayPayload):
-            display_features = snapshot.display_payload.features
+            base_features = snapshot.display_payload.features
         else:
             raise TypeError("矢量快照的显示载荷类型无效。")
-        if visible_bounds is not None:
-            display_features = _cull_features(display_features, visible_bounds)
         composition_mode = _BLEND_MODE_MAP.get(
             snapshot.blend_mode,
             QPainter.CompositionMode.CompositionMode_SourceOver,
         )
         _needs_blend = composition_mode != QPainter.CompositionMode.CompositionMode_SourceOver
         labeling = snapshot.layer.labeling
+        generate_labels: bool = labeling is not None and labeling.enabled
+        # 多级 LOD：仅在未发生显示投影时启用（载荷几何与领域层几何同坐标
+        # 系）；投影场景下 LOD 的源坐标与显示坐标不一致，回退完整几何。
+        fade: tuple[tuple[Feature, ...], tuple[Feature, ...], float] | None = None
+        if snapshot.layer.lod is not None and (
+            snapshot.display_payload is None
+            or snapshot.display_payload.features is snapshot.layer.features
+        ):
+            fade = snapshot.layer.lod.select_fade(map_units_per_pixel)
+        # 统一按当前视野裁剪；交叉淡化的两个级别几何需分别裁剪。
+        if visible_bounds is not None:
+            if fade is None:
+                base_features = _cull_features(base_features, visible_bounds)
+            else:
+                fine: tuple[Feature, ...]
+                coarse: tuple[Feature, ...]
+                t: float
+                fine, coarse, t = fade
+                fade = (
+                    _cull_features(fine, visible_bounds),
+                    _cull_features(coarse, visible_bounds),
+                    t,
+                )
+
+        if fade is None:
+            return self._render_features(
+                scene,
+                snapshot,
+                z_value,
+                map_units_per_pixel,
+                composition_mode,
+                _needs_blend,
+                base_features,
+                1.0,
+                generate_labels,
+            )
+        fine_features, coarse_features, t = fade
+        if t <= 0.0:
+            return self._render_features(
+                scene, snapshot, z_value, map_units_per_pixel, composition_mode,
+                _needs_blend, fine_features, 1.0, generate_labels,
+            )
+        if t >= 1.0:
+            return self._render_features(
+                scene, snapshot, z_value, map_units_per_pixel, composition_mode,
+                _needs_blend, coarse_features, 1.0, generate_labels,
+            )
+        # 交叉淡化：细级别负责标注锚点，粗级别只补充淡化几何。
+        items: list[QGraphicsItem] = self._render_features(
+            scene, snapshot, z_value, map_units_per_pixel, composition_mode,
+            _needs_blend, fine_features, 1.0 - t, generate_labels,
+        )
+        items += self._render_features(
+            scene, snapshot, z_value, map_units_per_pixel, composition_mode,
+            _needs_blend, coarse_features, t, False,
+        )
+        return items
+
+    def _render_features(
+        self,
+        scene: QGraphicsScene,
+        snapshot: LayerSnapshot,
+        z_value: float,
+        map_units_per_pixel: float,
+        composition_mode: QPainter.CompositionMode,
+        needs_blend: bool,
+        features: tuple[Feature, ...],
+        opacity_factor: float,
+        generate_labels: bool,
+    ) -> list[QGraphicsItem]:
+        """把一组要素渲染为 Qt 图元，并按 ``opacity_factor`` 整体淡化。
+
+        参数:
+            opacity_factor: 额外乘到图元透明度上的淡化因子，交叉淡化时
+                细级别为 ``1 - t``、粗级别为 ``t``，单层渲染时为 1。
+            generate_labels: 是否为本组要素生成动态标注；交叉淡化只在
+                细级别生成一次，避免重复标注。
+        """
         # 标注锚点复用主循环已简化的显示几何；被符号规则隐藏的要素不渲染，
         # 也不再单独生成漂浮标注。
         label_anchors: list[tuple[Feature, BaseGeometry]] | None = (
-            [] if labeling is not None and labeling.enabled else None
+            [] if generate_labels else None
         )
         items: list[QGraphicsItem] = []
         feature: Feature
-        for feature in display_features:
+        for feature in features:
             if feature.geometry.is_empty:
                 continue
             if snapshot.layer.symbology is None:
@@ -407,10 +452,7 @@ class QtVectorRenderer:
             # 选中点要素时适度放大符号。
             if selected:
                 point_size *= 1.6
-            display_geometry: BaseGeometry = self._geometry_for_display(
-                feature.geometry,
-                map_units_per_pixel,
-            )
+            display_geometry: BaseGeometry = feature.geometry
             if label_anchors is not None:
                 label_anchors.append((feature, display_geometry))
             self._append_geometry(path, display_geometry, point_size)
@@ -420,7 +462,7 @@ class QtVectorRenderer:
             if selected:
                 halo: QGraphicsPathItem = (
                     _BlendPathItem(path, composition_mode)
-                    if _needs_blend
+                    if needs_blend
                     else QGraphicsPathItem(path)
                 )
                 self._apply_halo(halo, feature.geometry.geom_type)
@@ -428,18 +470,18 @@ class QtVectorRenderer:
                 halo.setData(1, feature.fid)
                 halo.setZValue(z_value - 0.1)
                 halo.setVisible(snapshot.visible)
-                halo.setOpacity(snapshot.opacity)
+                halo.setOpacity(snapshot.opacity * opacity_factor)
                 halo.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
                 scene.addItem(halo)
                 items.append(halo)
             item: QGraphicsPathItem = (
                 _BlendPathItem(path, composition_mode)
-                if _needs_blend
+                if needs_blend
                 else QGraphicsPathItem(path)
             )
             self._apply_style(item, style, selected, feature.geometry.geom_type)
-            # 图层级透明度乘以符号自身透明度，实现整体淡化而不破坏选择高亮。
-            item.setOpacity(item.opacity() * snapshot.opacity)
+            # 图层级透明度乘以符号自身透明度与淡化因子，实现整体淡化。
+            item.setOpacity(item.opacity() * snapshot.opacity * opacity_factor)
             # 自定义数据把 Qt 图元关联回领域图层和要素。
             item.setData(0, snapshot.layer_id)
             item.setData(1, feature.fid)
@@ -447,14 +489,15 @@ class QtVectorRenderer:
             item.setVisible(snapshot.visible)
             scene.addItem(item)
             items.append(item)
-        self._render_labels(
-            scene,
-            snapshot,
-            label_anchors,
-            z_value,
-            map_units_per_pixel,
-            items,
-        )
+        if label_anchors is not None:
+            self._render_labels(
+                scene,
+                snapshot,
+                label_anchors,
+                z_value,
+                map_units_per_pixel,
+                items,
+            )
         return items
 
     def _render_labels(
@@ -509,35 +552,6 @@ class QtVectorRenderer:
                 label_item.setOpacity(snapshot.opacity)
                 scene.addItem(label_item)
                 items.append(label_item)
-
-    @staticmethod
-    def _geometry_for_display(
-        geometry: BaseGeometry,
-        map_units_per_pixel: float,
-    ) -> BaseGeometry:
-        """按当前屏幕分辨率简化显示路径，不改动领域层原始几何。
-
-        参数:
-            geometry: 查询、编辑仍需使用的完整几何。
-            map_units_per_pixel: 当前视图一个屏幕像素对应的地图单位。
-
-        返回:
-            适合当前视图绘制的几何；小图层或低复杂度几何保持原样。
-        """
-        if map_units_per_pixel <= 0.0 or get_num_coordinates(geometry) < 16:
-            return geometry
-        # 容差设置为 1 像素：亚像素级别细节在屏幕上不可见，
-        # 1 像素容差在简化收益和避免相邻面要素缝隙之间取得平衡。
-        tolerance: float = map_units_per_pixel * 1.0
-        # 面要素仅对外环做简化（内环通常是简单空洞，简化收益极小
-        # 且额外 topology 检查对空心岛之类场景容易引入伪影）。
-        if geometry.geom_type in ("Polygon", "MultiPolygon"):
-            simplified: BaseGeometry = _simplify_polygon_exteriors_only(
-                geometry, tolerance
-            )
-        else:
-            simplified = geometry.simplify(tolerance, preserve_topology=False)
-        return geometry if simplified.is_empty else simplified
 
     def _append_geometry(
         self,

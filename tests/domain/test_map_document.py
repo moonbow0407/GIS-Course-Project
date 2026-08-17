@@ -9,6 +9,7 @@ from pyproj import CRS
 from shapely.geometry import Point
 
 from app.domain.feature import Feature
+from app.domain.lod import LodLevel, LodPyramid
 from app.domain.map_document import MapDocument
 from app.domain.raster_layer import RasterLayer
 from app.domain.spatial_layer import SpatialLayer
@@ -191,6 +192,49 @@ def test_display_state_changes_do_not_increment_revision() -> None:
     document.set_layer_scale_range("roads", 10.0, 100.0)
     document.move_layer("roads", 0)
 
+    assert document.layer_revision("roads") == 1
+
+
+def test_set_layer_lod_attaches_without_incrementing_revision() -> None:
+    """挂接 LOD 金字塔不改变几何与显示载荷，无需递增内容版本。"""
+    document: MapDocument = MapDocument()
+    document.add_layer(make_layer("roads"))
+    pyramid: LodPyramid = LodPyramid((
+        LodLevel(0.0, document.layers[0].features),
+    ))
+
+    document.set_layer_lod("roads", pyramid)
+
+    updated: SpatialLayer = document.layers[0]
+    assert isinstance(updated, VectorLayer)
+    assert updated.lod is pyramid
+    assert updated.layer_id == "roads"
+    assert document.layer_revision("roads") == 1
+
+
+def test_set_layer_lod_rejects_missing_layer() -> None:
+    """不存在的图层不应被挂接 LOD 金字塔。"""
+    document: MapDocument = MapDocument()
+    pyramid: LodPyramid = LodPyramid((LodLevel(0.0, ()),))
+
+    with pytest.raises(KeyError, match="图层不存在"):
+        document.set_layer_lod("missing", pyramid)
+
+
+def test_set_layer_lod_clears_pyramid_when_none() -> None:
+    """传入 None 应移除已挂载的金字塔，恢复完整几何渲染。"""
+    document: MapDocument = MapDocument()
+    document.add_layer(make_layer("roads"))
+    document.set_layer_lod(
+        "roads",
+        LodPyramid((LodLevel(0.0, document.layers[0].features),)),
+    )
+
+    document.set_layer_lod("roads", None)
+
+    updated: SpatialLayer = document.layers[0]
+    assert isinstance(updated, VectorLayer)
+    assert updated.lod is None
     assert document.layer_revision("roads") == 1
 
 

@@ -11,6 +11,7 @@ from shapely.geometry.base import BaseGeometry
 from app.domain.feature import Feature
 from app.domain.labeling import LabelingConfig
 from app.domain.layer_style import GeometryFamily, LayerStyle
+from app.domain.lod import LodPyramid
 from app.domain.symbology import VectorRendererType, VectorSymbology
 
 Bounds: TypeAlias = tuple[float, float, float, float]
@@ -72,6 +73,9 @@ class VectorLayer:
 
     # 动态标注配置：为空表示该图层尚未配置标注。
     labeling: LabelingConfig | None = None
+
+    # 多级细节层次：为空表示尚未生成，渲染时按原始几何绘制。
+    lod: LodPyramid | None = None
 
     # CRS 是否来自工程内定义/修正覆盖，而非源文件声明。
     crs_override: bool = False

@@ -2,6 +2,7 @@
 
 import math
 import os
+from dataclasses import replace
 
 # 必须在导入 Qt 前启用无界面平台，测试才能在没有显示器的环境运行。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -15,6 +16,7 @@ from shapely.geometry import LineString, Point, Polygon
 from app.application.results import LayerSnapshot
 from app.domain.feature import Feature
 from app.domain.labeling import LabelClass, LabelingConfig, LabelPlacement
+from app.domain.lod import LodLevel, LodPyramid
 from app.domain.vector_layer import VectorLayer
 from app.presentation.renderers.qt_vector_renderer import QtVectorRenderer
 
@@ -64,31 +66,91 @@ def test_renderer_creates_selectable_items_for_point_line_and_polygon() -> None:
     assert polygon_item.path().fillRule() is Qt.FillRule.OddEvenFill
 
 
-def test_renderer_simplifies_dense_geometry_for_current_screen_scale() -> None:
-    """屏幕分辨率不足以区分的密集顶点应在显示路径中合并。"""
+def test_renderer_selects_lod_level_by_screen_scale() -> None:
+    """带 LOD 的图层应按每像素地图单位选择简化级别渲染。"""
     application: QApplication = QApplication.instance() or QApplication([])
     coordinates = tuple(
         (index * 0.01, math.sin(index / 4.0) * 0.02)
         for index in range(2000)
     )
-    layer = VectorLayer.create(
-        layer_id="dense-line",
-        name="高密度线",
-        features=(Feature(fid=1, geometry=LineString(coordinates), attributes={}),),
-        crs=CRS.from_epsg(4326),
+    dense = Feature(fid=1, geometry=LineString(coordinates), attributes={})
+    coarse = Feature(fid=1, geometry=LineString(coordinates[::200]), attributes={})
+    layer = replace(
+        VectorLayer.create(
+            layer_id="dense-line",
+            name="高密度线",
+            features=(dense,),
+            crs=CRS.from_epsg(4326),
+        ),
+        lod=LodPyramid((
+            LodLevel(0.0, (dense,)),
+            LodLevel(1.0, (coarse,)),
+        )),
     )
-    scene: QGraphicsScene = QGraphicsScene()
     renderer = QtVectorRenderer()
+
+    # 缩小（每像素地图单位大）：选粗级别，顶点大幅减少。
+    coarse_scene = QGraphicsScene()
+    coarse_items = renderer.render_layer(
+        coarse_scene,
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),
+        z_value=0.0,
+        map_units_per_pixel=10.0,
+    )
+    coarse_item = next(item for item in coarse_items if isinstance(item, QGraphicsPathItem))
+    assert coarse_item.path().elementCount() < len(coordinates) / 4
+
+    # 放大（每像素地图单位小）：选原始级别，保留全部顶点。
+    fine_scene = QGraphicsScene()
+    fine_items = renderer.render_layer(
+        fine_scene,
+        LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),
+        z_value=0.0,
+        map_units_per_pixel=0.001,
+    )
+    fine_item = next(item for item in fine_items if isinstance(item, QGraphicsPathItem))
+    assert fine_item.path().elementCount() >= len(coordinates)
+    assert application is not None
+
+
+def test_renderer_cross_fades_between_lod_levels() -> None:
+    """每像素地图单位落在两级之间时，应同时绘制两级并淡化过渡。"""
+    application: QApplication = QApplication.instance() or QApplication([])
+    coordinates = tuple(
+        (index * 0.01, math.sin(index / 4.0) * 0.02)
+        for index in range(2000)
+    )
+    dense = Feature(fid=1, geometry=LineString(coordinates), attributes={})
+    coarse = Feature(fid=1, geometry=LineString(coordinates[::200]), attributes={})
+    layer = replace(
+        VectorLayer.create(
+            layer_id="dense-line",
+            name="高密度线",
+            features=(dense,),
+            crs=CRS.from_epsg(4326),
+        ),
+        lod=LodPyramid((
+            LodLevel(0.0, (dense,)),
+            LodLevel(1.0, (coarse,)),
+        )),
+    )
+    renderer = QtVectorRenderer()
+    scene = QGraphicsScene()
 
     items = renderer.render_layer(
         scene,
         LayerSnapshot(layer=layer, visible=True, selected_feature_ids=()),
         z_value=0.0,
-        map_units_per_pixel=0.1,
+        map_units_per_pixel=0.5,
     )
 
-    item = next(item for item in items if isinstance(item, QGraphicsPathItem))
-    assert item.path().elementCount() < len(coordinates) / 4
+    path_items = [item for item in items if isinstance(item, QGraphicsPathItem)]
+    assert len(path_items) == 2
+    element_counts = sorted(item.path().elementCount() for item in path_items)
+    assert element_counts[0] < len(coordinates) / 4
+    assert element_counts[1] >= len(coordinates)
+    # 淡化因子 t=0.5 时，两级透明度一致（都乘 1 - t 与 t）。
+    assert abs(path_items[0].opacity() - path_items[1].opacity()) < 1e-9
     assert application is not None
 
 

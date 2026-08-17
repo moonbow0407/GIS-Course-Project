@@ -126,6 +126,7 @@ from app.presentation.widgets.layer_properties_dialog import LayerPropertiesDial
 from app.presentation.widgets.layer_reprojection_worker import LayerReprojectionWorker
 from app.presentation.widgets.layout_toolbar import LayoutToolbar
 from app.presentation.widgets.layout_view import LayoutView
+from app.presentation.widgets.lod_build_worker import LodBuildWorker
 from app.presentation.widgets.map_canvas import MapCanvas
 from app.presentation.widgets.new_layer_dialog import NewLayerDialog
 from app.presentation.widgets.open_data_worker import OpenDataWorker
@@ -291,6 +292,8 @@ class MainWindow(QMainWindow):
         # 视口金字塔读取独立于分析/重投影任务；旧请求完成后按编号丢弃。
         self._viewport_request_id: int = 0
         self._viewport_workers: dict[tuple[int, str], RasterViewportWorker] = {}
+        # 矢量 LOD 金字塔在图层加入后串行后台构建；失败时静默回退完整几何。
+        self._lod_workers: dict[str, LodBuildWorker] = {}
         # 每图层正在运行的读取标识与允许提交结果的请求代次：
         # 同参数读取未完成时不再起新线程，并收养在跑 worker 的结果。
         self._viewport_layer_running: dict[str, tuple[tuple, int]] = {}
@@ -636,6 +639,7 @@ class MainWindow(QMainWindow):
             "new_layer": self._new_layer,
             "open_project": self._open_project,
             "save_project": self._save_project_action,
+            "toggle_lod": self._toggle_lod,
             "zoom_in": self._map_canvas.zoom_in,
             "zoom_out": self._map_canvas.zoom_out,
             "pan": self._map_canvas.set_pan_tool,
@@ -972,6 +976,9 @@ class MainWindow(QMainWindow):
                     initial_display_crs,
                 ),
             )
+            # 图层加入后异步构建 LOD 金字塔；栅格图层自动跳过。
+            if isinstance(payload, VectorLayer):
+                self._schedule_lod_build(result.layer_id)
         finally:
             self._end_open_data_result()
 
@@ -1111,6 +1118,68 @@ class MainWindow(QMainWindow):
         self._open_data_warnings = []
         self._open_data_handling_result = False
         self._ribbon.set_action_enabled("open_data", True)
+
+    def _toggle_lod(self) -> None:
+        """切换矢量 LOD 金字塔开关。
+
+        开启时为所有已有矢量图层启动后台构建；关闭时清除全部图层已挂载
+        的金字塔并恢复完整几何渲染。按钮勾选状态是界面唯一事实来源。
+        """
+        enabled: bool = self._ribbon.action_checked("toggle_lod")
+        self._application.set_lod_enabled(enabled)
+        if enabled:
+            self._schedule_lod_for_all_layers()
+        self._refresh_workspace()
+
+    def _schedule_lod_for_all_layers(self) -> None:
+        """LOD 开关开启时为工作区所有矢量图层启动后台构建。"""
+        layer_snapshot: LayerSnapshot
+        for layer_snapshot in self._application.snapshot().layers:
+            if isinstance(layer_snapshot.layer, VectorLayer):
+                self._schedule_lod_build(layer_snapshot.layer.layer_id)
+
+    def _schedule_lod_build(self, layer_id: str) -> None:
+        """为已加入的矢量图层启动后台 LOD 构建，避免同一图层重复排队。"""
+        if layer_id in self._lod_workers:
+            return
+        try:
+            layer, source_revision = self._application.start_layer_lod_build(layer_id)
+        except (ApplicationError, ValueError):
+            return
+        worker = LodBuildWorker(
+            partial(self._application.build_layer_lod, layer),
+            self,
+        )
+        self._lod_workers[layer_id] = worker
+        worker.completed.connect(
+            partial(self._on_lod_built, layer_id, source_revision)
+        )
+        worker.failed.connect(partial(self._on_lod_failed, layer_id))
+        worker.finished.connect(partial(self._on_lod_finished, layer_id, worker))
+        worker.start()
+
+    def _on_lod_built(
+        self,
+        layer_id: str,
+        source_revision: int,
+        pyramid: object,
+    ) -> None:
+        """在主线程提交 LOD 金字塔；图层已变化或已删除时静默丢弃。"""
+        try:
+            self._application.commit_layer_lod(layer_id, pyramid, source_revision)
+        except (ApplicationError, ValueError):
+            return
+        self._refresh_workspace()
+
+    def _on_lod_failed(self, layer_id: str, error: object) -> None:
+        """LOD 构建失败时静默回退到完整几何，不打扰用户。"""
+        del layer_id, error
+
+    def _on_lod_finished(self, layer_id: str, worker: LodBuildWorker) -> None:
+        """释放已结束的 LOD 构建 worker。"""
+        if self._lod_workers.get(layer_id) is worker:
+            self._lod_workers.pop(layer_id, None)
+        worker.deleteLater()
 
     def _queue_raster_overviews(self, snapshot: WorkspaceSnapshot) -> None:
         """把尚未检查或源版本已变化的文件栅格加入自动优化队列。"""
@@ -1402,6 +1471,8 @@ class MainWindow(QMainWindow):
             view_state=result.view_state, preserve_view=False
         )
         self._restore_layout(result.layout_state)
+        if self._application.lod_enabled:
+            self._schedule_lod_for_all_layers()
         for warning in result.warnings:
             self.statusBar().showMessage(warning, 5000)
         self._ready_label.setText(f"已打开工程  {path.name}")
@@ -1427,6 +1498,8 @@ class MainWindow(QMainWindow):
         self._clear_undo_history()
         self._refresh_workspace(result.view_state)
         self._restore_layout(result.layout_state)
+        if self._application.lod_enabled:
+            self._schedule_lod_for_all_layers()
         self._ready_label.setText(f"已打开工程  {result.path.name}")
         save_recent_project(Path(path_string))
         if result.warnings:
@@ -5411,6 +5484,10 @@ class MainWindow(QMainWindow):
         for viewport_worker in tuple(self._viewport_workers.values()):
             if viewport_worker.isRunning():
                 viewport_worker.wait(3000)
+        # LOD 构建只读不可变图层快照，关闭前等待自然结束即可。
+        for lod_worker in tuple(self._lod_workers.values()):
+            if lod_worker.isRunning():
+                lod_worker.wait(3000)
         reprojection_worker = self._reprojection_worker
         if reprojection_worker is not None and reprojection_worker.isRunning():
             reprojection_worker.request_cancel()
