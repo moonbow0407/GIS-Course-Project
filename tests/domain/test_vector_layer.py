@@ -89,3 +89,57 @@ def test_default_style_matches_geometry_family(
 
     assert style.fill_color == expected_fill
     assert style.point_size == expected_point_size
+
+
+@pytest.mark.parametrize(
+    ("family_value", "expected_fill", "expected_point_size", "expected_stroke"),
+    [
+        ("point", "#2f7de1", 8.0, "#1769d2"),
+        ("line", "transparent", 0.0, "#f28c28"),
+        ("polygon", "#9ec5fe", 0.0, "#2f7de1"),
+    ],
+)
+def test_default_style_matches_geometry_family_value_string(
+    family_value: str,
+    expected_fill: str,
+    expected_point_size: float,
+    expected_stroke: str,
+) -> None:
+    """QComboBox 会把 GeometryFamily 存成字符串，默认样式必须按值匹配。
+
+    用 is 判断时点图层会得到 point_size=0（看不见），线图层会得到面填充
+    （看起来像新建了面）。
+    """
+    style: LayerStyle = LayerStyle.for_geometry_family(family_value)
+
+    assert style.fill_color == expected_fill
+    assert style.point_size == expected_point_size
+    assert style.stroke_color == expected_stroke
+
+
+def test_empty_layer_from_combo_string_keeps_typed_family_and_style() -> None:
+    """新建空白图层收到 Qt 下发的几何类型字符串时应规范为枚举并配对应样式。"""
+    layer: VectorLayer = VectorLayer.create(
+        name="新建图层",
+        features=(),
+        crs=CRS.from_epsg(4326),
+        geometry_family="line",
+    )
+
+    assert layer.geometry_family is GeometryFamily.LINE
+    assert layer.style.fill_color == "transparent"
+    assert layer.style.stroke_color == "#f28c28"
+
+
+def test_empty_point_layer_from_combo_string_has_visible_point_style() -> None:
+    """新建空白点图层不能落到面样式，否则数字化的点大小为 0 不可见。"""
+    layer: VectorLayer = VectorLayer.create(
+        name="新建图层",
+        features=(),
+        crs=CRS.from_epsg(4326),
+        geometry_family="point",
+    )
+
+    assert layer.geometry_family is GeometryFamily.POINT
+    assert layer.style.point_size == 8.0
+    assert layer.style.fill_color == "#2f7de1"

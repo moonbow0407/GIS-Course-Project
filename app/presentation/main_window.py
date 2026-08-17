@@ -1398,6 +1398,7 @@ class MainWindow(QMainWindow):
         dialog: NewLayerDialog = NewLayerDialog(
             display_crs=snapshot.display_crs,
             parent=self,
+            existing_names=tuple(layer.name for layer in snapshot.layers),
         )
         if dialog.exec() != NewLayerDialog.DialogCode.Accepted:
             return
@@ -1433,7 +1434,7 @@ class MainWindow(QMainWindow):
                 geometry_family=geometry_family,
                 crs=crs,
             )
-        except ValueError as error:
+        except (ApplicationError, ValueError) as error:
             QMessageBox.warning(self, "新建图层失败", str(error))
             return
 

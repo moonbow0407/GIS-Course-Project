@@ -844,7 +844,15 @@ class GisApplication:
 
         返回:
             包含新建图层编号和最新工作区快照的结果。
+
+        异常:
+            ApplicationError: 名称与工作区已有图层重复时抛出。
         """
+        stripped_name: str = name.strip()
+        if any(layer.name == stripped_name for layer in self._document.layers):
+            raise ApplicationError(
+                f"图层名称「{stripped_name}」已存在，请使用其他名称。"
+            )
         # 为该空白图层预留本地文件路径，支持后续新增要素等操作。
         # 空图层无需立即写出文件——首次新增要素时由 append_feature 写回。
         base_dir: Path = (
@@ -853,12 +861,12 @@ class GisApplication:
             else Path.cwd()
         )
         safe_name: str = "".join(
-            c if c not in '<>:"/\\|?*' else "_" for c in name
+            c if c not in '<>:"/\\|?*' else "_" for c in stripped_name
         ).rstrip(".")
         output_path: Path = (base_dir / f"{safe_name}.geojson").resolve()
 
         layer: VectorLayer = VectorLayer.create(
-            name=name,
+            name=stripped_name,
             features=(),
             crs=crs,
             source_path=output_path,

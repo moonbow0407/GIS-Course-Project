@@ -33,9 +33,16 @@ class LayerStyle:
     opacity: float
 
     @classmethod
-    def for_geometry_family(cls, family: GeometryFamily) -> "LayerStyle":
-        """根据几何类别创建稳定且高对比度的默认样式。"""
-        if family is GeometryFamily.POINT:
+    def for_geometry_family(cls, family: GeometryFamily | str) -> "LayerStyle":
+        """根据几何类别创建稳定且高对比度的默认样式。
+
+        QComboBox 会把 GeometryFamily 存成字符串值；必须按值比较，
+        不能用 is，否则点和线都会落到默认面样式。
+        """
+        resolved: GeometryFamily = (
+            family if isinstance(family, GeometryFamily) else GeometryFamily(family)
+        )
+        if resolved == GeometryFamily.POINT:
             return cls(
                 stroke_color="#1769d2",
                 fill_color="#2f7de1",
@@ -43,7 +50,7 @@ class LayerStyle:
                 point_size=8.0,
                 opacity=1.0,
             )
-        if family is GeometryFamily.LINE:
+        if resolved == GeometryFamily.LINE:
             return cls(
                 stroke_color="#f28c28",
                 fill_color="transparent",

@@ -1,5 +1,7 @@
 """新建空白图层对话框。"""
 
+from collections.abc import Collection
+
 from pyproj import CRS
 from PySide6.QtWidgets import (
     QComboBox,
@@ -21,6 +23,21 @@ _GEOMETRY_ITEMS: tuple[tuple[str, GeometryFamily], ...] = (
     ("线 (Polyline)", GeometryFamily.LINE),
     ("面 (Polygon)", GeometryFamily.POLYGON),
 )
+_DEFAULT_LAYER_NAME: str = "新建图层"
+
+
+def suggest_unique_layer_name(
+    existing_names: Collection[str],
+    base: str = _DEFAULT_LAYER_NAME,
+) -> str:
+    """返回不与已有图层冲突的默认名称。"""
+    taken: set[str] = set(existing_names)
+    if base not in taken:
+        return base
+    index: int = 2
+    while f"{base} {index}" in taken:
+        index += 1
+    return f"{base} {index}"
 
 
 class NewLayerDialog(QDialog):
@@ -30,19 +47,24 @@ class NewLayerDialog(QDialog):
         self,
         display_crs: CRS | None = None,
         parent: QWidget | None = None,
+        existing_names: tuple[str, ...] = (),
     ) -> None:
         """构造新建图层参数窗口。
 
         参数:
             display_crs: 当前地图显示坐标系，用于提示信息。
             parent: 父窗口。
+            existing_names: 工作区已有图层名称，用于避开重名。
         """
         super().__init__(parent)
         self.setWindowTitle("新建空白图层")
         self.setMinimumWidth(420)
+        self._existing_names: frozenset[str] = frozenset(existing_names)
 
         # --- 图层名称 ---
-        self._name_edit: QLineEdit = QLineEdit("新建图层")
+        self._name_edit: QLineEdit = QLineEdit(
+            suggest_unique_layer_name(self._existing_names)
+        )
 
         # --- 几何类型 ---
         self._geometry_combo: QComboBox = QComboBox()
@@ -88,8 +110,12 @@ class NewLayerDialog(QDialog):
         return self._name_edit.text().strip()
 
     def geometry_family(self) -> GeometryFamily:
-        """返回用户选择的几何类型。"""
-        return self._geometry_combo.currentData()
+        """返回用户选择的几何类型。
+
+        QComboBox.currentData() 对 str Enum 只回传字符串值，这里必须
+        转回 GeometryFamily，否则点和线会套用默认面样式。
+        """
+        return GeometryFamily(self._geometry_combo.currentData())
 
     def crs_text(self) -> str:
         """返回用户输入的坐标系文本，为空表示使用地图 CRS。"""
@@ -104,6 +130,13 @@ class NewLayerDialog(QDialog):
         name: str = self.layer_name()
         if not name:
             QMessageBox.warning(self, "参数无效", "图层名称不能为空。")
+            return
+        if name in self._existing_names:
+            QMessageBox.warning(
+                self,
+                "参数无效",
+                f"图层名称「{name}」已存在，请使用其他名称。",
+            )
             return
 
         crs_input: str = self.crs_text()

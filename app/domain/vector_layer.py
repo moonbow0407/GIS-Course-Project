@@ -95,6 +95,13 @@ class VectorLayer:
         当显式传入 geometry_family 时允许空要素，用于新建空白图层；
         否则通过自动检测派生几何类别，空要素时抛出 ValueError。
         """
+        # Qt 下拉框会把 str Enum 存成裸字符串；先规范成枚举，后续 is / == 才可靠。
+        if self.geometry_family is not None and not isinstance(
+            self.geometry_family, GeometryFamily
+        ):
+            object.__setattr__(
+                self, "geometry_family", GeometryFamily(self.geometry_family)
+            )
         # 显式指定几何类型时允许空图层（新建空白图层场景）。
         if self.geometry_family is not None and not self.features:
             empty_bounds: Bounds = (0.0, 0.0, 0.0, 0.0)

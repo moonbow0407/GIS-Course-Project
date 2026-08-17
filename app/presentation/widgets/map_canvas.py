@@ -264,7 +264,24 @@ class MapCanvas(QGraphicsView):
             (minimum_x, minimum_y, maximum_x, maximum_y)
         )
         self._map_scene_rect = map_scene_rect
-        self._scene.setSceneRect(map_scene_rect)
+        # setSceneRect 会按新范围钳制滚动条，缩放/平移后的视图中心可能被
+        # 拉回场景中部，导致数字化的新要素落到视口外。场景范围已能容纳
+        # 地图范围时不重复设置，保持视图和图层图元签名稳定；需要扩展时
+        # 使用与 _ensure_pan_area 相同的"地图 ∪ 三倍视口"范围，保证后续
+        # 刷新幂等，centerOn 的目标始终可达。
+        if not self._scene.sceneRect().contains(map_scene_rect):
+            viewport_rect: QRectF = self._visible_scene_rect()
+            expanded_rect: QRectF = map_scene_rect.united(
+                viewport_rect.adjusted(
+                    -viewport_rect.width(),
+                    -viewport_rect.height(),
+                    viewport_rect.width(),
+                    viewport_rect.height(),
+                )
+            )
+            view_center: QPointF = self.mapToScene(self.viewport().rect().center())
+            self._scene.setSceneRect(expanded_rect)
+            self.centerOn(view_center)
         if is_first_load:
             # 点符号使用屏幕像素定义尺寸；首次加载必须先适配真实数据范围，
             # 否则这里仍沿用空画布的 1000×700 场景变换，导致小范围经纬度点被巨幅放大。
@@ -2572,7 +2589,14 @@ class MapCanvas(QGraphicsView):
                 viewport_rect.height(),
             )
         )
-        if self._scene.sceneRect().contains(required_rect):
+        # centerOn 通过整数像素滚动条定位，与 fitInView 的精确变换存在
+        # 亚像素偏差；比较时保留 2 像素容差，避免该偏差反复触发扩展，
+        # 导致同一视图下每次快照刷新都重建全部图元。
+        tolerance_x: float = self._map_units_per_pixel * 2.0
+        tolerance_y: float = self._map_units_per_pixel * 2.0
+        if self._scene.sceneRect().contains(
+            required_rect.adjusted(tolerance_x, tolerance_y, -tolerance_x, -tolerance_y)
+        ):
             return
         view_center: QPointF = self.mapToScene(self.viewport().rect().center())
         self._scene.setSceneRect(required_rect)
